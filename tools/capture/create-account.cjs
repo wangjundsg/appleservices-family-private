@@ -1,4 +1,4 @@
-// End-to-end Apple Account creation driver.
+﻿// End-to-end Apple Account creation driver.
 //
 // One browser session carries the whole flow: create form -> email code ->
 // phone code -> done. Codes are fetched from this account's own mailbox
@@ -12,13 +12,27 @@
 //
 // Usage:
 //   node tools/capture/create-account.cjs \
-//     --email 111@abc-temp-2026.shop --jwt <address_jwt> \
+//     --email 111@abc-temp-2026.shop --jwt <address_jwt> --password <pw> \
 //     --phone 5182460055 --activation 1112400649 --hero-key <key> \
 //     --outdir .cache\acct-01 --await-captcha .cache\captcha-answer.txt \
+//     [--mail-from apple.com,icloud.com] \
 //     [--profile .cache\acct-01\profile.json] [--egress-ip 203.0.113.7]
+//
+// --password is mandatory (or APPLESERVICES_PASSWORD): review item A1 removed
+// the literal default the script used to fall back to, so a forgotten flag can
+// no longer create an account with a password that is public in this repo.
+//
+// Exit codes (review item B4 — success needs evidence, not hope):
+//   0  state=success       an explicit terminal screen was read back
+//   1  state=failed        the run provably did not create the account
+//   2  usage               refused before the first network operation
+//   3  state=unknown       a submit may or may not have landed; re-read, never replay
+//   4  state=waiting_input the code never arrived; the account is still mid-flow
+// The last line of run.jsonl always carries the same terminal state.
 
 const fs = require("node:fs");
 const path = require("node:path");
+const flow = require("./account-flow.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
 
 const MAIL_HOST = "https://abc-temp-2026.shop";
@@ -44,7 +58,23 @@ const phone = String(arg("phone", ""));
 const activation = String(arg("activation", ""));
 const heroKey = String(arg("hero-key", ""));
 const awaitCaptcha = String(arg("await-captcha", ""));
-const password = String(arg("password", "Kq7#mZp2vLt9"));
+// Review A1: no default password, and the check runs here — before the account
+// directory is created and long before the browser makes its first request.
+const passwordResolution = flow.resolvePassword(arg("password", ""), process.env.APPLESERVICES_PASSWORD);
+if (!passwordResolution.password) {
+  console.error(
+    JSON.stringify(flow.missingPasswordReport("create-account.cjs", "the Apple Account creation form requires a password")),
+  );
+  process.exit(flow.EXIT_CODES.usage);
+}
+const password = passwordResolution.password;
+// Senders a verification mail may come from; Apple's own domains by default.
+// --mail-from keeps the check configurable without weakening it (review B5).
+const mailFrom = String(arg("mail-from", "") || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const senderDomains = mailFrom.length ? mailFrom : flow.DEFAULT_SENDER_DOMAINS;
 // Frozen fingerprint input/output. --profile is the file to read; --egress-ip is
 // what the caller already measured for this run, never probed here.
 const profilePath = String(arg("profile", ""));
@@ -52,27 +82,39 @@ const egressIP = String(arg("egress-ip", ""));
 fs.mkdirSync(outdir, { recursive: true });
 
 const log = [];
+const clip = (text, max) => String(text || "").slice(0, max);
 function note(kind, data) {
   log.push({ t: Date.now(), kind, ...data });
   if (["error", "step"].includes(kind)) console.log(kind, JSON.stringify(data).slice(0, 300));
 }
 
+// writeRunLog always writes the accumulated log; the terminal record is added by
+// the caller so the last line of run.jsonl is the state of the run (review B4).
+// A write failure is reported but never masks the outcome that is being logged.
+function writeRunLog() {
+  try {
+    fs.writeFileSync(path.join(outdir, "run.jsonl"), log.map((x) => JSON.stringify(x)).join("\n"), "utf8");
+  } catch (e) {
+    console.error("run.jsonl write failed:", clip(e && e.message ? e.message : e, 160));
+  }
+}
+
+// Module scope so the failure handler can stamp the terminal record too.
+const startedAt = Date.now();
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// latestEmailCode returns {code, messageId, created_at} or null.
+// Review B5: newest mail first, addressed to this run's mailbox, from a trusted
+// sender, subject carrying verification semantics. The previous version took the
+// first "<b>6 digits</b>" out of the first ten messages in API order.
 async function latestEmailCode(since) {
   const res = await fetch(`${MAIL_HOST}/api/mails?limit=10&offset=0`, {
     headers: { Authorization: `Bearer ${jwt}` },
   });
   if (!res.ok) throw new Error(`mail api ${res.status}`);
   const body = await res.json();
-  for (const mail of body.results || []) {
-    const created = Date.parse((mail.created_at || "").replace(" ", "T") + "Z");
-    if (since && created && created < since) continue;
-    // Apple renders the code as <b>123456</b> inside the HTML part.
-    const hit = /<b>(\d{6})<\/b>/.exec(mail.raw || "");
-    if (hit) return hit[1];
-  }
-  return "";
+  return flow.pickEmailCode(body.results || [], { address: email, senderDomains, since });
 }
 
 async function smsCode() {
@@ -335,7 +377,7 @@ async function captchaImage(fr) {
 }
 // Apple can show the image captcha on any step, including the phone step
 // ("Security Code Error"). Solve it the same way as on the first form.
-async function solveCaptcha(fr, tag) {
+async function solveCaptcha(page, fr, tag) {
   const answerFile = path.resolve(arg("await-captcha", ".cache/captcha-answer.txt"));
   fs.rmSync(answerFile, { force: true });
   await captchaImage(fr)
@@ -350,20 +392,80 @@ async function solveCaptcha(fr, tag) {
   await fr.fill('input[name="captcha"]', answer);
   await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
   await sleep(1000);
-  await clickContinue(fr);
+  await clickContinue(page, fr, tag);
   await sleep(8000);
   return answer;
 }
 
-async function clickContinue(frame) {
+// readPhase is a read-only snapshot of the current step. `formVisible` means
+// the controls of the form we were about to submit are still on screen, and
+// `signature` is what is compared to prove the screen did not change.
+async function readPhase(page) {
+  const frame = await widgetFrame(page);
+  if (!frame) return { framePresent: false, formVisible: false, signature: "" };
+  const readback = await frame
+    .evaluate(() => {
+      const form = document.querySelector(
+        'input[type="tel"], input[name="captcha"], input[name="password"], input[type="password"]',
+      );
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 240);
+      const controls = [...document.querySelectorAll("input,button,select")]
+        .map((el) => `${el.tagName}:${el.getAttribute("name") || el.id || (el.innerText || "").trim().slice(0, 20)}`)
+        .join("|");
+      return { formVisible: Boolean(form), text, controls };
+    })
+    .catch(() => null);
+  if (!readback) return { framePresent: true, formVisible: false, signature: "" };
+  return {
+    framePresent: true,
+    formVisible: readback.formVisible,
+    signature: `${frame.url()}#${readback.text}#${readback.controls}`,
+  };
+}
+
+// clickContinue carries review item A3. The old version answered a click
+// timeout with `click({force:true})`, which can submit the same form twice and
+// leaves nothing in the log to tell which submit landed. A timeout is now a
+// decision point: read the page back and only click again when the readback
+// proves nothing was submitted (widget still there, form still there, screen
+// unchanged). Anything else is "result unknown" and the run exits non-zero.
+async function clickContinue(page, frame, tag = "") {
   const btn = frame.locator('button[type="submit"], button:has-text("Continue")').first();
-  await btn.click({ timeout: 15000 }).catch(async () => {
-    await btn.click({ force: true }).catch(() => {});
+  const before = await readPhase(page);
+  try {
+    await btn.click({ timeout: 15000 });
+    return { clicked: true, retried: false };
+  } catch (e) {
+    note("step", { at: "click-timeout", tag, error: clip(e && e.message ? e.message : e, 160) });
+  }
+  // Let a possible navigation settle first: the readback has to describe the
+  // page the click produced, not the one it was fired from.
+  await sleep(1500);
+  const after = await readPhase(page);
+  const sameScreen = Boolean(before.signature) && before.signature === after.signature;
+  const verdict = flow.clickTimeoutOutcome({
+    framePresent: after.framePresent,
+    formVisible: after.formVisible,
+    sameScreen,
   });
+  note("step", {
+    at: "click-timeout-readback",
+    tag,
+    verdict,
+    form_visible: after.formVisible,
+    same_screen: sameScreen,
+  });
+  if (verdict !== "retry") {
+    const err = new Error(`click timed out and the submission result is unknown (${tag || "continue"})`);
+    err.state = "unknown";
+    err.evidence = `click-timeout:${tag || "continue"}`;
+    throw err;
+  }
+  await btn.click({ force: true }).catch(() => {});
+  return { clicked: true, retried: true };
 }
 
 (async () => {
-  const startedAt = Date.now();
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
@@ -470,19 +572,42 @@ async function clickContinue(frame) {
     },
   );
   const page = await context.newPage();
+  // Review A2: this listener used to copy up to 1200 bytes of every
+  // validate/captcha response body into run.jsonl, which echoed the submitted
+  // identifier and the captcha verdict. Only status, path and an Apple error
+  // code are kept now.
   page.on("response", async (res) => {
     const u = res.url();
     if (!/account\/validate|validation\/appleid|captcha/.test(u)) return;
     let body = "";
     try {
-      body = (await res.text()).slice(0, 1200);
+      body = await res.text();
     } catch {}
-    note("http", { url: u, status: res.status(), body });
+    note("http", flow.summarizeHTTP({ url: u, status: res.status(), body }));
   });
 
-  const shot = async (name) => {
+  // Screenshot helper. `maskAuth` paints a black block over the authentication
+  // inputs before the capture (review A2: the code-filled screenshot used to
+  // show the six digits). The AuthKit form lives in a cross-origin iframe, so
+  // page.addStyleTag cannot reach it — the style has to be injected into the
+  // widget frame itself, and removed again so later steps are unaffected.
+  const AUTH_MASK_CSS = `
+    input[type="tel"], input[name="captcha"] {
+      color: transparent !important;
+      background-color: #000 !important;
+      caret-color: transparent !important;
+      text-shadow: none !important;
+    }`;
+  const shot = async (name, { maskAuth = false } = {}) => {
+    let styleHandle = null;
+    if (maskAuth) {
+      const current = await widgetFrame(page);
+      if (current) styleHandle = await current.addStyleTag({ content: AUTH_MASK_CSS }).catch(() => null);
+      if (styleHandle) await sleep(150);
+    }
     const file = path.join(outdir, `${name}.png`);
     await page.screenshot({ path: file }).catch(() => {});
+    if (styleHandle) await styleHandle.evaluate((el) => el.remove()).catch(() => {});
     fs.writeFileSync(path.join(outdir, `${name}.txt`), await widgetText(page), "utf8");
   };
 
@@ -579,7 +704,7 @@ async function clickContinue(frame) {
     await fr.fill('input[name="captcha"]', answer);
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
-    await clickContinue(fr);
+    await clickContinue(page, fr, `create-submit-${attempt}`);
     await sleep(9000);
     await shot(`01-submit-${attempt}`);
     const stillForm = await (await widgetFrame(page))
@@ -599,47 +724,101 @@ async function clickContinue(frame) {
   if (!submitted) throw new Error("captcha never accepted");
   await shot("02-after-submit");
 
+  // Review B4: the flow used to end with an unconditional `done` + exit 0, so an
+  // error page, a terms wall or an unrecognised screen all counted as a created
+  // account. Each screen is now classified (email_step / phone_step / success /
+  // unknown) and only an explicit terminal page is success. The objective
+  // cross-check the review suggests as an alternative (`used=true` on a re-submit
+  // of the same address) needs a second captcha solve inside the same session,
+  // which this driver does not implement — so an unclear ending is reported as
+  // `unknown` with a non-zero exit instead of being upgraded to success.
+  let finalState = "unknown";
+  let finalEvidence = "";
   for (let step = 1; step <= 8; step += 1) {
-    const text = (await widgetText(page)).replace(/\s+/g, " ");
-    note("step", { at: `screen-${step}`, text: text.slice(0, 300) });
     const current = await widgetFrame(page);
-    if (!current) break;
+    const text = (await widgetText(page)).replace(/\s+/g, " ");
+    if (!current) {
+      // The widget can disappear because the flow finished (Apple lands on the
+      // account page) or because the session died. Only the explicit terminal
+      // page counts; everything else is unknown, never success.
+      const verdict = flow.classifyScreen({ text, url: page.url() });
+      note("step", { at: `screen-${step}`, state: verdict, text: text.slice(0, 300) });
+      if (verdict === "success") {
+        finalState = "success";
+        finalEvidence = `terminal-page:${step}`;
+        break;
+      }
+      finalState = "unknown";
+      finalEvidence = "widget-frame-missing";
+      break;
+    }
 
     if (await current.locator('input[name="captcha"]').count().catch(() => 0)) {
-      const answer = await solveCaptcha(current, `captcha-step${step}`);
-      note("step", { at: "inline-captcha", step, answer });
+      const answer = await solveCaptcha(page, current, `captcha-step${step}`);
+      note("step", { at: "inline-captcha", step, answered: Boolean(answer) });
       continue;
     }
 
-    let code = "";
-    if (/verif(y|ication) (your )?email|Enter the verification code sent to/i.test(text) && /@/.test(text)) {
-      code = await waitFor(() => latestEmailCode(startedAt), 180000, "email-code");
-      note("step", { at: "email-code", code });
-    } else if (/phone|SMS|text message|mobile/i.test(text)) {
-      code = await waitFor(smsCode, 180000, "sms-code");
-      note("step", { at: "sms-code", code });
-    } else {
-      await shot(`0${step + 1}-final`);
+    const verdict = flow.classifyScreen({ text, url: page.url() });
+    note("step", { at: `screen-${step}`, state: verdict, text: text.slice(0, 300) });
+    if (verdict === "success") {
+      finalState = "success";
+      finalEvidence = `terminal-screen:${step}`;
+      break;
+    }
+    if (verdict === "unknown") {
+      finalState = "unknown";
+      finalEvidence = `unrecognized-screen:${step}`;
       break;
     }
 
+    const stepStartedAt = Date.now();
+    const picked =
+      verdict === "email_step"
+        ? await waitFor(() => latestEmailCode(startedAt), 180000, "email-code")
+        : await waitFor(smsCode, 180000, "sms-code");
+    const code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
+    // Review A2: the log records that a code arrived, how long it took and which
+    // message it came from — never the code itself.
+    note("step", {
+      at: verdict,
+      ...flow.codeLogEntry({
+        received: Boolean(code),
+        elapsedMs: Date.now() - stepStartedAt,
+        messageId: picked && picked.messageId ? picked.messageId : "",
+      }),
+    });
     if (!code) {
       await shot(`0${step + 1}-no-code`);
+      finalState = "waiting_input";
+      finalEvidence = `${verdict}-code-timeout`;
       break;
     }
     await fillDigits(current, code);
-    await shot(`0${step + 1}-code-filled`);
-    await clickContinue(current);
+    // Review A2: mask the authentication inputs before this screenshot.
+    await shot(`0${step + 1}-code-filled`, { maskAuth: true });
+    await clickContinue(page, current, verdict);
     await sleep(9000);
-    await shot(`0${step + 1}-after`);
+    await shot(`0${step + 1}-after`, { maskAuth: true });
   }
+  if (!finalEvidence) finalEvidence = "no-terminal-screen";
 
-  fs.writeFileSync(path.join(outdir, "run.jsonl"), log.map((x) => JSON.stringify(x)).join("\n"), "utf8");
-  await browser.close();
-  console.log(`done steps=${log.length}`);
+  // The terminal record goes last so a reader of run.jsonl sees the same state
+  // this process exits with.
+  note("final", { state: finalState, evidence: clip(finalEvidence, 160), elapsed_ms: Date.now() - startedAt });
+  writeRunLog();
+  // A close failure must not turn a recorded outcome into a second final record.
+  await browser.close().catch(() => {});
+  console.log(JSON.stringify({ state: finalState, evidence: finalEvidence, outdir }));
+  process.exit(flow.EXIT_CODES[finalState] ?? flow.EXIT_CODES.failed);
 })().catch(async (e) => {
-  note("error", { error: String(e) });
-  fs.writeFileSync(path.join(outdir, "run.jsonl"), log.map((x) => JSON.stringify(x)).join("\n"), "utf8");
-  console.error("failed:", e);
-  process.exit(1);
+  // Review B4: a thrown error is a named outcome too — `unknown` when a submit
+  // may have landed, `failed` when it provably did not — and it is the last
+  // record of run.jsonl either way.
+  const state = e && e.state === "unknown" ? "unknown" : "failed";
+  note("error", { error: clip(e && e.message ? e.message : e, 300) });
+  note("final", { state, evidence: clip((e && e.evidence) || "", 160), elapsed_ms: Date.now() - startedAt });
+  writeRunLog();
+  console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200) }));
+  process.exit(flow.EXIT_CODES[state]);
 });

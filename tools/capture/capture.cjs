@@ -9,10 +9,14 @@
 // Usage:
 //   node tools/capture/capture.cjs --outdir .cache/capture            (headless)
 //   node tools/capture/capture.cjs --headless=false                    (visible Chrome)
-//   node tools/capture/capture.cjs --email you@yourdomain.tld          (fill email step)
+//   node tools/capture/capture.cjs --email you@yourdomain.tld --password <pw>
+// --password (or APPLESERVICES_PASSWORD) is required as soon as --email is
+// given: review item A1 removed the hard-coded default, and the refusal happens
+// before the browser makes its first request.
 
 const fs = require("node:fs");
 const path = require("node:path");
+const flow = require("./account-flow.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
 
 function arg(name, fallback) {
@@ -33,6 +37,19 @@ const headless = String(arg("headless", "true")) !== "false";
 const startURL = arg("url", "https://appleid.apple.com/account");
 const email = arg("email", "");
 const proxy = arg("proxy", "");
+
+// Review A1: the form fill used to fall back to a literal password that is part
+// of this repository, so a run without --password still produced a usable
+// account whose secret everyone can read. There is no default any more, and the
+// refusal happens before the browser exists — i.e. before the first request.
+const passwordResolution = flow.resolvePassword(arg("password", ""), process.env.APPLESERVICES_PASSWORD);
+const password = passwordResolution.password;
+if (email && !password) {
+  console.error(
+    JSON.stringify(flow.missingPasswordReport("capture.cjs", "--email fills the creation form, which needs a password")),
+  );
+  process.exit(flow.EXIT_CODES.usage);
+}
 
 fs.mkdirSync(outdir, { recursive: true });
 
@@ -207,8 +224,10 @@ async function shot(page, name) {
     await selects.nth(2).selectOption(arg("day", "18")).catch((e) => record("select-error", { label: "day", error: String(e) }));
     await selects.nth(3).selectOption(arg("year", "1992")).catch((e) => record("select-error", { label: "year", error: String(e) }));
     await fill('input[name="appleId"]', email);
-    await fill('input[name="password"]', arg("password", "Kq7#mZp2vLt9"));
-    await fill('input[name="confirmPassword"]', arg("password", "Kq7#mZp2vLt9"));
+    // Review A1: no literal default; the run already refused to start without
+    // --password (or APPLESERVICES_PASSWORD) when --email was given.
+    await fill('input[name="password"]', password);
+    await fill('input[name="confirmPassword"]', password);
     await f.selectOption('select[name="phoneCode"]', arg("phonecc", "US")).catch((e) =>
       record("select-error", { label: "phonecc", error: String(e) }),
     );

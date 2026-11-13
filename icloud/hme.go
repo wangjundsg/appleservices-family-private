@@ -362,13 +362,23 @@ func (c *HideMyEmailClient) UseWebSession(ctx context.Context, web WebSession) e
 			if strings.TrimSpace(setupBase) == "" {
 				setupBase = hmeSetupBase
 			}
-			if err := c.accountLoginAt(ctx, state, false, setupBase); err != nil {
+			candidate, err := c.loginCandidate(ctx, state, false, setupBase)
+			if err != nil {
 				lastErr = err
 				continue
 			}
-			if dsid := strings.TrimSpace(web.DSID); dsid != "" && c.session.DSID != dsid {
+			// Review item B6: every check runs against the in-memory candidate
+			// before anything is persisted, so a mismatching DSID leaves the
+			// session file byte-for-byte untouched. Previously the handshake
+			// saved the session and only then compared the DSID, which left a
+			// rejected web session on disk.
+			if dsid := strings.TrimSpace(web.DSID); dsid != "" && candidate.DSID != dsid {
 				c.restoreSession(previousJar, previousHTTP, previousSession)
 				return errors.New("iCloud Web 会话与 iCloud 返回的账号标识不一致")
+			}
+			if err := c.adoptSession(candidate); err != nil {
+				c.restoreSession(previousJar, previousHTTP, previousSession)
+				return err
 			}
 			return nil
 		}
@@ -572,42 +582,73 @@ type hmeAccountLoginResult struct {
 	TermsUpdateNeeded bool `json:"termsUpdateNeeded"`
 }
 
+// accountLogin adopts the session Apple reports for a freshly authenticated
+// password/trusted-device login. That path has already proven the account
+// binding, so the candidate is adopted (and persisted) right away.
 func (c *HideMyEmailClient) accountLogin(ctx context.Context, state *hmeAuthState, acceptTerms bool) error {
 	return c.accountLoginAt(ctx, state, acceptTerms, c.setupBaseFor(state.accountCountry))
 }
 
+// accountLoginAt is accountLogin against an explicit setup host.
 func (c *HideMyEmailClient) accountLoginAt(ctx context.Context, state *hmeAuthState, acceptTerms bool, setupBase string) error {
+	candidate, err := c.loginCandidate(ctx, state, acceptTerms, setupBase)
+	if err != nil {
+		return err
+	}
+	return c.adoptSession(candidate)
+}
+
+// loginCandidate runs Apple's accountLogin handshake and returns the session it
+// describes without touching c.session, the cookie jar or the account
+// directory. Review item B6: callers that still have to cross-check the session
+// (UseWebSession compares the caller-supplied DSID) must be able to reject it
+// before a single byte reaches the disk — the previous order saved first and
+// compared afterwards, so a rejected web session was already persisted.
+func (c *HideMyEmailClient) loginCandidate(ctx context.Context, state *hmeAuthState, acceptTerms bool, setupBase string) (hmeSession, error) {
 	loginBody, _ := json.Marshal(map[string]any{"dsWebAuthToken": state.sessionToken, "accountCountryCode": state.accountCountry, "extended_login": true, "trustToken": state.trustToken})
 	data, err := c.hmeSetupRequest(ctx, http.MethodPost, setupBase+"/accountLogin", loginBody)
 	if err != nil {
-		return errors.New("Apple iCloud Web session establishment failed")
+		return hmeSession{}, errors.New("Apple iCloud Web session establishment failed")
 	}
 	var result hmeAccountLoginResult
 	if json.Unmarshal(data, &result) != nil || result.DSInfo.DSID == "" {
-		return errors.New("iCloud+ Hide My Email is unavailable for this account")
+		return hmeSession{}, errors.New("iCloud+ Hide My Email is unavailable for this account")
 	}
 	if result.TermsUpdateNeeded {
 		if !acceptTerms {
-			return ErrHMEWebRepairRequired
+			return hmeSession{}, ErrHMEWebRepairRequired
 		}
 		if err := c.acceptHMEWebTerms(ctx, setupBase, result.DSInfo.LanguageCode); err != nil {
-			return err
+			return hmeSession{}, err
 		}
 		data, err = c.hmeSetupRequest(ctx, http.MethodPost, setupBase+"/accountLogin", loginBody)
 		result = hmeAccountLoginResult{}
 		if err != nil || json.Unmarshal(data, &result) != nil || result.TermsUpdateNeeded {
-			return errors.New("Apple 未确认 iCloud Web 条款接受状态")
+			return hmeSession{}, errors.New("Apple 未确认 iCloud Web 条款接受状态")
 		}
 	}
 	if result.Webservices["premiummailsettings"].URL == "" {
-		return errors.New("iCloud+ Hide My Email is unavailable for this account")
+		return hmeSession{}, errors.New("iCloud+ Hide My Email is unavailable for this account")
 	}
-	c.session = hmeSession{AppleID: c.appleID, DSID: result.DSInfo.DSID, ClientID: randomHex(16), ServiceURL: strings.TrimRight(result.Webservices["premiummailsettings"].URL, "/"), AccountCountry: state.accountCountry}
-	serviceURL, _ := url.Parse(c.session.ServiceURL)
+	candidate := hmeSession{AppleID: c.appleID, DSID: result.DSInfo.DSID, ClientID: randomHex(16), ServiceURL: strings.TrimRight(result.Webservices["premiummailsettings"].URL, "/"), AccountCountry: state.accountCountry}
+	serviceURL, _ := url.Parse(candidate.ServiceURL)
 	if err := validateHMEWebCookies(c.jar.Cookies(serviceURL)); err != nil {
+		return hmeSession{}, err
+	}
+	return candidate, nil
+}
+
+// adoptSession binds an already validated candidate to this client and writes
+// it atomically. A failed write rolls the in-memory session back, so memory and
+// disk never disagree about which account this client is bound to.
+func (c *HideMyEmailClient) adoptSession(candidate hmeSession) error {
+	previous := c.session
+	c.session = candidate
+	if err := c.saveSession(); err != nil {
+		c.session = previous
 		return err
 	}
-	return c.saveSession()
+	return nil
 }
 
 func (c *HideMyEmailClient) hmeSetupRequest(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {

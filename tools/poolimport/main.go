@@ -1,20 +1,26 @@
 // Command poolimport imports mailbox addresses into the mailbox pool service.
 //
-// The pool exposes POST {base}/api/v1/mailbox-pool/import with an X-API-Key
-// header. It treats request_id as an idempotency key, so this tool keeps a
-// local ledger keyed by request_id:
+// The pool exposes POST {base}/api/v1/mailbox-pool/import. request_id is the
+// server's idempotency key: the same key replays the stored receipt instead of
+// importing twice, so this tool keeps a local ledger bound to request_id AND to
+// the normalised endpoint (scheme + host + path):
 //
-//   - same request_id and same content hash: replay the recorded outcome, no
+//   - same endpoint, same request_id, same body: print the recorded verdict, no
 //     HTTP request is made;
-//   - same request_id and different content: conflict, non-zero exit, the
-//     ledger is left untouched;
-//   - outcome unknown (timeout / transport error / 5xx / 408 / 429): the entry
-//     stays pending and the next run resends the very same request_id instead
-//     of inventing a new one.
+//   - same endpoint, same request_id, different body: conflict, non-zero exit,
+//     the ledger is left untouched;
+//   - another endpoint never sees this endpoint's entry, so switching services
+//     always sends.
 //
-// Because a failed or pending import is bound to its request_id, retrying with
-// different content requires a new request_id; that is what keeps the server's
-// idempotency key meaningful.
+// An outcome that is not a server verdict (transport error, timeout, 202, 408,
+// 429, 5xx, missing/invalid receipt) keeps the entry pending and the next run
+// resends the very same request_id. A 4xx rejection is a verdict and is never
+// resent. The state machine is:
+//
+//	done     all items succeeded                    exit 0
+//	partial  some items succeeded                   exit 1, per-item results kept
+//	failed   the server rejected every item / 4xx   exit 1, not resent
+//	pending  the outcome is unknown (verdict unknown) exit 1, replayed
 //
 // Usage:
 //
@@ -24,22 +30,17 @@
 // Input file:
 //
 //	{
-//	  "source": "icloud-hme",
-//	  "source_account_id": "acct-0001",
-//	  "request_id": "hme-acct-0001-20261113",
+//	  "apple_account_id": "acct-0001",
+//	  "request_id": "6f1f0b52-5c4e-4a1e-9a3f-1d2c3b4a5e6f",
 //	  "items": [
-//	    {"address": "abc@privaterelay.appleid.com", "alias": "netflix", "delivery_ref": "hme-1", "tag": "streaming"}
+//	    {"base_address": "abc@privaterelay.appleid.com", "tag_address": "abc+netflix@privaterelay.appleid.com"}
 //	  ]
 //	}
 //
-// A bare JSON array of items is also accepted; then -source,
-// -source-account-id and -request-id must be given on the command line.
+// The api key is never printed. Only request_id, item count, state, per-item
+// results and HTTP status go to stdout.
 //
-// The api key, cookies and any token value are never printed. Only request_id,
-// item count, state and HTTP status go to stdout (plus the fully masked request
-// in -dry-run).
-//
-// Exit codes: 0 done / idempotent replay / dry-run, 1 failed or outcome
+// Exit codes: 0 done / cached done / dry-run, 1 failed, partial or outcome
 // unknown, 2 usage or input error, 3 request_id conflict.
 package main
 
@@ -65,14 +66,28 @@ const (
 	importPath       = "/api/v1/mailbox-pool/import"
 	defaultStatePath = ".cache/poolimport-state.json"
 	defaultTimeout   = 30 * time.Second
-	ledgerVersion    = 1
+	ledgerVersion    = 2
 
+	maxItems         = 100
 	maxResponseBytes = 1 << 20
 	maxStoredResult  = 4 << 10
 
-	statePending = "pending"
+	// lockStaleAfter is how long a lock file may sit untouched before another
+	// run may take it over. A running import holds it for one request only.
+	lockStaleAfter = 10 * time.Minute
+
+	statePending = "pending" // outcome unknown: the same request_id replays
 	stateDone    = "done"
+	statePartial = "partial"
 	stateFailed  = "failed"
+
+	verdictImported  = "imported"
+	verdictUnchanged = "unchanged"
+	verdictPartial   = "partial"
+	verdictFailed    = "failed"
+	verdictUnknown   = "unknown"
+
+	replayNote = "同一 request_id 会重放并返回原回执；只有服务端确认失败后才可新建操作"
 
 	exitOK       = 0
 	exitFailure  = 1
@@ -82,37 +97,48 @@ const (
 
 // item is one mailbox entry as accepted by the pool import endpoint.
 type item struct {
-	Address     string `json:"address"`
-	Alias       string `json:"alias,omitempty"`
-	DeliveryRef string `json:"delivery_ref,omitempty"`
-	Tag         string `json:"tag,omitempty"`
+	BaseAddress string `json:"base_address"`
+	TagAddress  string `json:"tag_address,omitempty"`
 }
 
 // inputDoc is the on-disk input file. request_id doubles as the ledger key.
 type inputDoc struct {
-	Source          string `json:"source"`
-	SourceAccountID string `json:"source_account_id"`
-	RequestID       string `json:"request_id"`
-	Items           []item `json:"items"`
+	AppleAccountID string `json:"apple_account_id"`
+	RequestID      string `json:"request_id"`
+	Items          []item `json:"items"`
 }
 
 // requestBody is the exact JSON document posted to the pool.
 type requestBody struct {
-	Source          string `json:"source"`
-	SourceAccountID string `json:"source_account_id"`
-	Items           []item `json:"items"`
-	RequestID       string `json:"request_id"`
+	RequestID      string `json:"request_id"`
+	AppleAccountID string `json:"apple_account_id"`
+	Items          []item `json:"items"`
+}
+
+// itemResult is one entry of the server receipt's results array.
+type itemResult struct {
+	BaseAddress string `json:"base_address"`
+	Success     bool   `json:"success"`
+	Code        string `json:"code"`
+	HTTPStatus  int    `json:"http_status"`
+	Outcome     string `json:"outcome"`
 }
 
 type ledgerEntry struct {
-	RequestID     string `json:"request_id"`
-	ContentSHA256 string `json:"content_sha256"`
-	State         string `json:"state"`
-	Attempts      int    `json:"attempts"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	Result        string `json:"result,omitempty"`
-	UpdatedAt     string `json:"updated_at"`
+	Endpoint      string       `json:"endpoint"`
+	RequestID     string       `json:"request_id"`
+	ContentSHA256 string       `json:"content_sha256"`
+	State         string       `json:"state"`
+	Verdict       string       `json:"verdict,omitempty"`
+	Attempts      int          `json:"attempts"`
+	HTTPStatus    int          `json:"http_status,omitempty"`
+	Imported      int          `json:"imported"`
+	Unchanged     int          `json:"unchanged"`
+	Failed        int          `json:"failed"`
+	Results       []itemResult `json:"results,omitempty"`
+	LastError     string       `json:"last_error,omitempty"`
+	Result        string       `json:"result,omitempty"`
+	UpdatedAt     string       `json:"updated_at"`
 }
 
 type ledger struct {
@@ -121,15 +147,12 @@ type ledger struct {
 }
 
 type config struct {
-	base            string
-	apiKey          string
-	statePath       string
-	input           string
-	source          string
-	sourceAccountID string
-	requestID       string
-	timeout         time.Duration
-	dryRun          bool
+	base      string
+	apiKey    string
+	statePath string
+	input     string
+	timeout   time.Duration
+	dryRun    bool
 }
 
 func main() {
@@ -137,24 +160,24 @@ func main() {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `poolimport — 邮箱池导入（request_id 幂等）
+	fmt.Fprint(w, `poolimport — 邮箱池导入（request_id 幂等，失败按原键重放）
 
 用法:
-  poolimport -base URL [-api-key KEY] [-state PATH] [-dry-run] FILE
-  poolimport -base URL ... [-source S] [-source-account-id ID] [-request-id RID] -input FILE
+  poolimport -base URL [-api-key KEY] [-state PATH] [-timeout D] [-dry-run] FILE
 
 参数:
-  -base               池服务根地址，如 http://127.0.0.1:8788
-  -api-key            X-API-Key；缺省读环境变量 POOL_API_KEY
-  -state              本地幂等台账，默认 .cache/poolimport-state.json
-  -input              输入 JSON；也可作为唯一位置参数传入
-  -source             覆盖输入文件里的 source（裸数组输入时必填）
-  -source-account-id  覆盖输入文件里的 source_account_id（裸数组输入时必填）
-  -request-id         覆盖输入文件里的 request_id（裸数组输入时必填）
-  -timeout            单次请求超时，默认 30s
-  -dry-run            只打印将发送的请求（api key 隐藏），不写台账、不发请求
+  -base     池服务根地址，如 http://127.0.0.1:8788
+  -api-key  X-API-Key；缺省读环境变量 POOL_API_KEY
+  -state    本地幂等台账，默认 .cache/poolimport-state.json（同目录 .lock 保护）
+  -input    输入 JSON；也可作为唯一位置参数传入
+  -timeout  单次请求超时，默认 30s
+  -dry-run  只打印将发送的请求（api key 隐藏），不写台账、不发请求
 
-退出码: 0 成功/幂等返回/演练, 1 失败或结果未知, 2 用法或输入错误, 3 request_id 冲突
+输入文件:
+  {"apple_account_id": "...", "request_id": "<UUID v4>", "items": [{"base_address": "...", "tag_address": "..."}]}
+  items 必须 1~100 条，同一批次 base_address 不得重复（服务端会整批 400）。
+
+退出码: 0 全部成功/命中已完成台账/演练, 1 部分成功、失败或结果未知, 2 用法或输入错误, 3 request_id 冲突
 `)
 }
 
@@ -187,9 +210,6 @@ func parseArgs(args []string, stderr io.Writer) (*config, error) {
 	flags.StringVar(&cfg.apiKey, "api-key", "", "X-API-Key（缺省读 POOL_API_KEY）")
 	flags.StringVar(&cfg.statePath, "state", "", "本地幂等台账路径")
 	flags.StringVar(&cfg.input, "input", "", "输入 JSON 文件")
-	flags.StringVar(&cfg.source, "source", "", "覆盖 source")
-	flags.StringVar(&cfg.sourceAccountID, "source-account-id", "", "覆盖 source_account_id")
-	flags.StringVar(&cfg.requestID, "request-id", "", "覆盖 request_id")
 	flags.DurationVar(&cfg.timeout, "timeout", defaultTimeout, "单次请求超时")
 	flags.BoolVar(&cfg.dryRun, "dry-run", false, "只打印将发送的请求")
 	if err := flags.Parse(args); err != nil {
@@ -215,52 +235,59 @@ func execute(cfg *config, stdout, stderr io.Writer) int {
 	if err != nil {
 		return usageError(stderr, err)
 	}
-	applyOverrides(doc, cfg)
-	items, err := normalizeItems(doc.Items)
+	body, err := buildRequest(doc)
 	if err != nil {
-		return usageError(stderr, err)
-	}
-	body := requestBody{
-		Source:          strings.TrimSpace(doc.Source),
-		SourceAccountID: strings.TrimSpace(doc.SourceAccountID),
-		Items:           items,
-		RequestID:       strings.TrimSpace(doc.RequestID),
-	}
-	if err := validateBody(body); err != nil {
 		return usageError(stderr, err)
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return usageError(stderr, fmt.Errorf("编码请求体失败: %w", err))
 	}
-	sum := sha256.Sum256(encoded)
+	// The digest covers the endpoint too: the same request_id against another
+	// pool is a different operation, never a cache hit.
+	sum := sha256.Sum256(append([]byte(endpoint+"\n"), encoded...))
 	contentSHA := hex.EncodeToString(sum[:])
+	key := ledgerKey(endpoint, body.RequestID)
 
 	if !cfg.dryRun && cfg.apiKey == "" {
 		return usageError(stderr, errors.New("缺少 api key：-api-key 或环境变量 POOL_API_KEY"))
 	}
+	if cfg.dryRun {
+		ld, loadErr := loadLedger(cfg.statePath)
+		if loadErr != nil {
+			return usageError(stderr, loadErr)
+		}
+		return reportDryRun(stdout, stderr, cfg, endpoint, body, encoded, classify(ld.Entries[key], contentSHA))
+	}
+
+	// The lock covers the whole read-decide-send-save cycle: two runs sharing a
+	// ledger must not interleave an in-flight request with a cached verdict.
+	unlock, lockErr := acquireLock(lockPath(cfg.statePath), time.Now(), stderr)
+	if lockErr != nil {
+		fmt.Fprintf(stderr, "poolimport: %v\n", lockErr)
+		return exitFailure
+	}
+	defer unlock()
 
 	ld, err := loadLedger(cfg.statePath)
 	if err != nil {
 		return usageError(stderr, err)
 	}
-	entry := ld.Entries[body.RequestID]
+	entry := ld.Entries[key]
 	plan := classify(entry, contentSHA)
 
-	if cfg.dryRun {
-		return reportDryRun(stdout, stderr, cfg, endpoint, body, encoded, plan)
-	}
-
-	switch plan {
-	case planConflict:
-		printStatus(stdout, body.RequestID, len(body.Items), "conflict", 0, false)
-		fmt.Fprintf(stderr, "conflict: request_id %s 已按不同内容登记，台账未改动\n", body.RequestID)
+	if plan == planConflict {
+		fmt.Fprintf(stdout, "request_id=%s items=%d state=conflict\n", body.RequestID, len(body.Items))
+		fmt.Fprintf(stderr, "conflict: request_id %s 已在 %s 按不同内容登记，台账未改动\n", body.RequestID, endpoint)
 		return exitConflict
-	case planCached:
-		printStatus(stdout, body.RequestID, len(body.Items), entry.State, entry.HTTPStatus, true)
+	}
+	if plan == planCached {
+		printStatus(stdout, body.RequestID, len(body.Items), entry, true)
+		printResults(stdout, entry.Results)
 		if entry.State == stateDone {
 			return exitOK
 		}
+		fmt.Fprintf(stderr, "poolimport: state=%s，未重发；%s\n", entry.State, replayNote)
 		return exitFailure
 	}
 
@@ -268,13 +295,16 @@ func execute(cfg *config, stdout, stderr io.Writer) int {
 	// mid-flight, the next run knows the outcome is unknown and replays the
 	// same request_id instead of starting a fresh import.
 	if entry == nil {
-		entry = &ledgerEntry{RequestID: body.RequestID, ContentSHA256: contentSHA}
-		ld.Entries[body.RequestID] = entry
+		entry = &ledgerEntry{Endpoint: endpoint, RequestID: body.RequestID}
+		ld.Entries[key] = entry
 	}
 	entry.ContentSHA256 = contentSHA
 	entry.State = statePending
+	entry.Verdict = verdictUnknown
 	entry.Attempts++
 	entry.HTTPStatus = 0
+	entry.Imported, entry.Unchanged, entry.Failed = 0, 0, 0
+	entry.Results = nil
 	entry.LastError = ""
 	if err := record(cfg.statePath, ld, entry); err != nil {
 		fmt.Fprintf(stderr, "poolimport: 台账写入失败，未发送请求: %v\n", err)
@@ -283,40 +313,47 @@ func execute(cfg *config, stdout, stderr io.Writer) int {
 
 	result := post(cfg, endpoint, encoded)
 	entry.HTTPStatus = result.status
-	if result.err != nil {
-		entry.State = statePending
-		entry.LastError = redact(result.err.Error(), cfg.apiKey)
-		if err := record(cfg.statePath, ld, entry); err != nil {
-			fmt.Fprintf(stderr, "poolimport: 台账写入失败: %v\n", err)
-			return exitFailure
-		}
-		printStatus(stdout, body.RequestID, len(body.Items), statePending, 0, false)
-		fmt.Fprintf(stderr, "poolimport: %s；已记 pending，下次运行用同一 request_id 重放（attempt=%d）\n", entry.LastError, entry.Attempts)
-		return exitFailure
-	}
-
 	entry.Result = truncate(result.body, maxStoredResult)
-	entry.LastError = ""
 	switch {
-	case result.status >= 200 && result.status < 300:
-		entry.State = stateDone
-	case result.status == http.StatusRequestTimeout, result.status == http.StatusTooManyRequests, result.status >= 500:
-		// The server answered, but the import outcome is not a verdict.
+	case result.err != nil:
 		entry.State = statePending
-		entry.LastError = fmt.Sprintf("server returned HTTP %d", result.status)
-	default:
+		entry.Verdict = verdictUnknown
+		entry.LastError = redact(result.err.Error(), cfg.apiKey)
+	case outcomeFor(result.status) == outcomeUnknown:
+		entry.State = statePending
+		entry.Verdict = verdictUnknown
+		entry.LastError = fmt.Sprintf("服务端返回 HTTP %d，结果未知", result.status)
+	case outcomeFor(result.status) == outcomeRejected:
 		entry.State = stateFailed
+		entry.Verdict = verdictFailed
+		entry.LastError = fmt.Sprintf("服务端返回 HTTP %d，判定为业务失败", result.status)
+	default:
+		results, receiptErr := parseReceipt(result.body, body.RequestID, len(body.Items))
+		if receiptErr != nil {
+			entry.State = statePending
+			entry.Verdict = verdictUnknown
+			entry.LastError = fmt.Sprintf("回执不可用（HTTP %d）：%v", result.status, receiptErr)
+			break
+		}
+		entry.Results = results
+		entry.State, entry.Verdict, entry.Imported, entry.Unchanged, entry.Failed = summarize(results)
+		entry.LastError = ""
 	}
 	if err := record(cfg.statePath, ld, entry); err != nil {
 		fmt.Fprintf(stderr, "poolimport: 台账写入失败: %v\n", err)
 		return exitFailure
 	}
-	printStatus(stdout, body.RequestID, len(body.Items), entry.State, entry.HTTPStatus, false)
-	if entry.State != stateDone {
-		fmt.Fprintf(stderr, "poolimport: request_id %s 未成功（state=%s），未重发；确需重试请换新的 request_id\n", body.RequestID, entry.State)
-		return exitFailure
+
+	printStatus(stdout, body.RequestID, len(body.Items), entry, false)
+	printResults(stdout, entry.Results)
+	if entry.State == stateDone {
+		return exitOK
 	}
-	return exitOK
+	if entry.LastError != "" {
+		fmt.Fprintf(stderr, "poolimport: %s\n", entry.LastError)
+	}
+	fmt.Fprintf(stderr, "poolimport: %s\n", replayNote)
+	return exitFailure
 }
 
 type plan int
@@ -333,7 +370,7 @@ func (p plan) String() string {
 	case planSend:
 		return "send"
 	case planReplay:
-		return "resend-pending"
+		return "replay-pending"
 	case planCached:
 		return "cached"
 	case planConflict:
@@ -356,8 +393,95 @@ func classify(entry *ledgerEntry, contentSHA string) plan {
 	}
 }
 
+type transportOutcome int
+
+const (
+	outcomeReceipt transportOutcome = iota
+	outcomeUnknown
+	outcomeRejected
+)
+
+// outcomeFor maps a status code to what the client may conclude from it. 202 is
+// an acknowledgement, not a verdict; 408 and 429 ask for the same key again.
+func outcomeFor(status int) transportOutcome {
+	switch {
+	case status == http.StatusAccepted:
+		return outcomeUnknown
+	case status >= 200 && status < 300:
+		return outcomeReceipt
+	case status == http.StatusRequestTimeout, status == http.StatusTooManyRequests:
+		return outcomeUnknown
+	case status >= 500:
+		return outcomeUnknown
+	case status >= 400:
+		return outcomeRejected
+	default:
+		return outcomeUnknown
+	}
+}
+
+// parseReceipt checks the pool receipt before any of it may become a local
+// verdict: the request_id echo must match (the server lower-cases it), results
+// must be a JSON array, and it must carry one entry per item.
+func parseReceipt(body, requestID string, want int) ([]itemResult, error) {
+	var receipt struct {
+		RequestID string          `json:"request_id"`
+		Results   json.RawMessage `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(body), &receipt); err != nil {
+		return nil, fmt.Errorf("回执不是合法 JSON: %v", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(receipt.RequestID), requestID) {
+		return nil, errors.New("回执 request_id 与请求不一致")
+	}
+	raw := bytes.TrimSpace(receipt.Results)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil, errors.New("回执缺少 results 数组")
+	}
+	var results []itemResult
+	if err := json.Unmarshal(raw, &results); err != nil {
+		return nil, fmt.Errorf("回执 results 解析失败: %v", err)
+	}
+	if len(results) != want {
+		return nil, fmt.Errorf("回执 results 条目数 %d 与请求的 %d 条不一致", len(results), want)
+	}
+	return results, nil
+}
+
+// summarize turns per-item results into the run verdict. A missing success is a
+// rejected item; an outcome other than "unchanged" on a successful item counts
+// as an import.
+func summarize(results []itemResult) (state, verdict string, imported, unchanged, failed int) {
+	for _, r := range results {
+		switch {
+		case !r.Success:
+			failed++
+		case r.Outcome == "unchanged":
+			unchanged++
+		default:
+			imported++
+		}
+	}
+	switch {
+	case failed == 0:
+		state = stateDone
+		if imported > 0 {
+			verdict = verdictImported
+		} else {
+			verdict = verdictUnchanged
+		}
+	case imported+unchanged == 0:
+		state = stateFailed
+		verdict = verdictFailed
+	default:
+		state = statePartial
+		verdict = verdictPartial
+	}
+	return state, verdict, imported, unchanged, failed
+}
+
 func reportDryRun(stdout, stderr io.Writer, cfg *config, endpoint string, body requestBody, encoded []byte, p plan) int {
-	fmt.Fprintf(stdout, "dry-run request_id=%s items=%d state=%s url=%s\n", body.RequestID, len(body.Items), p, endpoint)
+	fmt.Fprintf(stdout, "dry-run request_id=%s items=%d plan=%s url=%s\n", body.RequestID, len(body.Items), p, endpoint)
 	keyHeader := "(unset)"
 	if cfg.apiKey != "" {
 		keyHeader = "***"
@@ -365,7 +489,7 @@ func reportDryRun(stdout, stderr io.Writer, cfg *config, endpoint string, body r
 	fmt.Fprintf(stdout, "dry-run headers: Content-Type: application/json; X-API-Key: %s\n", keyHeader)
 	fmt.Fprintf(stdout, "dry-run body: %s\n", encoded)
 	if p == planConflict {
-		fmt.Fprintf(stderr, "conflict: request_id %s 已按不同内容登记，台账未改动\n", body.RequestID)
+		fmt.Fprintf(stderr, "conflict: request_id %s 已在 %s 按不同内容登记，台账未改动\n", body.RequestID, endpoint)
 		return exitConflict
 	}
 	return exitOK
@@ -417,6 +541,9 @@ func transportError(err error, timeout time.Duration) error {
 	return fmt.Errorf("请求失败，结果未知: %v", err)
 }
 
+// endpointURL returns the normalised import endpoint: scheme + host + path with
+// no credentials, query or fragment. The ledger is keyed on it, so two spellings
+// of the same service share one entry and two services never do.
 func endpointURL(base string) (string, error) {
 	base = strings.TrimSpace(base)
 	if base == "" {
@@ -436,6 +563,7 @@ func endpointURL(base string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("-base 不应带查询串或 fragment")
 	}
+	u.Host = strings.ToLower(u.Host)
 	u.RawQuery = ""
 	u.Fragment = ""
 	endpoint := strings.TrimRight(u.String(), "/")
@@ -444,6 +572,10 @@ func endpointURL(base string) (string, error) {
 	}
 	return endpoint + importPath, nil
 }
+
+func ledgerKey(endpoint, requestID string) string { return endpoint + " " + requestID }
+
+func lockPath(statePath string) string { return statePath + ".lock" }
 
 func readInput(path string) (*inputDoc, error) {
 	if strings.TrimSpace(path) == "" {
@@ -454,17 +586,10 @@ func readInput(path string) (*inputDoc, error) {
 		return nil, fmt.Errorf("读取输入文件失败: %w", err)
 	}
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 {
+	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errors.New("输入文件为空")
 	}
 	doc := &inputDoc{}
-	if trimmed[0] == '[' {
-		if err := decodeStrict(data, &doc.Items); err != nil {
-			return nil, fmt.Errorf("解析输入文件失败: %w", err)
-		}
-		return doc, nil
-	}
 	if err := decodeStrict(data, doc); err != nil {
 		return nil, fmt.Errorf("解析输入文件失败: %w", err)
 	}
@@ -483,46 +608,121 @@ func decodeStrict(data []byte, v any) error {
 	return nil
 }
 
-func applyOverrides(doc *inputDoc, cfg *config) {
-	if v := strings.TrimSpace(cfg.source); v != "" {
-		doc.Source = v
+// buildRequest validates and normalises the batch the way the server does:
+// lower-cased addresses, 1~100 items, no duplicate base_address in one batch.
+func buildRequest(doc *inputDoc) (requestBody, error) {
+	body := requestBody{
+		RequestID:      strings.TrimSpace(doc.RequestID),
+		AppleAccountID: strings.TrimSpace(doc.AppleAccountID),
 	}
-	if v := strings.TrimSpace(cfg.sourceAccountID); v != "" {
-		doc.SourceAccountID = v
+	if body.RequestID == "" {
+		return body, errors.New("缺少 request_id")
 	}
-	if v := strings.TrimSpace(cfg.requestID); v != "" {
-		doc.RequestID = v
+	if !validUUIDv4(body.RequestID) {
+		return body, fmt.Errorf("request_id %q 不是 UUID v4：服务端把它当幂等键，必须形如 xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx", body.RequestID)
+	}
+	if body.AppleAccountID == "" {
+		return body, errors.New("缺少 apple_account_id")
+	}
+	if len(doc.Items) < 1 {
+		return body, errors.New("items 为空：至少 1 条")
+	}
+	if len(doc.Items) > maxItems {
+		return body, fmt.Errorf("items %d 条超过服务端上限 %d 条", len(doc.Items), maxItems)
+	}
+	seen := make(map[string]bool, len(doc.Items))
+	body.Items = make([]item, 0, len(doc.Items))
+	for i, raw := range doc.Items {
+		base := strings.ToLower(strings.TrimSpace(raw.BaseAddress))
+		tag := strings.ToLower(strings.TrimSpace(raw.TagAddress))
+		if base == "" {
+			return body, fmt.Errorf("items[%d] 缺少 base_address", i)
+		}
+		if seen[base] {
+			return body, fmt.Errorf("items[%d] 的 base_address %s 与本批次重复（服务端会整批 400）", i, base)
+		}
+		seen[base] = true
+		body.Items = append(body.Items, item{BaseAddress: base, TagAddress: tag})
+	}
+	return body, nil
+}
+
+// validUUIDv4 reports whether id is a canonical UUID v4 (8-4-4-4-12 hex digits,
+// version nibble 4, variant 10xx). Implemented here so the tool keeps its
+// dependency set; the server accepts any canonical UUID but the pool issues v4.
+func validUUIDv4(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		switch i {
+		case 8, 13, 18, 23:
+			if id[i] != '-' {
+				return false
+			}
+		default:
+			if !isHexDigit(id[i]) {
+				return false
+			}
+		}
+	}
+	return id[14] == '4' && strings.ContainsRune("89abAB", rune(id[19]))
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+type lockOwner struct {
+	PID       int    `json:"pid"`
+	StartedAt string `json:"started_at"`
+}
+
+// acquireLock takes the single-instance lock next to the ledger. O_EXCL makes
+// the create the atomic test, so two runs cannot both win. A lock left behind by
+// a dead run (older than lockStaleAfter) is taken over with a log line instead
+// of blocking the import forever.
+func acquireLock(path string, now time.Time, log io.Writer) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("创建台账目录失败: %w", err)
+	}
+	for attempt := 0; ; attempt++ {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			payload, _ := json.Marshal(lockOwner{PID: os.Getpid(), StartedAt: now.UTC().Format(time.RFC3339)})
+			// A failed write only shortens the stale-detection window; the lock
+			// itself already exists.
+			_, _ = file.Write(payload)
+			file.Close()
+			return func() { os.Remove(path) }, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("创建锁文件 %s 失败: %w", path, err)
+		}
+		owner, age := lockAge(path, now)
+		if attempt > 0 || age <= lockStaleAfter {
+			return nil, fmt.Errorf("另一个 poolimport 实例正在运行（锁 %s，pid=%d，起始于 %s）；本次未发送任何请求", path, owner.PID, owner.StartedAt)
+		}
+		fmt.Fprintf(log, "poolimport: 接管陈旧锁 %s（pid=%d 起始于 %s，已 %.0f 分钟，超过 %s）\n",
+			path, owner.PID, owner.StartedAt, age.Minutes(), lockStaleAfter)
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("移除陈旧锁 %s 失败: %w", path, err)
+		}
 	}
 }
 
-func normalizeItems(items []item) ([]item, error) {
-	out := make([]item, len(items))
-	for i, it := range items {
-		out[i] = item{
-			Address:     strings.TrimSpace(it.Address),
-			Alias:       strings.TrimSpace(it.Alias),
-			DeliveryRef: strings.TrimSpace(it.DeliveryRef),
-			Tag:         strings.TrimSpace(it.Tag),
-		}
-		if out[i].Address == "" {
-			return nil, fmt.Errorf("items[%d] 缺少 address", i)
-		}
+func lockAge(path string, now time.Time) (lockOwner, time.Duration) {
+	var owner lockOwner
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &owner)
 	}
-	return out, nil
-}
-
-func validateBody(body requestBody) error {
-	switch {
-	case body.Source == "":
-		return errors.New("缺少 source：输入文件字段或 -source")
-	case body.SourceAccountID == "":
-		return errors.New("缺少 source_account_id：输入文件字段或 -source-account-id")
-	case body.RequestID == "":
-		return errors.New("缺少 request_id：输入文件字段或 -request-id")
-	case len(body.Items) == 0:
-		return errors.New("items 为空")
+	if started, err := time.Parse(time.RFC3339, owner.StartedAt); err == nil {
+		return owner, now.Sub(started)
 	}
-	return nil
+	if info, err := os.Stat(path); err == nil {
+		return owner, now.Sub(info.ModTime())
+	}
+	return owner, 0 // unreadable lock: treat as fresh and refuse
 }
 
 func loadLedger(path string) (*ledger, error) {
@@ -540,14 +740,14 @@ func loadLedger(path string) (*ledger, error) {
 		return nil, fmt.Errorf("台账解析失败（%s），未做任何改动: %w", path, err)
 	}
 	if ld.Version != ledgerVersion {
-		return nil, fmt.Errorf("台账版本不支持（%d），未做任何改动", ld.Version)
+		return nil, fmt.Errorf("台账版本不支持（%d，当前 %d）：换一个 -state 或先归档旧台账", ld.Version, ledgerVersion)
 	}
 	if ld.Entries == nil {
 		ld.Entries = map[string]*ledgerEntry{}
 	}
-	for id, e := range ld.Entries {
+	for key, e := range ld.Entries {
 		if e.RequestID == "" {
-			e.RequestID = id
+			e.RequestID = key
 		}
 	}
 	return &ld, nil
@@ -592,12 +792,19 @@ func saveLedger(path string, ld *ledger) error {
 	return os.Rename(tmpName, path)
 }
 
-func printStatus(w io.Writer, requestID string, items int, state string, status int, cached bool) {
-	line := fmt.Sprintf("request_id=%s items=%d state=%s http=%d", requestID, items, state, status)
+func printStatus(w io.Writer, requestID string, items int, entry *ledgerEntry, cached bool) {
+	line := fmt.Sprintf("request_id=%s items=%d state=%s verdict=%s imported=%d unchanged=%d failed=%d http=%d",
+		requestID, items, entry.State, entry.Verdict, entry.Imported, entry.Unchanged, entry.Failed, entry.HTTPStatus)
 	if cached {
 		line += " cached=true"
 	}
 	fmt.Fprintln(w, line)
+}
+
+func printResults(w io.Writer, results []itemResult) {
+	for _, r := range results {
+		fmt.Fprintf(w, "  base=%s success=%t code=%s http=%d outcome=%s\n", r.BaseAddress, r.Success, r.Code, r.HTTPStatus, r.Outcome)
+	}
 }
 
 func truncate(s string, limit int) string {

@@ -1,6 +1,7 @@
 package icloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -298,6 +299,74 @@ func TestUseWebSessionRejectsUnusableBrowserCookies(t *testing.T) {
 	}
 	if _, listErr := client.List(ctx); !errors.Is(listErr, ErrHMEAuthenticationRequired) {
 		t.Fatalf("missing session did not fall back to authentication: %v", listErr)
+	}
+}
+
+// Review item B6: the DSID returned by Apple is a cross-check on the caller's
+// session, so it has to be compared in memory. Before this test the handshake
+// persisted the session first and compared afterwards, which left a rejected
+// web session in the account directory. A mismatch must leave the file exactly
+// as it was (or absent when there was none).
+func TestUseWebSessionDSIDMismatchLeavesSessionFileUntouched(t *testing.T) {
+	t.Setenv("APPLESERVICES_SOCKS_PROXY", "")
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/accountLogin":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"dsInfo":      map[string]any{"dsid": "23087649739"},
+				"webservices": map[string]any{"premiummailsettings": map[string]any{"url": serverURL + "/hme"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	cookies := []WebSessionCookie{
+		{Name: "X-APPLE-DS-WEB-SESSION-TOKEN", Value: "browser-session-token", Domain: "127.0.0.1", Path: "/"},
+		{Name: "X-APPLE-WEBAUTH-TOKEN", Value: "browser-auth-token", Domain: "127.0.0.1", Path: "/"},
+	}
+	newClient := func(t *testing.T) (*HideMyEmailClient, string) {
+		t.Helper()
+		dir := t.TempDir()
+		client, err := NewHideMyEmailClient(dir, "owner@example.test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.setupBase = server.URL
+		return client, filepath.Join(dir, "hme-session.json")
+	}
+
+	// (1) No session file yet: a rejected adoption must not create one.
+	client, sessionFile := newClient(t)
+	if err := client.UseWebSession(context.Background(), WebSession{AppleID: "owner@example.test", DSID: "99999999999", Cookies: cookies}); err == nil {
+		t.Fatal("web session with a mismatching DSID was accepted")
+	}
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Fatalf("a rejected web session created %s", sessionFile)
+	}
+	if client.SessionActive() {
+		t.Fatal("a rejected web session was left bound to the client")
+	}
+
+	// (2) Existing session file: its bytes must survive the rejection.
+	client, sessionFile = newClient(t)
+	before := []byte("{\n  \"apple_id\": \"owner@example.test\",\n  \"dsid\": \"23087649739\",\n  \"client_id\": \"previous\",\n  \"service_url\": \"" + server.URL + "/hme\",\n  \"cookies\": [],\n  \"updated_at\": \"2026-01-01T00:00:00Z\"\n}\n")
+	if err := os.WriteFile(sessionFile, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UseWebSession(context.Background(), WebSession{AppleID: "owner@example.test", DSID: "99999999999", Cookies: cookies}); err == nil {
+		t.Fatal("web session with a mismatching DSID was accepted")
+	}
+	after, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("session file changed after a rejected web session:\nbefore=%s\nafter =%s", before, after)
 	}
 }
 

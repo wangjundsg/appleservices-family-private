@@ -103,7 +103,10 @@ if (profile) {
     while (Date.now() < deadline) {
       const code = await codeOnce().catch(() => "");
       if (code) {
-        console.log(`\n[gsa-login] sms code ${code}`);
+        // Review A2: the code used to be printed verbatim, so it landed in every
+        // terminal log and wrapper transcript of a run. The length is enough to
+        // tell "SMS arrived" from "SMS is malformed".
+        console.log(`\n[gsa-login] sms code received (len=${code.length})`);
         child.stdin.write(`${code}\n`);
         return;
       }
