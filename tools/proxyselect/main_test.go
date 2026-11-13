@@ -291,29 +291,94 @@ func TestAllBlockedFailsStructured(t *testing.T) {
 	}
 }
 
-// TestMissingProfileFailsBeforeProbing: a directory that cannot hold the
-// answer is not worth spending a lease on.
-func TestMissingProfileFailsBeforeProbing(t *testing.T) {
+// TestMissingProfilePrintsUnboundRef is run-20261113 §4.1: the documented
+// pipeline order selects the exit before profilegen has ever run, so a missing
+// profile.json must not kill the run. The pick is printed with bound=false, the
+// hint says why, and no lease is spent on a probe that has nowhere to land.
+func TestMissingProfilePrintsUnboundRef(t *testing.T) {
 	var probeHits atomic.Int32
 	probe := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		probeHits.Add(1)
 	}))
 	defer probe.Close()
 
-	code, _, stderr := runCLI(t,
-		"-dir", t.TempDir(),
+	dir := filepath.Join(t.TempDir(), "acct-01")
+	code, stdout, stderr := runCLI(t,
+		"-dir", dir,
 		"-provider", "dataimpulse",
 		"-url", template("127.0.0.1", 9),
+		"-country", "US",
 		"-preflight-url", probe.URL,
+		"-account", "acct-01",
 	)
-	if code != exitFailure {
-		t.Fatalf("exit = %d, want %d", code, exitFailure)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d (stderr = %q)", code, exitOK, stderr)
 	}
-	if !strings.Contains(stderr, "error=config") {
+	for _, want := range []string{"ref=di:us:", "bound=false"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout = %q, want it to contain %q", stdout, want)
+		}
+	}
+	if !strings.Contains(stderr, "notice=unbound") || !strings.Contains(stderr, "未绑定（缺少 profile.json）") {
 		t.Fatalf("stderr = %q", stderr)
 	}
 	if probeHits.Load() != 0 {
-		t.Fatalf("a doomed run probed the network %d time(s)", probeHits.Load())
+		t.Fatalf("an unbound run probed the network %d time(s)", probeHits.Load())
+	}
+	if strings.Contains(stdout+stderr, testPassword) {
+		t.Fatalf("unbound run printed the password: %q %q", stdout, stderr)
+	}
+	// No profile was written by this run: the pick is reported, not recorded.
+	if _, err := os.Stat(profile.Path(dir)); !os.IsNotExist(err) {
+		t.Fatalf("unbound run created %s", profile.Path(dir))
+	}
+}
+
+// TestUnavailableIsReportedNotRetried is run-20261113 §4.5: a 503 from the
+// target's edge is not a 403 ban, so walking to the next port would burn a lease
+// for nothing. The run reports status=unavailable and stops after one probe.
+func TestUnavailableIsReportedNotRetried(t *testing.T) {
+	exits := startExits(t, 2)
+	ports := make([]int, 0, len(exits))
+	for port := range exits {
+		ports = append(ports, port)
+	}
+	for _, port := range ports {
+		exits[port].set(http.StatusServiceUnavailable, "Server: Apple")
+	}
+
+	dir := accountDir(t)
+	code, stdout, stderr := runCLI(t,
+		"-dir", dir,
+		"-provider", "dataimpulse",
+		"-url", template("127.0.0.1", ports[0]),
+		"-country", "US",
+		"-ports", strconv.Itoa(ports[0])+","+strconv.Itoa(ports[1]),
+		"-preflight-url", "http://probe.test/ip",
+		"-account", "acct-01",
+	)
+	if code != exitFailure {
+		t.Fatalf("exit = %d, want %d (stderr = %q)", code, exitFailure, stderr)
+	}
+	if !strings.Contains(stderr, "error=unavailable") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	total := 0
+	for _, port := range ports {
+		total += exits[port].hits()
+	}
+	if total != 1 {
+		t.Fatalf("the run probed %d time(s), want exactly one on an edge refusal", total)
+	}
+	bound, err := profile.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.Expected.EgressRef != "" {
+		t.Fatalf("a 503 run still bound %q", bound.Expected.EgressRef)
+	}
+	if strings.Contains(stdout+stderr, testPassword) {
+		t.Fatalf("failure printed the password: %q %q", stdout, stderr)
 	}
 }
 

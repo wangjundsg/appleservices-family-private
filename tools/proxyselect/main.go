@@ -9,9 +9,13 @@
 //
 // A target that answers 403 on a residential lease usually means that address is
 // burned for that site, so the run walks on to the next lease port instead of
-// giving up on the account. Every attempt is a paid lease, which is why the walk
-// is short and why -dry-run exists: it answers "which exit would this account
-// get?" without spending one and without touching the network.
+// giving up on the account. A 503 is different: the edge accepted the connection
+// and refused the address segment, so the same lease is not retried and the run
+// reports status=unavailable (docs/run-20261113.md §4.5). Every attempt is a paid
+// lease, which is why the walk is short and why -dry-run exists: it answers
+// "which exit would this account get?" without spending one and without touching
+// the network. A directory with no frozen profile gets the same treatment: the
+// pick is printed with bound=false and the caller runs profilegen next (§4.1).
 //
 // Credentials never reach a log line: the pick is printed as its Ref (no
 // credentials at all) next to Redacted (masked username, no password), and the
@@ -64,6 +68,7 @@ const usageText = `usage: proxyselect -dir <account-dir> [options]
   -account <id>         account id for the pick (default: base name of -dir)
   -attempts <n>         exits one run may try before giving up (default 5)
   -dry-run              print the pick and stop: no network, no writes
+  (no profile.json)     print the pick as bound=false and stop; run profilegen next
 `
 
 func main() {
@@ -128,11 +133,15 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		accountID = filepath.Base(filepath.Clean(accountDir))
 	}
 
+	// A directory without a frozen profile cannot hold the pick, but the pick
+	// itself is still the answer the operator asked for: print it as unbound
+	// instead of refusing to run (run-20261113 §4.1 — the documented pipeline
+	// order selects the exit before profilegen has ever run).
+	bound := true
 	if !*dryRun {
-		// Refuse a doomed run before it spends a lease: without a profile there
-		// is nowhere to bind the pick, and the probe would be paid for nothing.
 		if _, err := os.Stat(profile.Path(accountDir)); err != nil {
-			return fail("config", fmt.Errorf("no frozen profile in %s: %w", accountDir, err))
+			bound = false
+			fmt.Fprintf(stderr, "proxyselect: notice=unbound detail=%q\n", "未绑定（缺少 profile.json）")
 		}
 	}
 
@@ -164,7 +173,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		tried = append(tried, endpoint.Ref())
 		chosen = endpoint
 
-		if *dryRun || probeTarget == "" {
+		if *dryRun || !bound || probeTarget == "" {
 			break
 		}
 		measured, err := proxypool.PreflightResult(ctx, probe, endpoint, probeTarget)
@@ -181,6 +190,14 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 
 	if *dryRun {
 		fmt.Fprintf(stdout, "dry-run=true ref=%s kind=%s sticky=%t country=%s redacted=%s\n",
+			chosen.Ref(), chosen.Kind, chosen.Sticky, chosen.Country, chosen.Redacted())
+		return exitOK
+	}
+
+	if !bound {
+		// Only the pick is printed: probing costs a lease and there is nowhere
+		// to record the result yet. The caller runs profilegen and repeats.
+		fmt.Fprintf(stdout, "ref=%s kind=%s sticky=%t country=%s redacted=%s bound=false\n",
 			chosen.Ref(), chosen.Kind, chosen.Sticky, chosen.Country, chosen.Redacted())
 		return exitOK
 	}
@@ -264,6 +281,8 @@ func codeOf(err error) string {
 	switch {
 	case errors.Is(err, proxypool.ErrBlocked):
 		return "blocked"
+	case errors.Is(err, proxypool.ErrUnavailable):
+		return "unavailable"
 	case errors.Is(err, proxypool.ErrRetryable):
 		return "retryable"
 	case errors.Is(err, proxypool.ErrUnexpected):

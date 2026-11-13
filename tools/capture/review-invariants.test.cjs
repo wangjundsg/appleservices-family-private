@@ -89,14 +89,21 @@ test("A3: the force-click sits behind the timeout readback", () => {
 test("B4: the run exits on its state, and the state is the last log record", () => {
   const source = read("create-account.cjs");
   const final = source.indexOf('note("final", { state: finalState');
-  const exit = source.indexOf("process.exit(flow.EXIT_CODES[finalState]");
-  assert.ok(final > 0 && exit > final, "the terminal state is not logged before the exit");
+  const exit = source.indexOf("process.exit(exitCode)");
+  assert.ok(final > 0, "the terminal state is not logged");
+  assert.ok(exit > final, "the terminal state is not logged before the exit");
+  // The exit code is derived from the classified state, never a literal.
+  assert.match(source, /const exitCode = flow\.EXIT_CODES\[finalState\]/);
+  // A refund happens before the terminal record, so run.jsonl still ends on the
+  // state of the run (review B4 + run-20261113 §4.7).
+  const refund = source.indexOf("await autoRefund(finalState)");
+  assert.ok(refund > 0 && refund < final, "the refund is not requested before the terminal record");
   assert.match(source, /flow\.classifyScreen\(/, "screens are not classified");
   // Success is only reachable from the classified terminal screen.
   assert.match(source, /if \(verdict === "success"\)/);
   assert.match(source, /finalState = "waiting_input"/);
-  // The failure handler names its outcome too.
-  assert.match(source, /const state = e && e\.state === "unknown" \? "unknown" : "failed"/);
+  // The failure handler names its outcome too, including a pre-run refusal.
+  assert.match(source, /e && e\.state === "usage" \? "usage" : "failed"/);
 });
 
 // ---- B5: the mailbox check is the shared three-way match ------------------
@@ -108,4 +115,65 @@ test("B5: the mailbox poll goes through the three-way match", () => {
   assert.match(source, /senderDomains/, "the picker does not check the sender");
   // The old "first <b>code</b> in the first ten mails" shortcut is gone.
   assert.equal(/for \(const mail of body\.results/.test(source), false, "the old unordered loop is still there");
+});
+
+// ---- run-20261113 §4.3: --captcha-cmd is parsed, not stuffed into argv[2] --
+
+test("§4.3: the captcha command is parsed and run through the shared runner", () => {
+  const source = read("create-account.cjs");
+  assert.match(source, /lib\.runCaptchaCommand\(/, "the solver is not run through capture-lib");
+  // The old call handed the whole command string to python as one filename.
+  assert.equal(/execFileSync\(\s*"python"/.test(source), false, "the old one-argv execFileSync is still there");
+  assert.equal(/execFileSync/.test(source), false, "the driver still spawns the solver itself");
+});
+
+// ---- run-20261113 §4.4: the captcha image is the one next to the input ----
+
+test("§4.4: the captcha image is chosen by DOM affiliation, not by size", () => {
+  const source = read("create-account.cjs");
+  assert.match(source, /lib\.pickCaptchaImage\(/, "the shared picker is not used");
+  // The old heuristic picked the first img in a size window with no DOM check.
+  assert.equal(/naturalWidth\s*<=\s*200/.test(source), false, "the size-only heuristic is still in the driver");
+  assert.match(source, /input\[name="captcha"\]/, "the picker is not anchored on the captcha input");
+  assert.match(source, /src_kind/, "the capture method is not recorded");
+  // A captcha that did not load stops the run before any OCR call.
+  const unavailable = source.indexOf('at: "captcha-unavailable"');
+  const ocr = source.indexOf("lib.runCaptchaCommand(");
+  assert.ok(unavailable > 0 && unavailable < ocr, "an unloaded captcha does not stop the run before OCR");
+});
+
+// ---- run-20261113 §4.8: the same capture twice trips a breaker ------------
+
+test("§4.8: repeated captures are hashed and the breaker fires before OCR", () => {
+  const source = read("create-account.cjs");
+  assert.match(source, /new lib\.CaptchaTracker\(/, "no breaker is armed");
+  assert.match(source, /lib\.sha256Hex\(/, "the capture is not hashed");
+  const stuck = source.indexOf('at: "captcha_image_stuck"');
+  const ocr = source.indexOf("lib.runCaptchaCommand(");
+  assert.ok(stuck > 0, "the breaker never reports captcha_image_stuck");
+  assert.ok(stuck < ocr, "the breaker fires after the solver was already paid");
+  assert.match(source, /duplicates:/, "the duplicate count is not logged");
+});
+
+// ---- run-20261113 §4.5 / §4.7: preflight and refund are wired, not just built --
+
+test("§4.5: --preflight runs before the browser exists", () => {
+  const source = read("create-account.cjs");
+  const gate = source.indexOf('at: "preflight"');
+  const launch = source.indexOf("chromium.launch(");
+  assert.ok(gate > 0, "the preflight gate is not wired");
+  assert.ok(launch > gate, "the preflight runs after the browser was launched");
+  assert.match(source, /preflight\.probe\(/, "the probe is not the shared helper");
+});
+
+test("§4.7: --auto-refund cancels the number on every non-zero exit", () => {
+  const source = read("create-account.cjs");
+  assert.equal(source.split("await autoRefund(").length - 1, 2, "a non-zero exit path skips the refund");
+  assert.match(source, /refund\.refundActivation\(/, "the refund does not go through the shared helper");
+  assert.match(source, /note\("refund"/, "the refund result is not recorded in run.jsonl");
+  // A usage refusal is thrown through the same handler, so it refunds too.
+  const usage = source.indexOf('err.state = "usage"');
+  const launch = source.indexOf("chromium.launch(");
+  assert.ok(usage > 0 && usage < launch, "the usage refusal does not run through the failure handler");
+  assert.match(source, /process\.exit\(flow\.EXIT_CODES\[state\]\)/, "the failure handler exits on its state");
 });

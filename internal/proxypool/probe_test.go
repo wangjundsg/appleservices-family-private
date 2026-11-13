@@ -21,17 +21,23 @@ const probeTarget = "http://probe.test/ip"
 // fakeExit is a proxy that answers every request itself. httptest sees the
 // request in absolute form, exactly as a real forward proxy would.
 type fakeExit struct {
-	mu     sync.Mutex
-	status int
-	body   string
-	delay  time.Duration
-	seen   int
+	mu       sync.Mutex
+	status   int
+	body     string
+	delay    time.Duration
+	seen     int
+	ua       string
+	accept   string
+	language string
 }
 
 func (f *fakeExit) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	status, body, delay := f.status, f.body, f.delay
 	f.seen++
+	f.ua = r.Header.Get("User-Agent")
+	f.accept = r.Header.Get("Accept")
+	f.language = r.Header.Get("Accept-Language")
 	f.mu.Unlock()
 	if delay > 0 {
 		time.Sleep(delay)
@@ -44,6 +50,14 @@ func (f *fakeExit) hits() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.seen
+}
+
+// headers returns what the last request carried, which is how the User-Agent
+// test sees the probe without a real proxy.
+func (f *fakeExit) headers() (ua, accept, language string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ua, f.accept, f.language
 }
 
 // startExit brings up one fake proxy and returns the endpoint that reaches it.
@@ -112,9 +126,10 @@ func TestPreflightFlagsBlockedExit(t *testing.T) {
 }
 
 // TestPreflightFlagsRetryableExit covers the statuses that say "try another
-// exit", not "this account is burned".
+// exit", not "this account is burned". 503 is deliberately absent: it is an
+// edge refusal of the address segment, not a transient fault.
 func TestPreflightFlagsRetryableExit(t *testing.T) {
-	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusTooManyRequests} {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout, http.StatusTooManyRequests} {
 		_, endpoint := startExit(t, status, "")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := Preflight(ctx, HTTPProbe{Timeout: time.Second}, endpoint, probeTarget)
@@ -122,9 +137,33 @@ func TestPreflightFlagsRetryableExit(t *testing.T) {
 		if !errors.Is(err, ErrRetryable) {
 			t.Fatalf("status %d: err = %v, want ErrRetryable", status, err)
 		}
-		if errors.Is(err, ErrBlocked) {
-			t.Fatalf("status %d also read as blocked", status)
+		if errors.Is(err, ErrBlocked) || errors.Is(err, ErrUnavailable) {
+			t.Fatalf("status %d was classified as blocked or unavailable: %v", status, err)
 		}
+	}
+}
+
+// TestPreflightFlagsUnavailableExit is the 503 rule from run-20261113 §4.5: the
+// edge accepted the connection and refused the address segment, so retrying the
+// same lease only spends money. The verdict is its own error, distinct from both
+// "banned" (403, switch ports) and "transient" (retry possible).
+func TestPreflightFlagsUnavailableExit(t *testing.T) {
+	exit, endpoint := startExit(t, http.StatusServiceUnavailable, "Server: Apple")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := Preflight(ctx, HTTPProbe{Timeout: time.Second}, endpoint, probeTarget)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, ErrRetryable) {
+		t.Fatal("a 503 must not read as a transient failure: the same port will answer 503 again")
+	}
+	if errors.Is(err, ErrBlocked) {
+		t.Fatal("a 503 must not read as a 403 ban: the pipeline reacts to them differently")
+	}
+	if exit.hits() != 1 {
+		t.Fatalf("exit saw %d requests, want 1", exit.hits())
 	}
 }
 
@@ -262,6 +301,36 @@ func TestExtractIP(t *testing.T) {
 				t.Fatalf("extractIP(%q) = %q, want %q", testCase.body, got, testCase.want)
 			}
 		})
+	}
+}
+
+// TestHTTPProbeSendsBrowserUserAgent is run-20261113 §4.2: the probe used to
+// announce itself as "appleservices-proxypool/1" and Apple's edge answered 403 on
+// every residential exit, which looked like a burned provider. The probe has to
+// look like the browser the pipeline drives.
+func TestHTTPProbeSendsBrowserUserAgent(t *testing.T) {
+	exit, endpoint := startExit(t, http.StatusOK, "203.0.113.7")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := PreflightResult(ctx, HTTPProbe{Timeout: time.Second}, endpoint, probeTarget); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+
+	ua, accept, language := exit.headers()
+	if ua != BrowserUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", ua, BrowserUserAgent)
+	}
+	if !strings.Contains(ua, "Mozilla/5.0") || !strings.Contains(ua, "Chrome/") {
+		t.Fatalf("User-Agent %q is not a browser UA", ua)
+	}
+	if strings.Contains(strings.ToLower(ua), "appleservices") {
+		t.Fatalf("User-Agent %q still names the tool itself", ua)
+	}
+	if !strings.Contains(accept, "text/html") {
+		t.Fatalf("Accept = %q, a Chrome UA with a non-browser Accept is its own signal", accept)
+	}
+	if !strings.Contains(language, "en-US") {
+		t.Fatalf("Accept-Language = %q", language)
 	}
 }
 

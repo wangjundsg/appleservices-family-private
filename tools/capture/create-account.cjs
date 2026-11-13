@@ -1,4 +1,4 @@
-﻿// End-to-end Apple Account creation driver.
+// End-to-end Apple Account creation driver.
 //
 // One browser session carries the whole flow: create form -> email code ->
 // phone code -> done. Codes are fetched from this account's own mailbox
@@ -16,7 +16,19 @@
 //     --phone 5182460055 --activation 1112400649 --hero-key <key> \
 //     --outdir .cache\acct-01 --await-captcha .cache\captcha-answer.txt \
 //     [--mail-from apple.com,icloud.com] \
-//     [--profile .cache\acct-01\profile.json] [--egress-ip 203.0.113.7]
+//     [--profile .cache\acct-01\profile.json] [--egress-ip 203.0.113.7] \
+//     [--preflight] [--auto-refund]
+//
+// --captcha-cmd takes the solver in either shape (run-20261113 §4.3):
+//   ["python","tools/captcha/solver.py","--provider","yes"]   JSON array
+//   "python tools/captcha/solver.py --provider yes"           command line
+//   "tools\captcha\solver.py"                                 script only (legacy)
+//
+// --preflight asks the captcha resource once before the browser starts and
+// exits without touching the form when the egress cannot reach it (run §4.5);
+// --preflight-url overrides which resource is asked (default: the /captcha
+// endpoint from docs/signup-protocol.md §3.1).
+// --auto-refund cancels the hero-sms number before any non-zero exit (run §4.7).
 //
 // --password is mandatory (or APPLESERVICES_PASSWORD): review item A1 removed
 // the literal default the script used to fall back to, so a forgotten flag can
@@ -33,6 +45,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const flow = require("./account-flow.cjs");
+const lib = require("./capture-lib.cjs");
+const preflight = require("./preflight.cjs");
+const refund = require("./refund.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
 
 const MAIL_HOST = "https://abc-temp-2026.shop";
@@ -51,6 +66,15 @@ function arg(name, fallback) {
   return fallback;
 }
 
+// Boolean flags are spelled --flag or --flag=true; a bare "--flag false" is not
+// supported on purpose, because a boolean parser that reads the next argv is the
+// one that silently eats --password.
+function flagOn(name) {
+  const value = arg(name, false);
+  if (value === true) return true;
+  return ["true", "1", "yes"].includes(String(value).toLowerCase());
+}
+
 const outdir = path.resolve(arg("outdir", ".cache/acct"));
 const email = String(arg("email", ""));
 const jwt = String(arg("jwt", ""));
@@ -58,16 +82,20 @@ const phone = String(arg("phone", ""));
 const activation = String(arg("activation", ""));
 const heroKey = String(arg("hero-key", ""));
 const awaitCaptcha = String(arg("await-captcha", ""));
-// Review A1: no default password, and the check runs here — before the account
-// directory is created and long before the browser makes its first request.
+// --preflight gates the browser on the captcha resource being reachable at all;
+// --auto-refund cancels the number before any non-zero exit (run-20261113 §4.5,
+// §4.7). Both default off so an existing invocation behaves exactly as before.
+const preflightEnabled = flagOn("preflight");
+const autoRefundEnabled = flagOn("auto-refund");
+// Review A1: no default password. The refusal itself happens at the top of the
+// run body below, where it can still cancel a rented number before exiting
+// (run-20261113 §4.7) instead of dying at module scope.
 const passwordResolution = flow.resolvePassword(arg("password", ""), process.env.APPLESERVICES_PASSWORD);
-if (!passwordResolution.password) {
-  console.error(
-    JSON.stringify(flow.missingPasswordReport("create-account.cjs", "the Apple Account creation form requires a password")),
-  );
-  process.exit(flow.EXIT_CODES.usage);
-}
 const password = passwordResolution.password;
+// run-20261113 §4.3: a --captcha-cmd that cannot be parsed used to be discovered
+// one attempt at a time (16 empty OCR rounds). It is validated at the top of the
+// run body, before the first network call.
+const captchaCmdFlag = String(arg("captcha-cmd", "") || "");
 // Senders a verification mail may come from; Apple's own domains by default.
 // --mail-from keeps the check configurable without weakening it (review B5).
 const mailFrom = String(arg("mail-from", "") || "")
@@ -79,7 +107,6 @@ const senderDomains = mailFrom.length ? mailFrom : flow.DEFAULT_SENDER_DOMAINS;
 // what the caller already measured for this run, never probed here.
 const profilePath = String(arg("profile", ""));
 const egressIP = String(arg("egress-ip", ""));
-fs.mkdirSync(outdir, { recursive: true });
 
 const log = [];
 const clip = (text, max) => String(text || "").slice(0, max);
@@ -101,6 +128,37 @@ function writeRunLog() {
 
 // Module scope so the failure handler can stamp the terminal record too.
 const startedAt = Date.now();
+
+// ---- refund (run-20261113 §4.7) -------------------------------------------
+// The number is bought before the form and stays rented when the run dies at
+// the captcha. With --auto-refund the driver cancels it exactly once, before the
+// process exits non-zero, and records hero's own answer: a number whose SMS code
+// was already requested is refused by hero, and that refusal is the finding, not
+// something to retry.
+let refundAttempted = false;
+async function autoRefund(reason) {
+  if (refundAttempted) return null;
+  refundAttempted = true;
+  if (!autoRefundEnabled) return null;
+  if (!heroKey || !activation) {
+    note("refund", { skipped: "missing_hero_args", reason: clip(reason, 60) });
+    return null;
+  }
+  let result;
+  try {
+    result = await refund.refundActivation({ heroKey, activation });
+  } catch (e) {
+    result = { ok: false, response: "", error: clip(e && e.message ? e.message : e, 160) };
+  }
+  note("refund", {
+    ok: Boolean(result.ok),
+    response: clip(result.response || "", 60),
+    activation: activation ? `${activation.slice(0, 3)}***` : "",
+    reason: clip(reason, 60),
+    error: result.error || "",
+  });
+  return result;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -362,27 +420,69 @@ async function fillDigits(frame, code) {
   await sleep(800);
 }
 
-// The page carries several images (privacy icon, logos). The captcha is the
-// small one, so pick by natural size instead of DOM order.
-async function captchaImage(fr) {
-  const idx = await fr
+// The page carries several images (the privacy illustration, logos, the
+// captcha). run-20261113 §4.4: picking the small one by natural size grabbed the
+// 378x169 handshake illustration while the real captcha <img> was a broken image
+// from a 503, and 16 solves were spent on the wrong picture. The captcha is now
+// the img that sits in the same container as input[name="captcha"] and before it
+// in DOM order; the size window is only a fallback for a page without that
+// structure, and a picture that did not load is never acceptable either way.
+async function observeCaptchaImages(fr) {
+  return fr
     .evaluate(() => {
-      const imgs = [...document.querySelectorAll("img")];
-      return imgs.findIndex(
-        (x) => x.naturalWidth > 0 && x.naturalWidth <= 200 && x.naturalHeight <= 120,
-      );
+      const all = [...document.querySelectorAll("img")];
+      const indexOf = new Map(all.map((el, index) => [el, index]));
+      const size = (el) => [el.naturalWidth || 0, el.naturalHeight || 0];
+      const images = all.map((el, index) => ({ index, natural: size(el) }));
+
+      const input = document.querySelector('input[name="captcha"]');
+      if (!input) return { images, adjacent: [] };
+
+      // Walk up from the input and look for the nearest preceding img in the
+      // same container: previous element siblings first, then one level up. The
+      // depth/sibling bounds keep a page-wide logo out of the result.
+      const adjacent = [];
+      let node = input;
+      for (let depth = 0; depth < 3 && node; depth += 1) {
+        let sibling = node.previousElementSibling;
+        for (let step = 0; step < 8 && sibling; step += 1) {
+          const img = sibling.tagName === "IMG" ? sibling : sibling.querySelector("img");
+          if (img && indexOf.has(img)) adjacent.push({ index: indexOf.get(img), natural: size(img) });
+          sibling = sibling.previousElementSibling;
+        }
+        if (adjacent.length) break;
+        node = node.parentElement;
+      }
+      return { images, adjacent };
     })
-    .catch(() => -1);
-  return fr.locator("img").nth(idx >= 0 ? idx : 0);
+    .catch(() => ({ images: [], adjacent: [] }));
 }
+
+// captchaLocator returns the captcha image locator plus what the picker decided.
+// A missing or unloaded captcha throws: the caller must not go on to OCR a
+// different picture, and `state` decides whether the run reads as failed (no
+// submit yet) or unknown (a submit may already have landed).
+async function captchaLocator(fr, { state = "failed", tag = "" } = {}) {
+  const observed = await observeCaptchaImages(fr);
+  const pick = lib.pickCaptchaImage(observed);
+  if (!pick.ok) {
+    note("step", { at: "captcha-unavailable", tag, src_kind: pick.src_kind, reason: pick.reason });
+    const err = new Error(pick.reason || "captcha image not loaded");
+    err.state = state;
+    err.evidence = `captcha-image-unavailable:${tag || "captcha"}`;
+    throw err;
+  }
+  return { locator: fr.locator("img").nth(pick.index), pick };
+}
+
 // Apple can show the image captcha on any step, including the phone step
 // ("Security Code Error"). Solve it the same way as on the first form.
 async function solveCaptcha(page, fr, tag) {
   const answerFile = path.resolve(arg("await-captcha", ".cache/captcha-answer.txt"));
   fs.rmSync(answerFile, { force: true });
-  await captchaImage(fr)
-    .screenshot({ path: path.join(outdir, `${tag}.png`), scale: "css" })
-    .catch(() => {});
+  const { locator, pick } = await captchaLocator(fr, { state: "unknown", tag });
+  note("step", { at: "captcha-image", tag, natural: pick.natural, src_kind: pick.src_kind });
+  await locator.screenshot({ path: path.join(outdir, `${tag}.png`), scale: "css" }).catch(() => {});
   const answer = await waitFor(async () => {
     if (!fs.existsSync(answerFile)) return "";
     const v = fs.readFileSync(answerFile, "utf8").trim();
@@ -466,6 +566,44 @@ async function clickContinue(page, frame, tag = "") {
 }
 
 (async () => {
+  // The account directory exists before the first refusal so a refused run still
+  // leaves run.jsonl (including the refund answer) next to its siblings.
+  fs.mkdirSync(outdir, { recursive: true });
+
+  // Review A1: the refusal is a named outcome, thrown before a browser exists and
+  // before the first network request. It goes through the same failure handler as
+  // everything else, which is what lets --auto-refund cancel a number that was
+  // already bought for this run (run-20261113 §4.7).
+  if (!passwordResolution.password) {
+    const err = new Error("missing_required_argument: --password");
+    err.state = "usage";
+    err.report = flow.missingPasswordReport(
+      "create-account.cjs",
+      "the Apple Account creation form requires a password",
+    );
+    err.evidence = "usage:missing_password";
+    throw err;
+  }
+
+  // run-20261113 §4.3: a malformed --captcha-cmd is refused here, not after 16
+  // empty OCR rounds.
+  if (captchaCmdFlag) {
+    try {
+      lib.captchaArgv(captchaCmdFlag);
+    } catch (e) {
+      const err = new Error("bad_captcha_cmd");
+      err.state = "usage";
+      err.report = {
+        error: "bad_captcha_cmd",
+        argument: "--captcha-cmd",
+        detail: clip(e && e.message ? e.message : e, 160),
+        hint: 'pass ["python","tools/captcha/solver.py"] or a command line',
+      };
+      err.evidence = "usage:bad_captcha_cmd";
+      throw err;
+    }
+  }
+
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
@@ -497,6 +635,38 @@ async function clickContinue(page, frame, tag = "") {
       launchOpts.proxy.password = String(arg("proxy-pass", ""));
     }
   }
+
+  // run-20261113 §4.5: this exit answered 503 to every /captcha request, so the
+  // page could never render the image and the run was unwinnable before it
+  // started. With --preflight the egress is tested once, before the browser
+  // exists; a failure exits without loading the form at all.
+  if (preflightEnabled) {
+    const seconds = Number(arg("preflight-timeout", 20));
+    const pre = await preflight.probe({
+      url: String(arg("preflight-url", "") || preflight.DEFAULT_TARGET),
+      proxy: String(proxy || ""),
+      proxyUser: String(arg("proxy-user", "") || ""),
+      proxyPass: String(arg("proxy-pass", "") || ""),
+      timeoutMs: (Number.isFinite(seconds) && seconds > 0 ? seconds : 20) * 1000,
+    });
+    note("step", {
+      at: "preflight",
+      ok: pre.ok,
+      status: pre.status,
+      elapsed_ms: pre.elapsed_ms,
+      egress_hint: pre.egress_hint,
+      error: clip(pre.error || "", 120),
+    });
+    if (!pre.ok) {
+      const err = new Error(
+        `captcha resource preflight failed (status=${pre.status}${pre.error ? `, ${pre.error}` : ""})`,
+      );
+      err.state = "failed";
+      err.evidence = "preflight:captcha";
+      throw err;
+    }
+  }
+
   const browser = await chromium.launch(launchOpts);
 
   // What actually ran goes next to what was intended. The engine label is
@@ -641,46 +811,78 @@ async function clickContinue(page, frame, tag = "") {
   // stays on the form. Loop until the form is behind us.
   const answerFile = path.resolve(awaitCaptcha || ".cache/captcha-answer.txt");
   let submitted = false;
+  // Set once the form has actually been submitted, so a captcha that never
+  // rendered after a submit reads as "unknown" instead of "provably failed".
+  let submitAttempted = false;
+  // Same-image circuit breaker (run-20261113 §4.8): 16 identical captures cost
+  // 76 solver points. `tracker` counts consecutive repeats and the run stops
+  // before paying for a third solve of the same bytes.
+  const captchaTracker = new lib.CaptchaTracker();
   for (let attempt = 1; attempt <= 16 && !submitted; attempt += 1) {
     const fr = await widgetFrame(page);
     if (!fr) break;
     await fillForm(fr);
     fs.rmSync(answerFile, { force: true });
 
+    // The captcha has to be loaded before anything is screenshotted or solved
+    // (run §4.4): a broken image is an unavailable environment, not a puzzle.
+    const { locator: img, pick } = await captchaLocator(fr, {
+      state: submitAttempted ? "unknown" : "failed",
+      tag: `create-${attempt}`,
+    });
+
     // Render the 126x56 image at 3x before capturing it so the characters are
     // legible without external image tooling.
-    const img = await captchaImage(fr);
     await img.evaluate((el) => {
       el.style.width = "378px";
       el.style.height = "168px";
       el.style.imageRendering = "pixelated";
     }).catch(() => {});
     await sleep(300);
-    await img.screenshot({ path: path.join(outdir, `captcha-${attempt}.png`), scale: "css" }).catch(() => {});
+    const png = path.join(outdir, `captcha-${attempt}.png`);
+    await img.screenshot({ path: png, scale: "css" }).catch(() => {});
     fs.rmSync(path.join(outdir, "captcha.png"), { force: true });
-    fs.copyFileSync(path.join(outdir, `captcha-${attempt}.png`), path.join(outdir, "captcha.png"));
+    fs.copyFileSync(png, path.join(outdir, "captcha.png"));
+
+    // What was captured, without the pixels: natural size, how it was found and
+    // a hash prefix that proves "same image again" across attempts.
+    let digest = "";
+    try {
+      digest = lib.sha256Hex(fs.readFileSync(png));
+    } catch {
+      digest = "";
+    }
+    const gate = captchaTracker.observe(digest);
+    note("step", {
+      at: "captcha-image",
+      attempt,
+      natural: pick.natural,
+      src_kind: pick.src_kind,
+      duplicate: gate.duplicate,
+      duplicates: gate.duplicates,
+      sha256_prefix: digest.slice(0, 12),
+    });
+    if (gate.stuck) {
+      note("step", { at: "captcha_image_stuck", attempt, duplicates: gate.duplicates });
+      const err = new Error("captcha image stuck: the page kept returning the same picture");
+      err.state = "unknown";
+      err.evidence = "captcha_image_stuck";
+      throw err;
+    }
     note("step", { at: "captcha-ready", attempt });
 
     // Prefer the offline OCR when a command was supplied: it answers in under a
     // second, so a rejected captcha only costs one more round trip. Fall back
-    // to a human/answer file when OCR returns nothing usable.
+    // to a human/answer file when OCR returns nothing usable. The command may be
+    // an interpreter plus arguments (run §4.3); runCaptchaCommand never throws.
     let answer = "";
     const ocrCmd = arg("captcha-cmd", "");
     if (ocrCmd) {
-      try {
-        const { execFileSync } = require("node:child_process");
-        answer = String(
-          execFileSync("python", [String(ocrCmd), path.join(outdir, `captcha-${attempt}.png`)], {
-            encoding: "utf8",
-            timeout: 30000,
-          }),
-        ).trim();
-      } catch (e) {
-        note("ocr-error", { error: String(e).slice(0, 160) });
-        answer = "";
-      }
+      const ocr = lib.runCaptchaCommand(String(ocrCmd), png);
+      if (!ocr.ok) note("ocr-error", { error: clip(ocr.error || "", 160), ms: ocr.ms });
+      answer = ocr.ok ? ocr.text : "";
       if (answer && (answer.length < 4 || answer.length > 6)) { note("step", { at: "ocr-short", attempt, answer }); answer = ""; }
-      note("step", { at: "ocr-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
+      note("step", { at: "ocr-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0, ms: ocr.ms });
       if (!answer) {
         // OCR read nothing usable: refresh the image and try again instead of
         // blocking on a human. A refresh costs nothing and keeps the run
@@ -704,6 +906,7 @@ async function clickContinue(page, frame, tag = "") {
     await fr.fill('input[name="captcha"]', answer);
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
+    submitAttempted = true;
     await clickContinue(page, fr, `create-submit-${attempt}`);
     await sleep(9000);
     await shot(`01-submit-${attempt}`);
@@ -803,6 +1006,12 @@ async function clickContinue(page, frame, tag = "") {
   }
   if (!finalEvidence) finalEvidence = "no-terminal-screen";
 
+  // A non-zero exit means the rented number is not needed any more; cancel it
+  // before the terminal record so the log ends with the state of the run
+  // (run-20261113 §4.7).
+  const exitCode = flow.EXIT_CODES[finalState] ?? flow.EXIT_CODES.failed;
+  if (exitCode !== 0) await autoRefund(finalState);
+
   // The terminal record goes last so a reader of run.jsonl sees the same state
   // this process exits with.
   note("final", { state: finalState, evidence: clip(finalEvidence, 160), elapsed_ms: Date.now() - startedAt });
@@ -810,15 +1019,19 @@ async function clickContinue(page, frame, tag = "") {
   // A close failure must not turn a recorded outcome into a second final record.
   await browser.close().catch(() => {});
   console.log(JSON.stringify({ state: finalState, evidence: finalEvidence, outdir }));
-  process.exit(flow.EXIT_CODES[finalState] ?? flow.EXIT_CODES.failed);
+  process.exit(exitCode);
 })().catch(async (e) => {
   // Review B4: a thrown error is a named outcome too — `unknown` when a submit
-  // may have landed, `failed` when it provably did not — and it is the last
-  // record of run.jsonl either way.
-  const state = e && e.state === "unknown" ? "unknown" : "failed";
+  // may have landed, `failed` when it provably did not, `usage` when the run was
+  // refused before it started — and it is the last record of run.jsonl either way.
+  const state = e && e.state === "unknown" ? "unknown" : e && e.state === "usage" ? "usage" : "failed";
   note("error", { error: clip(e && e.message ? e.message : e, 300) });
+  await autoRefund(state);
   note("final", { state, evidence: clip((e && e.evidence) || "", 160), elapsed_ms: Date.now() - startedAt });
   writeRunLog();
-  console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200) }));
+  // A usage refusal prints its structured report (the same JSON the caller
+  // branched on before); everything else prints the state and the complaint.
+  if (e && e.report) console.error(JSON.stringify(e.report));
+  else console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200) }));
   process.exit(flow.EXIT_CODES[state]);
 });
