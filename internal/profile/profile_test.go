@@ -27,17 +27,11 @@ func TestGenerateValidates(t *testing.T) {
 		if major == "" || !strings.Contains(p.UACH, `v="`+major+`"`) {
 			t.Fatalf("seed %q: ua and ua_ch disagree: ua=%q ua_ch=%q", seed, p.UA, p.UACH)
 		}
-		switch p.Platform {
-		case "Win32":
-			if !strings.Contains(p.UA, "Windows NT 10.0") {
-				t.Fatalf("seed %q: Win32 without a Windows ua: %q", seed, p.UA)
-			}
-		case "MacIntel":
-			if !strings.Contains(p.UA, "Macintosh") {
-				t.Fatalf("seed %q: MacIntel without a Macintosh ua: %q", seed, p.UA)
-			}
-		default:
-			t.Fatalf("seed %q: unexpected platform %q", seed, p.Platform)
+		if p.Platform != "Win32" {
+			t.Fatalf("seed %q: generator produced platform %q, want Win32", seed, p.Platform)
+		}
+		if !strings.Contains(p.UA, "Windows NT 10.0") {
+			t.Fatalf("seed %q: Win32 without a Windows ua: %q", seed, p.UA)
 		}
 		if p.UAMobile != "?0" || strings.Contains(p.UA, "Mobile") {
 			t.Fatalf("seed %q: desktop profile claims mobile: %q / %q", seed, p.UAMobile, p.UA)
@@ -108,18 +102,15 @@ func TestValidateRejectsTamperedSignals(t *testing.T) {
 		{
 			name: "platform contradicts ua",
 			mutate: func(p *Profile) {
-				if p.Platform == "Win32" {
-					p.Platform = "MacIntel"
-				} else {
-					p.Platform = "Win32"
-				}
+				p.UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+					"(KHTML, like Gecko) Chrome/" + p.ChromeMajor() + ".0.0.0 Safari/537.36"
 			},
 			want: "in the ua",
 		},
 		{
 			name:   "platform value",
-			mutate: func(p *Profile) { p.Platform = "Linux x86_64" },
-			want:   "neither Win32 nor MacIntel",
+			mutate: func(p *Profile) { p.Platform = "MacIntel" },
+			want:   "is not Win32",
 		},
 		{
 			name:   "ua_mobile",

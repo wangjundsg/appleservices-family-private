@@ -106,17 +106,24 @@ async function waitFor(producer, timeoutMs, label) {
 const PROFILE_FILE = path.join(outdir, "profile.json");
 const PROFILE_VERSION = 1;
 
+// Windows only: the browser we drive is a Windows Chrome, so a macOS UA would
+// advertise MacIntel while navigator.platform reports Win32.
 const PROFILE_PLATFORMS = [
   {
     name: "Win32",
     ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36",
   },
-  {
-    name: "MacIntel",
-    ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36",
-  },
 ];
-const PROFILE_CHROME = ["140.0.0.0", "141.0.0.0", "142.0.0.0"];
+// Weighted Chrome distribution, expanded in the same order as
+// internal/profile.expandChromeVersions so both generators agree per seed.
+const PROFILE_CHROME_WEIGHTS = [
+  ["150.0.0.0", 2],
+  ["151.0.0.0", 3],
+  ["152.0.0.0", 5],
+  ["153.0.0.0", 10],
+  ["154.0.0.0", 80],
+];
+const PROFILE_CHROME = PROFILE_CHROME_WEIGHTS.flatMap(([v, w]) => Array(w).fill(v));
 const PROFILE_GPUS = [
   {
     family: "Intel",
@@ -209,10 +216,8 @@ function validateProfile(input, source) {
 
   if (p.platform === "Win32") {
     if (!String(p.ua).includes("Windows NT 10.0")) bad('platform Win32 needs "Windows NT 10.0" in the ua');
-  } else if (p.platform === "MacIntel") {
-    if (!String(p.ua).includes("Macintosh")) bad('platform MacIntel needs "Macintosh" in the ua');
   } else {
-    bad(`platform ${JSON.stringify(p.platform)} is neither Win32 nor MacIntel`);
+    bad(`platform ${JSON.stringify(p.platform)} is not Win32; this pipeline only drives a Windows browser`);
   }
 
   if (p.ua_mobile !== "?0" && p.ua_mobile !== "?1") {

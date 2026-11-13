@@ -79,11 +79,29 @@ var (
 		name string
 		ua   string // %V% is replaced by the full chrome version
 	}{
+		// Windows only. The pipeline drives a real Windows Chrome; a macOS UA
+		// would advertise MacIntel while navigator.platform still reports
+		// Win32, which is the exact contradiction the rules below reject.
 		{"Win32", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36"},
-		{"MacIntel", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36"},
 	}
 
-	chromeVersions = []string{"140.0.0.0", "141.0.0.0", "142.0.0.0"}
+	// Chrome build distribution mirrored from the reference workbench: five
+	// majors with a long tail, 154 carrying most of the mass. The table is
+	// expanded by weight so the picker stays a plain index draw and the JS
+	// mirror in create-account.cjs can build the identical slice.
+	chromeVersionWeights = []struct {
+		version string
+		weight  int
+	}{
+		{"150.0.0.0", 2},
+		{"151.0.0.0", 3},
+		{"152.0.0.0", 5},
+		{"153.0.0.0", 10},
+		{"154.0.0.0", 80},
+	}
+
+	chromeVersions    = expandChromeVersions()
+	knownChromeMajors = chromeMajors(chromeVersions)
 
 	gpus = []struct {
 		family   string
@@ -162,17 +180,16 @@ func Validate(p Profile) error {
 	}
 
 	// 2. navigator.platform must match the system token in the UA.
-	switch p.Platform {
-	case "Win32":
-		if !strings.Contains(p.UA, "Windows NT 10.0") {
-			return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Windows NT 10.0")
-		}
-	case "MacIntel":
-		if !strings.Contains(p.UA, "Macintosh") {
-			return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Macintosh")
-		}
-	default:
-		return fmt.Errorf("profile: platform %q is neither Win32 nor MacIntel", p.Platform)
+	if p.Platform != "Win32" {
+		return fmt.Errorf("profile: platform %q is not Win32; this pipeline only drives a Windows browser", p.Platform)
+	}
+	if !strings.Contains(p.UA, "Windows NT 10.0") {
+		return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Windows NT 10.0")
+	}
+	// The major must come from the frozen table: a hand-edited file must not be
+	// able to invent a build no stage ever measured.
+	if !knownChromeMajors[major] {
+		return fmt.Errorf("profile: chrome major %s is outside the frozen table", major)
 	}
 
 	// 3. The UA-CH mobile hint has to agree with the UA itself. Both allowed
@@ -475,4 +492,25 @@ func Observe(dir string, actual EngineRoute) error {
 		p.Actual.ObservedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	return Save(dir, p)
+}
+
+// expandChromeVersions materialises the weighted table into a plain slice.
+func expandChromeVersions() []string {
+	var out []string
+	for _, entry := range chromeVersionWeights {
+		for i := 0; i < entry.weight; i++ {
+			out = append(out, entry.version)
+		}
+	}
+	return out
+}
+
+// chromeMajors returns the set of majors the table can produce.
+func chromeMajors(versions []string) map[string]bool {
+	out := make(map[string]bool, len(versions))
+	for _, version := range versions {
+		major, _, _ := strings.Cut(version, ".")
+		out[major] = true
+	}
+	return out
 }
