@@ -1,4 +1,4 @@
-﻿// Drive `bin/login.exe` non-interactively: it requests an SMS, we poll the SMS
+// Drive `bin/login.exe` non-interactively: it requests an SMS, we poll the SMS
 // provider for the new code, and hand it back on stdin. Produces a real GSA
 // session (state/accounts/<dir>/session.json) for the freshly created account.
 //
@@ -29,6 +29,7 @@ const heroKey = String(arg("hero-key", ""));
 const activation = String(arg("activation", ""));
 const previous = String(arg("previous", ""));
 const proxy = String(arg("proxy", ""));
+const egressIP = String(arg("egress-ip", ""));
 
 // Account-level profile: read the frozen fingerprint and record what was
 // actually used. GSA's own User-Agent comes from the anisette identity, so it
@@ -120,6 +121,7 @@ if (profile) {
     observeProfile(path.resolve(dir), {
       engine: major ? `chrome-${major[1]}` : "",
       egress_ref: proxy ? "cli-proxy" : "",
+      egress_ip: egressIP,
     });
     // A killed child (code=null) or a signal is never success.
     const ok = code === 0 && !signal;
