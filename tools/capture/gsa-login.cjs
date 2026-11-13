@@ -30,6 +30,35 @@ const activation = String(arg("activation", ""));
 const previous = String(arg("previous", ""));
 const proxy = String(arg("proxy", ""));
 
+// Account-level profile: read the frozen fingerprint and record what was
+// actually used. GSA's own User-Agent comes from the anisette identity, so it
+// is NOT overridden here; only the stages that speak browser HTTP (web login,
+// keepalive) consume APPLESERVICES_UA/LOCALE.
+function readProfile(dir) {
+  const file = path.join(dir, "profile.json");
+  try {
+    return JSON.parse(require("node:fs").readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function observeProfile(dir, actual) {
+  const file = path.join(dir, "profile.json");
+  let doc;
+  try {
+    doc = JSON.parse(require("node:fs").readFileSync(file, "utf8"));
+  } catch {
+    return;
+  }
+  const prev = doc.actual || {};
+  doc.actual = {
+    ...prev,
+    ...Object.fromEntries(Object.entries(actual).filter(([, v]) => v !== "" && v != null)),
+    observed_at: new Date().toISOString(),
+  };
+  require("node:fs").writeFileSync(file, JSON.stringify(doc, null, 2), "utf8");
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function codeOnce() {
@@ -43,7 +72,14 @@ async function codeOnce() {
 }
 
 (async () => {
-  const env = { ...process.env, APPLESERVICES_PASSWORD: password };
+  const profile = readProfile(path.resolve(dir));
+const env = { ...process.env, APPLESERVICES_PASSWORD: password };
+if (profile) {
+  env.APPLESERVICES_PROFILE_DIR = path.resolve(dir);
+  env.APPLESERVICES_UA = profile.ua || "";
+  env.APPLESERVICES_LOCALE = profile.locale || "";
+  env.APPLESERVICES_TIMEZONE = profile.timezone || "";
+}
   if (proxy) {
     env.HTTPS_PROXY = proxy;
     env.HTTP_PROXY = proxy;
@@ -78,8 +114,15 @@ async function codeOnce() {
 
   child.stdout.on("data", (c) => consume(c, false));
   child.stderr.on("data", (c) => consume(c, true));
-  child.on("exit", (code) => {
-    console.log(`\n[gsa-login] exit=${code}`);
-    process.exit(code || 0);
+  child.on("exit", (code, signal) => {
+    console.log(`\n[gsa-login] exit=${code} signal=${signal}`);
+    const major = profile && /Chrome\/(\d+)/.exec(profile.ua || "");
+    observeProfile(path.resolve(dir), {
+      engine: major ? `chrome-${major[1]}` : "",
+      egress_ref: proxy ? "cli-proxy" : "",
+    });
+    // A killed child (code=null) or a signal is never success.
+    const ok = code === 0 && !signal;
+    process.exit(ok ? 0 : 1);
   });
 })();

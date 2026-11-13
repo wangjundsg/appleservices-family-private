@@ -230,3 +230,28 @@ poolMailboxTx(apple, base)            // 88-105 行，逐条
 | B | 生产方建号 + 建 HME → 先调邮箱台的地址登记接口写入 `mailboxes` → 再 import | 需要邮箱台开放登记接口 |
 
 A 更符合现有分工（评审也建议如此）；B 需要对方新增接口。
+
+---
+
+## 八、指纹层落地状态（2026-11-13）
+
+已实现（commit 35add2d + 本次）：
+
+| 项 | 状态 |
+| --- | --- |
+| ① `internal/profile` 生成/校验/冻结/观察 | ✅ 8 条规则，22 个子用例 |
+| ② `tools/profilegen` | ✅ 生成/校验/回填 actual |
+| ③ 建号脚本 `--profile` | ✅ 复用账号级配置，回写 actual |
+| ④ 协议阶段读 profile 并记录 actual | ⚠️ 部分：GSA 包装层已读配置并回写 actual.engine；**网页登录/保活的 UA 覆盖未做**（外部仓库 CLI） |
+| ⑤ 单元测试 | ✅ |
+
+### 一个必须写清楚的技术边界
+
+GSA 阶段的 `User-Agent` **由 anisette 设备身份决定**（`gsa/client.go:142-156` 使用 akd/CFNetwork 串），
+不能用浏览器 UA 覆盖——覆盖会破坏设备身份一致性，属于自相矛盾。
+所以 profile 只在"浏览器 HTTP"阶段生效（网页登录、保活、可选的 Store 路径）。
+
+### 已修的一个缺陷
+
+`gsa-login.cjs` 原来 `process.exit(code || 0)`：子进程被信号终止（code=null）会被当成功。
+现在改为 `code === 0 && !signal` 才算成功，并记录 `signal`。
