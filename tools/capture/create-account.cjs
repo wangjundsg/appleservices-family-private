@@ -158,6 +158,28 @@ async function autoRefund(reason) {
     reason: clip(reason, 60),
     error: result.error || "",
   });
+  // hero refuses a cancellation inside its first two minutes
+  // (EARLY_CANCEL_DENIED / minActivationTime=120). Waiting inline would stall
+  // the run, so the activation is parked and a later sweep collects it.
+  if (!result.ok) {
+    try {
+      const queuePath = path.join(outdir, "refunds-pending.json");
+      const queue = fs.existsSync(queuePath)
+        ? JSON.parse(fs.readFileSync(queuePath, "utf8"))
+        : [];
+      queue.push({
+        activation,
+        hero_key_env: "HERO_KEY",
+        not_before: new Date(Date.now() + 130000).toISOString(),
+        response: clip(result.response || "", 60),
+        reason: clip(reason, 60),
+      });
+      fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2), "utf8");
+      note("refund-queued", { count: queue.length });
+    } catch (queueError) {
+      note("refund-queue-failed", { error: clip(queueError && queueError.message, 120) });
+    }
+  }
   return result;
 }
 
