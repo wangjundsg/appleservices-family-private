@@ -2,6 +2,7 @@ package proxypool
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -21,14 +22,15 @@ const probeTarget = "http://probe.test/ip"
 // fakeExit is a proxy that answers every request itself. httptest sees the
 // request in absolute form, exactly as a real forward proxy would.
 type fakeExit struct {
-	mu       sync.Mutex
-	status   int
-	body     string
-	delay    time.Duration
-	seen     int
-	ua       string
-	accept   string
-	language string
+	mu        sync.Mutex
+	status    int
+	body      string
+	delay     time.Duration
+	seen      int
+	ua        string
+	accept    string
+	language  string
+	proxyAuth string
 }
 
 func (f *fakeExit) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +40,7 @@ func (f *fakeExit) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.ua = r.Header.Get("User-Agent")
 	f.accept = r.Header.Get("Accept")
 	f.language = r.Header.Get("Accept-Language")
+	f.proxyAuth = r.Header.Get("Proxy-Authorization")
 	f.mu.Unlock()
 	if delay > 0 {
 		time.Sleep(delay)
@@ -50,6 +53,15 @@ func (f *fakeExit) hits() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.seen
+}
+
+// auth returns the Proxy-Authorization header of the last request. It is how the
+// credential test proves the transport decoded URL()'s escaping back to the raw
+// login the provider issued.
+func (f *fakeExit) auth() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.proxyAuth
 }
 
 // headers returns what the last request carried, which is how the User-Agent
@@ -336,15 +348,27 @@ func TestHTTPProbeSendsBrowserUserAgent(t *testing.T) {
 
 // TestHTTPProbeSendsProviderCredentials guards the one thing a transport needs
 // and a log must never show: URL() keeps the credentials, Redacted never does.
+// The Proxy-Authorization header is also where contract §2 proves itself — the
+// transport decodes URL()'s separately escaped halves back into the exact login
+// and password the provider issued, ';', '@' and ':' included.
 func TestHTTPProbeSendsProviderCredentials(t *testing.T) {
+	listener := listenOnLeasePort(t)
 	exit := &fakeExit{status: http.StatusOK, body: "203.0.113.7"}
-	server := httptest.NewServer(exit)
+	server := httptest.NewUnstartedServer(exit)
+	server.Listener = listener
+	server.Start()
 	t.Cleanup(server.Close)
 
-	hostPort := strings.TrimPrefix(server.URL, "http://")
-	endpoint := mustParse(t, "http://abc123__cr.us;sessttl.30:s3cr3t-pass@"+hostPort)
+	hostPort := listener.Addr().String()
+	// A credentialed endpoint has to be a provider lease, so the fake listens on
+	// a lease port; the password is percent-encoded in the URL exactly as URL()
+	// would write it.
+	endpoint := mustParse(t, "http://acct__cr.us;sessttl.30:p%40ss%3Aw%3Brd@"+hostPort)
 	if endpoint.Kind != HTTP {
 		t.Fatalf("kind = %s, want http for a credentialed loopback proxy", endpoint.Kind)
+	}
+	if endpoint.Pass != "p@ss:w;rd" {
+		t.Fatalf("password = %q, the escaping did not decode", endpoint.Pass)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -354,4 +378,23 @@ func TestHTTPProbeSendsProviderCredentials(t *testing.T) {
 	if exit.hits() != 1 {
 		t.Fatalf("exit saw %d requests", exit.hits())
 	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("acct__cr.us;sessttl.30:p@ss:w;rd"))
+	if got := exit.auth(); got != want {
+		t.Fatalf("Proxy-Authorization = %q, want %q", got, want)
+	}
+}
+
+// listenOnLeasePort binds a loopback listener inside the DataImpulse lease range,
+// so an endpoint that carries provider credentials still satisfies §2's port
+// rule. Ephemeral ports would be rejected by Parse before any request ran.
+func listenOnLeasePort(t *testing.T) net.Listener {
+	t.Helper()
+	for port := DataImpulseLeaseStart; port < DataImpulseLeaseStart+64; port++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err == nil {
+			return listener
+		}
+	}
+	t.Skip("no free DataImpulse lease port on this machine")
+	return nil
 }

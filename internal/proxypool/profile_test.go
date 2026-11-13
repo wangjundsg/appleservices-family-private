@@ -97,7 +97,7 @@ func TestRecordActualWritesOnlyTheEgressIP(t *testing.T) {
 	if !reflect.DeepEqual(want, after) {
 		t.Fatalf("record touched more than actual.egress_ip:\nwant %+v\ngot  %+v", want, after)
 	}
-	if after.Expected.EgressRef != "711:us:sess-123" {
+	if after.Expected.EgressRef != "711:us:12345678" {
 		t.Fatalf("record clobbered the expected route: %+v", after.Expected)
 	}
 	if after.Actual.ObservedAt != "" {
