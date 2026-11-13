@@ -9,3 +9,6 @@ archive/
 *.exe
 __pycache__/
 *.pyc
+.tools/
+.cache/
+

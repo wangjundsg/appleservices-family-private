@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -26,9 +27,12 @@ import (
 )
 
 const (
-	hmeBuildNumber  = "2640Build24"
-	hmeOAuthClient  = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
-	hmeWebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+	hmeBuildNumber      = "2640Build24"
+	hmeOAuthClient      = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
+	hmeWebUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+	hmeSetupBase        = "https://setup.icloud.com/setup/ws/1"
+	hmeSetupBaseCN      = "https://setup.icloud.com.cn/setup/ws/1"
+	hmeWebSessionCookie = "X-APPLE-DS-WEB-SESSION-TOKEN"
 )
 
 var (
@@ -98,7 +102,7 @@ func NewHideMyEmailClient(accountDir, appleID string) (*HideMyEmailClient, error
 		appleID:     appleID,
 		sessionPath: filepath.Join(accountDir, "hme-session.json"),
 		authBase:    "https://idmsa.apple.com/appleauth/auth",
-		setupBase:   "https://setup.icloud.com/setup/ws/1",
+		setupBase:   hmeSetupBase,
 	}
 	c.resetHTTP()
 	_ = c.loadSession()
@@ -273,13 +277,156 @@ func (c *HideMyEmailClient) AuthenticateAndAcceptTerms(ctx context.Context, pass
 	return c.authenticate(ctx, password, codeProvider, true)
 }
 
+// WebSessionCookie is one cookie taken from an existing iCloud web login,
+// for example a browser export. Values are credentials: callers must never
+// print them, log them, or store them outside the account's private directory.
+// Domain scopes the cookie to Apple's hosts; the ".icloud.com" cookies matter
+// because Hide My Email answers on a per-account mail host, not on
+// www.icloud.com.
+type WebSessionCookie struct {
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Secure   bool   `json:"secure,omitempty"`
+	HTTPOnly bool   `json:"http_only,omitempty"`
+}
+
+// WebSession is an existing iCloud web login captured by another tool. AppleID
+// and DSID are optional cross-checks: when present they must match what Apple
+// reports for the same session.
+type WebSession struct {
+	AppleID        string             `json:"apple_id,omitempty"`
+	DSID           string             `json:"dsid,omitempty"`
+	AccountCountry string             `json:"account_country,omitempty"`
+	Cookies        []WebSessionCookie `json:"cookies"`
+}
+
+func (c *HideMyEmailClient) setupBaseFor(country string) string {
+	if strings.EqualFold(strings.TrimSpace(country), "CHN") || strings.EqualFold(strings.TrimSpace(country), "CN") {
+		return hmeSetupBaseCN
+	}
+	return c.setupBase
+}
+
+// UseWebSession adopts an existing iCloud web login. The captured cookies are
+// replayed into this client's jar, and the iCloud web session token is handed
+// to Apple's own accountLogin endpoint so Apple returns the account's DSID and
+// Hide My Email service host. After it succeeds, List, Generate, Reserve,
+// Update, SetActive and Delete need neither the password nor a trusted-device
+// code: they use the cookies Apple itself issued.
+//
+// Nothing here re-implements a sign-in protocol; the only new input is data
+// Apple already handed the browser. A rejected or expired web session leaves
+// the client exactly as it was, so callers keep their existing fallback to
+// Authenticate.
+func (c *HideMyEmailClient) UseWebSession(ctx context.Context, web WebSession) error {
+	if bound := strings.TrimSpace(web.AppleID); bound != "" && !strings.EqualFold(bound, c.appleID) {
+		return errors.New("iCloud Web 会话不属于当前账号")
+	}
+	raw := make([]*http.Cookie, 0, len(web.Cookies))
+	for _, item := range web.Cookies {
+		raw = append(raw, &http.Cookie{Name: strings.TrimSpace(item.Name), Value: item.Value})
+	}
+	if err := validateHMEWebCookies(raw); err != nil {
+		return err
+	}
+	token := ""
+	for _, item := range web.Cookies {
+		if strings.TrimSpace(item.Name) == hmeWebSessionCookie && item.Value != "" {
+			token = item.Value
+		}
+	}
+	if token == "" {
+		return errors.New("iCloud Web 会话缺少 Web 会话令牌")
+	}
+	tokens := []string{token}
+	if decoded, decodeErr := url.QueryUnescape(token); decodeErr == nil && decoded != token {
+		tokens = append(tokens, decoded)
+	}
+	countries := []string{strings.TrimSpace(web.AccountCountry)}
+	if countries[0] == "" {
+		// The export does not always carry the account country, and China
+		// accounts answer on their own setup host, so retry there rather than
+		// asking the operator for a value Apple already knows.
+		countries = append(countries, "CHN")
+	}
+	previousJar, previousHTTP, previousSession := c.jar, c.http, c.session
+	var lastErr error
+	for _, country := range countries {
+		for _, candidate := range tokens {
+			c.resetHTTP()
+			installHMEWebCookies(c.jar, web.Cookies)
+			state := &hmeAuthState{sessionToken: candidate, accountCountry: country}
+			setupBase := c.setupBaseFor(country)
+			if strings.TrimSpace(setupBase) == "" {
+				setupBase = hmeSetupBase
+			}
+			if err := c.accountLoginAt(ctx, state, false, setupBase); err != nil {
+				lastErr = err
+				continue
+			}
+			if dsid := strings.TrimSpace(web.DSID); dsid != "" && c.session.DSID != dsid {
+				c.restoreSession(previousJar, previousHTTP, previousSession)
+				return errors.New("iCloud Web 会话与 iCloud 返回的账号标识不一致")
+			}
+			return nil
+		}
+	}
+	c.restoreSession(previousJar, previousHTTP, previousSession)
+	if lastErr == nil {
+		lastErr = errors.New("iCloud Web 会话不可用")
+	}
+	return fmt.Errorf("iCloud Web 会话不可用：%w", lastErr)
+}
+
+// installHMEWebCookies replays captured browser cookies into the jar. Cookies
+// Apple issued for ".icloud.com" stay domain cookies, so they also travel to
+// the per-account mail service host.
+func installHMEWebCookies(jar http.CookieJar, cookies []WebSessionCookie) {
+	for _, item := range cookies {
+		name, value := strings.TrimSpace(item.Name), item.Value
+		if name == "" || value == "" {
+			continue
+		}
+		domain := strings.TrimSpace(item.Domain)
+		host := strings.TrimPrefix(domain, ".")
+		if host == "" {
+			host = "www.icloud.com"
+		}
+		if net.ParseIP(host) != nil {
+			// A cookie jar has no domain concept for IP hosts.
+			domain = ""
+		}
+		path := item.Path
+		if path == "" {
+			path = "/"
+		}
+		jar.SetCookies(&url.URL{Scheme: "https", Host: host, Path: "/"}, []*http.Cookie{{Name: name, Value: value, Domain: domain, Path: path, Secure: item.Secure, HttpOnly: item.HTTPOnly}})
+	}
+}
+
+func (c *HideMyEmailClient) restoreSession(jar http.CookieJar, client *http.Client, session hmeSession) {
+	c.jar = jar
+	c.session = session
+	if client != nil {
+		client.Jar = jar
+		c.http = client
+	}
+}
+
+// SessionActive reports whether a Hide My Email web session is bound to this
+// Apple Account. It never contacts Apple.
+func (c *HideMyEmailClient) SessionActive() bool {
+	return c.session.ServiceURL != "" && c.session.DSID != "" && strings.EqualFold(c.session.AppleID, c.appleID)
+}
+
 // AcceptPendingTerms uses a previously saved, account-bound repair session.
 // It does not authenticate, create aliases, or alter family membership.
 func (c *HideMyEmailClient) AcceptPendingTerms(ctx context.Context) error {
-	setupBase := c.setupBase
+	setupBase := c.setupBaseFor(c.session.AccountCountry)
 	locale := "en-us"
-	if strings.EqualFold(c.session.AccountCountry, "CHN") || strings.EqualFold(c.session.AccountCountry, "CN") {
-		setupBase = "https://setup.icloud.com.cn/setup/ws/1"
+	if setupBase == hmeSetupBaseCN {
 		locale = "zh-cn"
 	}
 	setupURL, err := url.Parse(setupBase)
@@ -426,10 +573,10 @@ type hmeAccountLoginResult struct {
 }
 
 func (c *HideMyEmailClient) accountLogin(ctx context.Context, state *hmeAuthState, acceptTerms bool) error {
-	setupBase := c.setupBase
-	if strings.EqualFold(state.accountCountry, "CHN") || strings.EqualFold(state.accountCountry, "CN") {
-		setupBase = "https://setup.icloud.com.cn/setup/ws/1"
-	}
+	return c.accountLoginAt(ctx, state, acceptTerms, c.setupBaseFor(state.accountCountry))
+}
+
+func (c *HideMyEmailClient) accountLoginAt(ctx context.Context, state *hmeAuthState, acceptTerms bool, setupBase string) error {
 	loginBody, _ := json.Marshal(map[string]any{"dsWebAuthToken": state.sessionToken, "accountCountryCode": state.accountCountry, "extended_login": true, "trustToken": state.trustToken})
 	data, err := c.hmeSetupRequest(ctx, http.MethodPost, setupBase+"/accountLogin", loginBody)
 	if err != nil {

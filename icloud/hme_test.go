@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -159,5 +161,211 @@ func TestAcceptPendingTermsRequiresRepairCookie(t *testing.T) {
 	client := &HideMyEmailClient{setupBase: "https://setup.icloud.com/setup/ws/1", http: http.DefaultClient, jar: jar}
 	if err := client.AcceptPendingTerms(context.Background()); !errors.Is(err, ErrHMEWebRepairSessionUnavailable) {
 		t.Fatalf("missing repair session was not rejected: %v", err)
+	}
+}
+
+func TestUseWebSessionReusesBrowserLoginWithoutPassword(t *testing.T) {
+	t.Setenv("APPLESERVICES_SOCKS_PROXY", "")
+	var serverURL string
+	var mu sync.Mutex
+	adoptions := 0
+	active := true
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/accountLogin":
+			var body struct {
+				DSWebAuthToken string `json:"dsWebAuthToken"`
+				Extended       bool   `json:"extended_login"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.DSWebAuthToken != "browser-session-token" || !body.Extended {
+				http.Error(w, `{"success":false}`, http.StatusUnauthorized)
+				return
+			}
+			mu.Lock()
+			adoptions++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"dsInfo":      map[string]any{"dsid": "23087649739"},
+				"webservices": map[string]any{"premiummailsettings": map[string]any{"url": serverURL + "/hme"}},
+			})
+		case "/hme/v2/hme/list":
+			if r.URL.Query().Get("dsid") != "23087649739" {
+				http.Error(w, `{"success":false}`, http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			current, removed := active, deleted
+			mu.Unlock()
+			emails := []map[string]any{}
+			if !removed {
+				emails = append(emails, map[string]any{"hme": "alias@icloud.com", "label": "shop", "isActive": current, "anonymousId": "private-id", "forwardToEmail": "primary@example.test"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"selectedForwardTo": "primary@example.test", "forwardToEmails": []string{"primary@example.test"}, "hmeEmails": emails}})
+		case "/hme/v1/hme/generate":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"hme": "candidate@icloud.com"}})
+		case "/hme/v1/hme/reserve":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		case "/hme/v1/hme/deactivate":
+			mu.Lock()
+			active = false
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		case "/hme/v1/hme/delete":
+			mu.Lock()
+			deleted = true
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	dir := t.TempDir()
+	client, err := NewHideMyEmailClient(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.setupBase = server.URL
+	ctx := context.Background()
+	web := WebSession{AppleID: "owner@example.test", DSID: "23087649739", Cookies: []WebSessionCookie{
+		{Name: "X-APPLE-DS-WEB-SESSION-TOKEN", Value: "browser-session-token", Domain: "127.0.0.1", Path: "/"},
+		{Name: "X-APPLE-WEBAUTH-TOKEN", Value: "browser-auth-token", Domain: "127.0.0.1", Path: "/"},
+	}}
+	if err := client.UseWebSession(ctx, web); err != nil {
+		t.Fatalf("web session adoption failed: %v", err)
+	}
+	if !client.SessionActive() {
+		t.Fatal("web session was not bound to the client")
+	}
+	info, err := client.List(ctx)
+	if err != nil || info.ActiveCount != 1 || len(info.Aliases) != 1 {
+		t.Fatalf("list after adoption: info=%#v err=%v", info, err)
+	}
+	candidate, err := client.Generate(ctx, "zh-cn")
+	if err != nil || candidate != "candidate@icloud.com" {
+		t.Fatalf("generate after adoption: candidate=%q err=%v", candidate, err)
+	}
+	if err := client.Reserve(ctx, candidate, "label", ""); err != nil {
+		t.Fatalf("reserve after adoption: %v", err)
+	}
+	if err := client.SetActive(ctx, "alias@icloud.com", false); err != nil {
+		t.Fatalf("deactivate after adoption: %v", err)
+	}
+	if err := client.Delete(ctx, "alias@icloud.com"); err != nil {
+		t.Fatalf("delete after adoption: %v", err)
+	}
+
+	// A restart must keep working from the saved session alone.
+	reloaded, err := NewHideMyEmailClient(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded.http = server.Client()
+	reloaded.http.Jar = reloaded.jar
+	if !reloaded.SessionActive() {
+		t.Fatal("saved session was not reloaded")
+	}
+	if _, err := reloaded.List(ctx); err != nil {
+		t.Fatalf("list after restart: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if adoptions != 1 {
+		t.Fatalf("browser session was adopted %d times", adoptions)
+	}
+}
+
+func TestUseWebSessionRejectsUnusableBrowserCookies(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewHideMyEmailClient(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := client.UseWebSession(ctx, WebSession{Cookies: []WebSessionCookie{{Name: "aasp", Value: "cookie-value"}}}); err == nil {
+		t.Fatal("a cookie set without a web session token was adopted")
+	}
+	if err := client.UseWebSession(ctx, WebSession{Cookies: []WebSessionCookie{{Name: "X-APPLE-WEBAUTH-REPAIR", Value: "cookie-value"}}}); !errors.Is(err, ErrHMEWebRepairRequired) {
+		t.Fatalf("repair-only session was not explained: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "hme-session.json")); !os.IsNotExist(statErr) {
+		t.Fatal("an unusable web session was written to the account directory")
+	}
+	if _, listErr := client.List(ctx); !errors.Is(listErr, ErrHMEAuthenticationRequired) {
+		t.Fatalf("missing session did not fall back to authentication: %v", listErr)
+	}
+}
+
+func TestUseWebSessionKeepsPreviousSessionWhenRejected(t *testing.T) {
+	t.Setenv("APPLESERVICES_SOCKS_PROXY", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/accountLogin":
+			http.Error(w, `{"success":false}`, http.StatusUnauthorized)
+		case "/hme/v2/hme/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"hmeEmails": []map[string]any{}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewHideMyEmailClient(t.TempDir(), "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+	client.http.Jar = client.jar
+	client.session = hmeSession{AppleID: "owner@example.test", DSID: "23087649739", ClientID: "client", ServiceURL: server.URL + "/hme"}
+	ctx := context.Background()
+	web := WebSession{AppleID: "owner@example.test", AccountCountry: "USA", Cookies: []WebSessionCookie{
+		{Name: "X-APPLE-DS-WEB-SESSION-TOKEN", Value: "expired-session-token", Domain: "127.0.0.1", Path: "/"},
+		{Name: "X-APPLE-WEBAUTH-TOKEN", Value: "browser-auth-token", Domain: "127.0.0.1", Path: "/"},
+	}}
+	if err := client.UseWebSession(ctx, web); err == nil {
+		t.Fatal("expired browser session was accepted")
+	}
+	if !client.SessionActive() {
+		t.Fatal("previous session state was discarded on failure")
+	}
+	if _, err := client.List(ctx); err != nil {
+		t.Fatalf("previous session stopped working: %v", err)
+	}
+}
+
+func TestSavedSessionCarriesWebCookiesToServiceHost(t *testing.T) {
+	dir := t.TempDir()
+	client, err := NewHideMyEmailClient(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.session = hmeSession{AppleID: "owner@example.test", DSID: "23087649739", ClientID: "client", ServiceURL: "https://p68-maildomainws.icloud.com"}
+	web, err := url.Parse("https://www.icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A browser export scopes these to ".icloud.com"; the service host must
+	// still receive them after the session is written and read back.
+	client.jar.SetCookies(web, []*http.Cookie{{Name: "X-APPLE-WEBAUTH-TOKEN", Value: "cookie-value", Domain: ".icloud.com", Path: "/", Secure: true}})
+	if err := client.saveSession(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewHideMyEmailClient(dir, "owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := url.Parse("https://p68-maildomainws.icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookies := reloaded.jar.Cookies(service)
+	if len(cookies) != 1 || cookies[0].Name != "X-APPLE-WEBAUTH-TOKEN" || cookies[0].Value != "cookie-value" {
+		t.Fatalf("service host did not receive the saved web cookie: %#v", cookies)
 	}
 }
