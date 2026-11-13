@@ -91,6 +91,7 @@ const autoRefundEnabled = flagOn("auto-refund");
 // run body below, where it can still cancel a rented number before exiting
 // (run-20261113 §4.7) instead of dying at module scope.
 const passwordResolution = flow.resolvePassword(arg("password", ""), process.env.APPLESERVICES_PASSWORD);
+const phoneCC = String(arg("phonecc", "US")).toUpperCase();
 const password = passwordResolution.password;
 // run-20261113 §4.3: a --captcha-cmd that cannot be parsed used to be discovered
 // one attempt at a time (16 empty OCR rounds). It is validated at the top of the
@@ -803,7 +804,7 @@ async function clickContinue(page, frame, tag = "") {
     await fr.fill('input[name="appleId"]', email);
     await fr.fill('input[name="password"]', password);
     await fr.fill('input[name="confirmPassword"]', password);
-    await fr.selectOption('select[name="phoneCode"]', "US");
+    await fr.selectOption('select[name="phoneCode"]', phoneCC);
     await fr.fill('input[name="phoneNumber"]', phone);
   };
 
@@ -826,7 +827,20 @@ async function clickContinue(page, frame, tag = "") {
 
     // The captcha has to be loaded before anything is screenshotted or solved
     // (run §4.4): a broken image is an unavailable environment, not a puzzle.
-    const { locator: img, pick } = await captchaLocator(fr, {
+    // /captcha can answer a beat after the form paints. Reading naturalWidth too
+  // early throws away a whole attempt (redacted evidence: run-20261113c 5.3),
+  // so give the bitmap up to ten seconds to arrive before deciding.
+  await fr
+    .waitForFunction(
+      () => {
+        const input = document.querySelector('input[name="captcha"]');
+        if (!input) return false;
+        return [...document.querySelectorAll("img")].some((i) => i.naturalWidth > 0);
+      },
+      { timeout: 10000 },
+    )
+    .catch(() => {});
+  const { locator: img, pick } = await captchaLocator(fr, {
       state: submitAttempted ? "unknown" : "failed",
       tag: `create-${attempt}`,
     });
