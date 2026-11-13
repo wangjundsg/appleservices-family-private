@@ -19,6 +19,14 @@
 //     [--profile .cache\acct-01\profile.json] [--egress-ip 203.0.113.7] \
 //     [--preflight] [--auto-refund]
 //
+// --graph-token-file points the email step at a Microsoft mailbox instead of the
+// temp-mail API: a JSON file {client_id, refresh_token, mailbox} that the run
+// polls through Graph every 5s (180s window) for the newest mail addressed to
+// this mailbox, from an Apple sender, whose subject carries verification
+// semantics. The file is a credential: keep it outside the repository (the
+// .cache directory is ignored) and delete it when the run is done. The rotated
+// refresh token is written back to it, because Microsoft retires the old one.
+//
 // --captcha-cmd takes the solver in either shape (run-20261113 §4.3):
 //   ["python","tools/captcha/solver.py","--provider","yes"]   JSON array
 //   "python tools/captcha/solver.py --provider yes"           command line
@@ -46,6 +54,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const flow = require("./account-flow.cjs");
 const lib = require("./capture-lib.cjs");
+const graphMail = require("./graph-mail.cjs");
 const preflight = require("./preflight.cjs");
 const refund = require("./refund.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
@@ -207,6 +216,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // picks it up. Same contract as --await-captcha: a 4-8 digit line, consumed
 // once. The file is removed after use so a stale code cannot be replayed.
 const awaitEmailFile = String(arg("await-email-code", ""));
+// --graph-token-file is the unattended alternative to --await-email-code: the
+// code is read out of the registration mailbox itself (see graph-mail.cjs).
+const graphTokenFile = String(arg("graph-token-file", ""));
 async function manualEmailCode() {
   const answerFile = path.resolve(awaitEmailFile);
   const value = await waitFor(async () => {
@@ -217,6 +229,30 @@ async function manualEmailCode() {
   if (!value) return null;
   fs.rmSync(answerFile, { force: true });
   return { code: value, messageId: "manual", created_at: new Date().toISOString() };
+}
+
+// Graph email mode (--graph-token-file): the mailbox that owns the Apple ID is a
+// Microsoft account, so the code is read through Graph instead of a temp-mail
+// API. Same contract as the two other modes — a code object or null, and the
+// code value itself never reaches run.jsonl (review A2): only whether it
+// arrived, how long the wait took and the id of the message it came from.
+async function graphEmailCode(since) {
+  const hit = await graphMail.pollCode({
+    file: graphTokenFile,
+    since,
+    mailbox: email,
+    senderDomains,
+    intervalMs: 5000,
+    timeoutMs: 180000,
+    onTick: ({ round, messages, hit: found }) => note("graph-poll", { round, messages, found }),
+  });
+  if (!hit.ok) {
+    note("graph-poll-failed", { error: clip(hit.error || "", 160), elapsed_ms: hit.elapsedMs || 0 });
+    return null;
+  }
+  // The message id is opaque and long; the prefix identifies it next to the
+  // elapsed time without turning the log line into a blob.
+  return { code: hit.code, messageId: `graph:${String(hit.messageId || "").slice(0, 24)}`, created_at: hit.received };
 }
 
 async function latestEmailCode(since) {
@@ -657,6 +693,32 @@ async function clickContinue(page, frame, tag = "") {
     }
   }
 
+  // A --graph-token-file that cannot drive the flow is refused here, before the
+  // browser opens and before the caller's number is spent: the complaint names
+  // the missing key and never echoes a value, so it is safe in a run log.
+  if (graphTokenFile) {
+    try {
+      const shape = graphMail.readTokenFile(graphTokenFile);
+      note("graph-source", {
+        file: path.basename(shape.file),
+        mailbox: shape.mailbox,
+        scope: shape.scope,
+        jwt_ignored: Boolean(jwt && jwt !== "unused"),
+      });
+    } catch (e) {
+      const err = new Error("bad_graph_token_file");
+      err.state = "usage";
+      err.report = {
+        error: "bad_graph_token_file",
+        argument: "--graph-token-file",
+        detail: clip(e && e.message ? e.message : e, 160),
+        hint: "JSON with client_id, refresh_token and mailbox; keep it outside the repository",
+      };
+      err.evidence = "usage:bad_graph_token_file";
+      throw err;
+    }
+  }
+
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
@@ -1050,9 +1112,16 @@ async function clickContinue(page, frame, tag = "") {
     }
 
     const stepStartedAt = Date.now();
+    // Priority: a Graph mailbox is unattended, the manual file is a human, and
+    // the legacy temp-mail API is the fallback when neither was given.
+    const emailPicker = graphTokenFile
+      ? () => graphEmailCode(stepStartedAt)
+      : awaitEmailFile
+        ? manualEmailCode
+        : () => waitFor(() => latestEmailCode(startedAt), 180000, "email-code");
     const picked =
       verdict === "email_step"
-        ? await (awaitEmailFile ? manualEmailCode() : waitFor(() => latestEmailCode(startedAt), 180000, "email-code"))
+        ? await emailPicker()
         : await waitFor(smsCode, 180000, "sms-code");
     const code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
     // Review A2: the log records that a code arrived, how long it took and which

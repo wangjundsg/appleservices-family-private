@@ -266,4 +266,7 @@ module.exports = {
   senderDomain,
   senderMatches,
   summarizeHTTP,
+  // The subject test is shared with the Graph reader so both mail paths agree on
+  // what counts as a verification mail.
+  VERIFICATION_SUBJECT,
 };
