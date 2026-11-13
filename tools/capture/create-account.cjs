@@ -1,15 +1,21 @@
-﻿// End-to-end Apple Account creation driver.
+// End-to-end Apple Account creation driver.
 //
 // One browser session carries the whole flow: create form -> email code ->
 // phone code -> done. Codes are fetched from this account's own mailbox
 // (cloudflare_temp_email API) and from the SMS provider, so nothing is typed
 // by hand except the image captcha, which waits on a file.
 //
+// The browser fingerprint is frozen per account in <outdir>/profile.json (see
+// internal/profile). --profile points the run at an existing frozen profile;
+// without it the file of this account directory is reused when present and
+// generated once when not.
+//
 // Usage:
 //   node tools/capture/create-account.cjs \
 //     --email 111@abc-temp-2026.shop --jwt <address_jwt> \
 //     --phone 5182460055 --activation 1112400649 --hero-key <key> \
-//     --outdir .cache\acct-01 --await-captcha .cache\captcha-answer.txt
+//     --outdir .cache\acct-01 --await-captcha .cache\captcha-answer.txt \
+//     [--profile .cache\acct-01\profile.json] [--egress-ip 203.0.113.7]
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -39,6 +45,10 @@ const activation = String(arg("activation", ""));
 const heroKey = String(arg("hero-key", ""));
 const awaitCaptcha = String(arg("await-captcha", ""));
 const password = String(arg("password", "Kq7#mZp2vLt9"));
+// Frozen fingerprint input/output. --profile is the file to read; --egress-ip is
+// what the caller already measured for this run, never probed here.
+const profilePath = String(arg("profile", ""));
+const egressIP = String(arg("egress-ip", ""));
 fs.mkdirSync(outdir, { recursive: true });
 
 const log = [];
@@ -87,46 +97,198 @@ async function waitFor(producer, timeoutMs, label) {
   return "";
 }
 
-// makeProfile turns a seed into a stable, plausible browser identity. Every
-// account gets its own so Apple cannot cluster them by device signals.
+// ---- frozen fingerprint profile -------------------------------------------
+// Apple cross-checks the UA, the client hints and navigator.platform against
+// each other, so one account has to present the same machine from the creation
+// form all the way into the later protocol stages. The profile is generated
+// once, validated, and frozen to <outdir>/profile.json; every later run reads
+// that file back instead of minting a second identity for the same account.
+const PROFILE_FILE = path.join(outdir, "profile.json");
+const PROFILE_VERSION = 1;
+
+const PROFILE_PLATFORMS = [
+  {
+    name: "Win32",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36",
+  },
+  {
+    name: "MacIntel",
+    ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36",
+  },
+];
+const PROFILE_CHROME = ["140.0.0.0", "141.0.0.0", "142.0.0.0"];
+const PROFILE_GPUS = [
+  {
+    family: "Intel",
+    vendor: "Google Inc. (Intel)",
+    renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  },
+  {
+    family: "NVIDIA",
+    vendor: "Google Inc. (NVIDIA)",
+    renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  },
+  {
+    family: "AMD",
+    vendor: "Google Inc. (AMD)",
+    renderer: "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  },
+];
+const PROFILE_SCREENS = [
+  [1366, 768],
+  [1440, 900],
+  [1536, 864],
+  [1600, 900],
+  [1920, 1080],
+];
+const PROFILE_TIMEZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"];
+const PROFILE_CORES = [4, 8, 12, 16];
+const PROFILE_MEMORY = [8, 16];
+
+// makeProfile turns a seed into a stable, plausible browser identity. It walks
+// the same FNV-1a + LCG stream and the same tables in the same order as
+// internal/profile.Generate, so `profilegen -seed X` and this script agree on
+// the profile for seed X instead of each inventing its own machine.
 function makeProfile(seedText) {
-  let h = 2166136261;
+  let state = 2166136261;
   for (const ch of seedText) {
+    state ^= ch.charCodeAt(0);
+    state = Math.imul(state, 16777619) >>> 0;
+  }
+  const next = (n) => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return (state >>> 16) % n;
+  };
+  const platform = PROFILE_PLATFORMS[next(PROFILE_PLATFORMS.length)];
+  const version = PROFILE_CHROME[next(PROFILE_CHROME.length)];
+  const gpu = PROFILE_GPUS[next(PROFILE_GPUS.length)];
+  const screen = PROFILE_SCREENS[next(PROFILE_SCREENS.length)];
+  const timezone = PROFILE_TIMEZONES[next(PROFILE_TIMEZONES.length)];
+  const cores = PROFILE_CORES[next(PROFILE_CORES.length)];
+  const memory = PROFILE_MEMORY[next(PROFILE_MEMORY.length)];
+  const major = version.split(".")[0];
+  return {
+    version: PROFILE_VERSION,
+    created_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    ua: platform.ua.replaceAll("%V%", version),
+    // The GREASE entry carries a version too; Validate ignores it when matching
+    // the UA, which is why it may never be the only entry.
+    ua_ch: `"Chromium";v="${major}", "Google Chrome";v="${major}", "Not?A_Brand";v="99"`,
+    ua_mobile: "?0",
+    platform: platform.name,
+    locale: "en-US",
+    languages: ["en-US", "en"],
+    timezone,
+    screen,
+    cores,
+    memory,
+    webgl: { vendor: gpu.vendor, renderer: gpu.renderer },
+    expected: { engine: `chrome-${major}` },
+    actual: {},
+  };
+}
+
+// validateProfile mirrors internal/profile.Validate rule for rule: a profile
+// one stage would reject must not be used by this one either, because the
+// values below go straight into a browser context and into Apple's own
+// client-side fingerprint report.
+function validateProfile(input, source) {
+  const bad = (message) => {
+    throw new Error(`profile ${source}: ${message}`);
+  };
+  const p = { ...input };
+  if (p.version !== PROFILE_VERSION) bad(`version ${p.version} is not supported, want ${PROFILE_VERSION}`);
+
+  const uaMajor = (/Chrome\/(\d+)/.exec(String(p.ua || "")) || [])[1];
+  if (!uaMajor) bad('ua has no "Chrome/<major>" token');
+  const brands = [...String(p.ua_ch || "").matchAll(/"([^"]*)"\s*;\s*v="(\d+)"/g)]
+    .map((m) => ({ brand: m[1], version: m[2] }))
+    .filter((b) => !(b.brand.startsWith("Not") && b.brand.includes("Brand")));
+  if (!brands.length) bad('ua_ch has no "Brand";v="<major>" client-hint entry');
+  if (!brands.some((b) => b.version === uaMajor)) bad(`ua_ch does not list the UA chrome major ${uaMajor}`);
+
+  if (p.platform === "Win32") {
+    if (!String(p.ua).includes("Windows NT 10.0")) bad('platform Win32 needs "Windows NT 10.0" in the ua');
+  } else if (p.platform === "MacIntel") {
+    if (!String(p.ua).includes("Macintosh")) bad('platform MacIntel needs "Macintosh" in the ua');
+  } else {
+    bad(`platform ${JSON.stringify(p.platform)} is neither Win32 nor MacIntel`);
+  }
+
+  if (p.ua_mobile !== "?0" && p.ua_mobile !== "?1") {
+    bad(`ua_mobile ${JSON.stringify(p.ua_mobile)} is neither "?0" nor "?1"`);
+  }
+  if (p.ua_mobile === "?1") bad(`ua_mobile "?1" contradicts desktop platform ${p.platform}, want "?0"`);
+  if (String(p.ua).includes("Mobile")) bad('ua_mobile "?0" contradicts a mobile ua');
+
+  if (!PROFILE_TIMEZONES.includes(p.timezone)) {
+    bad(`timezone ${JSON.stringify(p.timezone)} is not one of ${PROFILE_TIMEZONES.join(", ")}`);
+  }
+  if (p.locale !== "en-US") bad(`locale ${JSON.stringify(p.locale)} is not en-US`);
+  if (!Array.isArray(p.languages) || !p.languages.length || p.languages[0] !== "en-US") {
+    bad(`languages ${JSON.stringify(p.languages)} must start with en-US`);
+  }
+
+  const screen = Array.isArray(p.screen) ? p.screen : [];
+  if (!PROFILE_SCREENS.some((s) => s[0] === screen[0] && s[1] === screen[1])) {
+    bad(`screen ${screen[0]}x${screen[1]} is not one of ${PROFILE_SCREENS.map((s) => `${s[0]}x${s[1]}`).join(", ")}`);
+  }
+  if (!PROFILE_CORES.includes(p.cores)) bad(`cores ${p.cores} is not one of ${PROFILE_CORES.join(", ")}`);
+  if (!PROFILE_MEMORY.includes(p.memory)) bad(`memory ${p.memory} is not one of ${PROFILE_MEMORY.join(", ")}`);
+
+  const webgl = p.webgl || {};
+  if (!webgl.vendor || !webgl.renderer) {
+    bad(`webgl vendor ${JSON.stringify(webgl.vendor)} and renderer ${JSON.stringify(webgl.renderer)} must both be set`);
+  }
+  const vendorGpu = PROFILE_GPUS.find((g) => String(webgl.vendor).includes(g.family));
+  if (!vendorGpu) bad(`webgl vendor ${JSON.stringify(webgl.vendor)} names no known GPU family (Intel, NVIDIA, AMD)`);
+  const rendererGpu = PROFILE_GPUS.find((g) => String(webgl.renderer).startsWith(`ANGLE (${g.family},`));
+  if (!rendererGpu) bad(`webgl renderer ${JSON.stringify(webgl.renderer)} is not an ANGLE string for Intel, NVIDIA or AMD`);
+  if (rendererGpu.family !== vendorGpu.family) {
+    bad(`webgl vendor ${JSON.stringify(webgl.vendor)} does not match renderer family ${rendererGpu.family}`);
+  }
+  return p;
+}
+
+// writeProfile freezes the profile atomically: a crash mid-run must not leave a
+// half-written file that the next stage would read as truth.
+function writeProfile(file, profile) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+// loadProfile picks the profile for this run: an explicit --profile wins, then
+// the frozen file of this account directory, and only when neither exists does
+// this script mint one -- and freeze it, so the next stage sees the same
+// machine instead of a second random draw.
+function loadProfile() {
+  if (profilePath) {
+    const file = path.resolve(profilePath);
+    const profile = validateProfile(JSON.parse(fs.readFileSync(file, "utf8")), file);
+    return { file, created: false, profile };
+  }
+  if (fs.existsSync(PROFILE_FILE)) {
+    const profile = validateProfile(JSON.parse(fs.readFileSync(PROFILE_FILE, "utf8")), PROFILE_FILE);
+    return { file: PROFILE_FILE, created: false, profile };
+  }
+  const seed = String(arg("fp-seed", path.basename(outdir)));
+  const profile = makeProfile(seed);
+  writeProfile(PROFILE_FILE, profile);
+  return { file: PROFILE_FILE, created: true, profile };
+}
+
+// The canvas noise has to stay deterministic per account. It is derived from
+// the profile instead of being stored, so the frozen file keeps exactly the
+// schema internal/profile defines and nothing extra.
+function noiseSeed(profile) {
+  let h = 2166136261;
+  for (const ch of `${profile.ua}|${profile.timezone}`) {
     h ^= ch.charCodeAt(0);
     h = Math.imul(h, 16777619) >>> 0;
   }
-  const pick = (list, shift) => list[(h >>> shift) % list.length];
-  const chrome = pick(["140.0.0.0", "141.0.0.0", "142.0.0.0"], 3);
-  const windows = pick(
-    [
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%V% Safari/537.36 Edg/%V%",
-    ],
-    7,
-  );
-  const screens = [
-    [1366, 768],
-    [1440, 900],
-    [1536, 864],
-    [1600, 900],
-    [1920, 1080],
-  ];
-  const zones = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"];
-  const renderers = [
-    "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
-  ];
-  return {
-    ua: windows.replaceAll("%V%", chrome),
-    screen: pick(screens, 11),
-    timezone: pick(zones, 13),
-    cores: pick([4, 8, 12, 16], 17),
-    memory: pick([8, 8, 16], 19),
-    renderer: pick(renderers, 23),
-    vendor: pick(["Google Inc. (Intel)", "Google Inc. (NVIDIA)", "Google Inc. (AMD)"], 29),
-    seed: h % 251,
-  };
+  return h % 251;
 }
 
 async function widgetFrame(page) {
@@ -197,6 +359,24 @@ async function clickContinue(frame) {
 
 (async () => {
   const startedAt = Date.now();
+  // Resolve the fingerprint before a browser exists: a profile another stage
+  // already froze is validated here, so a stale or edited file fails fast
+  // instead of driving one account under two different identities.
+  const frozen = loadProfile();
+  const profile = frozen.profile;
+  note("step", {
+    at: "fingerprint",
+    file: frozen.file,
+    created: frozen.created,
+    profile: {
+      ua: profile.ua,
+      screen: profile.screen,
+      tz: profile.timezone,
+      platform: profile.platform,
+      locale: profile.locale,
+    },
+  });
+
   const launchOpts = {
     channel: "chrome",
     headless: true,
@@ -211,14 +391,30 @@ async function clickContinue(frame) {
     }
   }
   const browser = await chromium.launch(launchOpts);
-  // Per-account fingerprint profile. Apple's X-Apple-I-FD-Client-Info is built
-  // in-page from exactly these signals, so two accounts with the same UA,
-  // screen and timezone look like one machine to Apple.
-  const profile = makeProfile(String(arg("fp-seed", String(Date.now()))));
-  note("step", { at: "fingerprint", profile: { ua: profile.ua, screen: profile.screen, tz: profile.timezone } });
+
+  // What actually ran goes next to what was intended. The engine label is
+  // rebuilt from the UA that goes out (never hand-typed), and the exit address
+  // is whatever the caller already measured with --egress-ip; this script does
+  // not probe the network itself. Other fields are written back untouched.
+  const actual = {
+    ...(profile.actual || {}),
+    engine: `chrome-${(/Chrome\/(\d+)/.exec(profile.ua) || [])[1]}`,
+    observed_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  };
+  if (egressIP) actual.egress_ip = egressIP;
+  if (proxy) actual.egress_ref = String(proxy);
+  profile.actual = actual;
+  writeProfile(frozen.file, profile);
+  note("step", {
+    at: "actual",
+    file: frozen.file,
+    engine: actual.engine,
+    egress_ref: actual.egress_ref || "",
+    egress_ip: actual.egress_ip || "",
+  });
 
   const context = await browser.newContext({
-    locale: "en-US",
+    locale: profile.locale,
     timezoneId: profile.timezone,
     viewport: { width: profile.screen[0], height: profile.screen[1] - 120 },
     // Render at 3x so the 126x56 captcha is captured with real pixels instead
@@ -263,9 +459,9 @@ async function clickContinue(frame) {
     {
       cores: profile.cores,
       memory: profile.memory,
-      renderer: profile.renderer,
-      vendor: profile.vendor,
-      seed: profile.seed,
+      renderer: profile.webgl.renderer,
+      vendor: profile.webgl.vendor,
+      seed: noiseSeed(profile),
     },
   );
   const page = await context.newPage();
