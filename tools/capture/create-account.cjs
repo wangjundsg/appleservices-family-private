@@ -148,6 +148,7 @@ const startedAt = Date.now();
 // was already requested is refused by hero, and that refusal is the finding, not
 // something to retry.
 let refundAttempted = false;
+let phoneSubmitted = false;
 async function autoRefund(reason) {
   if (refundAttempted) return null;
   refundAttempted = true;
@@ -1070,6 +1071,7 @@ async function clickContinue(page, frame, tag = "") {
       finalEvidence = `${verdict}-code-timeout`;
       break;
     }
+    phoneSubmitted = true;
     await fillDigits(current, code);
     // Review A2: mask the authentication inputs before this screenshot.
     await shot(`0${step + 1}-code-filled`, { maskAuth: true });
@@ -1097,7 +1099,14 @@ async function clickContinue(page, frame, tag = "") {
   // Review B4: a thrown error is a named outcome too — `unknown` when a submit
   // may have landed, `failed` when it provably did not, `usage` when the run was
   // refused before it started — and it is the last record of run.jsonl either way.
-  const state = e && e.state === "unknown" ? "unknown" : e && e.state === "usage" ? "usage" : "failed";
+  let state = e && e.state === "unknown" ? "unknown" : e && e.state === "usage" ? "usage" : "failed";
+  // Once the SMS code has been typed in, Apple navigates away and the widget
+  // iframe we hold is destroyed. Reporting "failed" there mislabels a created
+  // account (run-20261113d run 5), so the torn handle becomes its own state and
+  // the caller confirms it with a real sign-in.
+  if (state === "failed" && phoneSubmitted && /detached|target page, context or browser has been closed|navigat/i.test(String(e && e.message))) {
+    state = "likely_success";
+  }
   note("error", { error: clip(e && e.message ? e.message : e, 300) });
   await autoRefund(state);
   note("final", { state, evidence: clip((e && e.evidence) || "", 160), elapsed_ms: Date.now() - startedAt });

@@ -25,6 +25,7 @@ const EXIT_CODES = Object.freeze({
   usage: 2, // the run never started (missing/!valid arguments)
   unknown: 3, // a submission may or may not have happened: re-read, never replay
   waiting_input: 4, // code never arrived; the account is still mid-flow
+  likely_success: 5, // the page navigated away after the SMS code; confirm by signing in
 });
 
 const PASSWORD_ENV = "APPLESERVICES_PASSWORD";
