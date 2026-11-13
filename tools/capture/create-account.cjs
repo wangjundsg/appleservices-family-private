@@ -680,7 +680,7 @@ async function clickContinue(page, frame, tag = "") {
         answer = "";
       }
       if (answer && (answer.length < 4 || answer.length > 6)) { note("step", { at: "ocr-short", attempt, answer }); answer = ""; }
-      note("step", { at: "ocr-answer", attempt, answer });
+      note("step", { at: "ocr-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
       if (!answer) {
         // OCR read nothing usable: refresh the image and try again instead of
         // blocking on a human. A refresh costs nothing and keeps the run
@@ -699,7 +699,7 @@ async function clickContinue(page, frame, tag = "") {
       }, 240000, "captcha");
     }
     if (!answer) throw new Error("captcha answer never arrived");
-    note("step", { at: "captcha-answer", attempt, answer });
+    note("step", { at: "captcha-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
 
     await fr.fill('input[name="captcha"]', answer);
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
