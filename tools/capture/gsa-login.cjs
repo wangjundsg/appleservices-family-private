@@ -73,7 +73,37 @@ async function codeOnce() {
 }
 
 (async () => {
-  const profile = readProfile(path.resolve(dir));
+  // hero charges a fresh code every time login.exe starts, and Apple refuses
+// after a couple of requests (423 tooManyCodesSent). One challenge, one code:
+// the budget below makes a second accidental start impossible.
+const budgetPath = path.resolve(`.cache/gsa-budget-${activation || "none"}.json`);
+let budget = { requests: 0 };
+try {
+  budget = JSON.parse(require("node:fs").readFileSync(budgetPath, "utf8"));
+} catch {
+  // first run for this activation
+}
+const maxCodeRequests = Number(arg("max-code-requests", "2"));
+if (budget.requests >= maxCodeRequests) {
+  console.error(
+    JSON.stringify({
+      state: "code_request_budget_exhausted",
+      activation,
+      requests: budget.requests,
+      hint: "wait for Apple's 423 window to clear and use a new number",
+    }),
+  );
+  process.exit(3);
+}
+budget.requests += 1;
+try {
+  require("node:fs").writeFileSync(budgetPath, JSON.stringify(budget, null, 2), "utf8");
+} catch {
+  // a missing counter must not block the login
+}
+
+let allOut = "";
+const profile = readProfile(path.resolve(dir));
 const env = { ...process.env, APPLESERVICES_PASSWORD: password };
 if (profile) {
   env.APPLESERVICES_PROFILE_DIR = path.resolve(dir);
@@ -116,8 +146,8 @@ if (profile) {
     child.kill();
   };
 
-  child.stdout.on("data", (c) => consume(c, false));
-  child.stderr.on("data", (c) => consume(c, true));
+  child.stdout.on("data", (c) => { allOut += String(c); consume(c, false); });
+  child.stderr.on("data", (c) => { allOut += String(c); consume(c, true); });
   child.on("exit", (code, signal) => {
     console.log(`\n[gsa-login] exit=${code} signal=${signal}`);
     const major = profile && /Chrome\/(\d+)/.exec(profile.ua || "");
@@ -127,6 +157,15 @@ if (profile) {
       egress_ip: egressIP,
     });
     // A killed child (code=null) or a signal is never success.
+    if (/tooManyCodesSent|ec=-22981|status 423|423 /.test(allOut)) {
+      console.error(
+        JSON.stringify({
+          state: "rate_limited",
+          hint: "Apple refused another code; wait 15-60 minutes, do not retry",
+        }),
+      );
+      process.exit(3);
+    }
     const ok = code === 0 && !signal;
     process.exit(ok ? 0 : 1);
   });
