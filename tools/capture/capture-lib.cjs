@@ -109,7 +109,14 @@ function captchaArgv(cmd) {
   if (text.startsWith("[")) {
     let parsed;
     try {
+      try {
       parsed = JSON.parse(text);
+    } catch (error) {
+      throw new Error(
+        `--captcha-cmd starts with "[" but is not valid JSON (${error.message}). ` +
+          "In PowerShell the quotes are eaten; quote the whole value or use the plain command form.",
+      );
+    }
     } catch (e) {
       throw new Error(`--captcha-cmd is not valid JSON: ${e && e.message ? e.message : e}`);
     }

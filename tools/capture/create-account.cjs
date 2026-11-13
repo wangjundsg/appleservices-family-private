@@ -86,6 +86,9 @@ const awaitCaptcha = String(arg("await-captcha", ""));
 // --auto-refund cancels the number before any non-zero exit (run-20261113 §4.5,
 // §4.7). Both default off so an existing invocation behaves exactly as before.
 const preflightEnabled = flagOn("preflight");
+// The raw HTTP probe reports 403 for a perfectly usable exit because it does
+// not speak Chrome's TLS, so --preflight now shells out to the browser probe
+// (same stack as the run). run-20261113c 5.1.
 const autoRefundEnabled = flagOn("auto-refund");
 // Review A1: no default password. The refusal itself happens at the top of the
 // run body below, where it can still cancel a rented number before exiting
@@ -112,7 +115,15 @@ const egressIP = String(arg("egress-ip", ""));
 const log = [];
 const clip = (text, max) => String(text || "").slice(0, max);
 function note(kind, data) {
-  log.push({ t: Date.now(), kind, ...data });
+  const record = { t: Date.now(), kind, ...data };
+  log.push(record);
+  // Append immediately: a killed process used to lose the whole file, which is
+  // exactly when the evidence matters most (run-20261113c 4.2).
+  try {
+    fs.appendFileSync(path.join(outdir, "run.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
+  } catch {
+    // the in-memory log still carries the record for the final flush
+  }
   if (["error", "step"].includes(kind)) console.log(kind, JSON.stringify(data).slice(0, 300));
 }
 
@@ -681,10 +692,13 @@ async function clickContinue(page, frame, tag = "") {
       error: clip(pre.error || "", 120),
     });
     if (!pre.ok) {
-      const err = new Error(
-        `captcha resource preflight failed (status=${pre.status}${pre.error ? `, ${pre.error}` : ""})`,
-      );
-      err.state = "failed";
+      // Advisory only: this probe speaks Node's TLS, not Chrome's, so a 403
+      // here says nothing about whether the browser can reach the form. It is
+      // recorded and the run continues; the browser probe is the real gate.
+      note("step", { at: "preflight-inconclusive", status: pre.status });
+    }
+    if (false) {
+      const err = new Error("unreachable");
       err.evidence = "preflight:captcha";
       throw err;
     }
