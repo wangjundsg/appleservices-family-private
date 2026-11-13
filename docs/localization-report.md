@@ -160,3 +160,73 @@ func (c *HideMyEmailClient) resetHTTP() {
 
 结论：锁定机制尚未定位。下一个样本必须满足「创建 → 立即设备登录 → 立即消费」
 的连续路径，才能把"新号太脆"与"行为异常"两个变量分开。
+
+---
+
+## 七、导入前置条件（读运行源码后的结论）
+
+依据：`D:/Workbench/sources/iCloud-Privacy-Mail-v2/internal/store/mailbox_pool.go`
+
+### 7.1 真实请求契约
+
+```go
+// PoolImportContext (131-135)
+if !ValidPoolUUID(request_id) || apple_account_id == "" || len(items) < 1 || len(items) > 100 {
+    return POOL_INVALID_REQUEST(400)
+}
+// item 只接受两个字段
+domain.NormalizePoolIdentity(item.BaseAddress, item.TagAddress)
+// 同一批次内 base 重复 → POOL_INVALID_REQUEST
+```
+
+请求体应为：
+
+```json
+{ "request_id": "<uuid>", "apple_account_id": "<id>",
+  "items": [ { "base_address": "...", "tag_address": "..." } ] }
+```
+
+**不是** `source / source_account_id / address / alias / delivery_ref / tag`。
+
+### 7.2 回执结构
+
+```go
+type PoolImportResult struct {
+    BaseAddress string
+    Success     bool
+    Code        string   // OK / POOL_BASE_NOT_FOUND / POOL_OWNER_MISMATCH ...
+    HTTPStatus  int
+    Outcome     string   // imported / unchanged / rejected
+}
+// 汇总：Imported / Failed / Unchanged + Results[]
+```
+
+同一 `request_id` 重放会直接返回**已存储的回执**（`poolReplayTx`），所以"同键重放"在服务端是被支持的。
+
+### 7.3 两个硬前置（这才是关键）
+
+```go
+poolAppleExistsTx(apple_account_id)   // 163 行
+  → apple_accounts 表里没有这条 → 404 POOL_APPLE_ACCOUNT_NOT_FOUND
+
+poolMailboxTx(apple, base)            // 88-105 行，逐条
+  → mailboxes 表里没有这个 base  → 404 POOL_BASE_NOT_FOUND
+  → mailbox.AccountID != apple  → 409 POOL_OWNER_MISMATCH
+```
+
+**结论：import 不是"创建入口"，是"纳管入口"。**
+一个新地址要能进池，必须先满足：
+
+1. 该账号已存在于邮箱台的 `apple_accounts`（即账号要在邮箱台里登记/登录过）；
+2. 该 base 地址已存在于邮箱台的 `mailboxes`（即地址要由邮箱台自己的创建流程产生）。
+
+### 7.4 对生产方的影响
+
+原来的设想"生产方建 HME → 直接 import"**行不通**。可行顺序只有两种：
+
+| 顺序 | 做法 | 代价 |
+| --- | --- | --- |
+| A | 生产方建号 → 账号在邮箱台登录 → **由邮箱台补水流程创建地址并自动纳管** | 生产方不碰创建，只提供账号 |
+| B | 生产方建号 + 建 HME → 先调邮箱台的地址登记接口写入 `mailboxes` → 再 import | 需要邮箱台开放登记接口 |
+
+A 更符合现有分工（评审也建议如此）；B 需要对方新增接口。
