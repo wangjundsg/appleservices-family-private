@@ -200,6 +200,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Review B5: newest mail first, addressed to this run's mailbox, from a trusted
 // sender, subject carrying verification semantics. The previous version took the
 // first "<b>6 digits</b>" out of the first ten messages in API order.
+
+// Manual email mode: when the mailbox cannot be polled (e.g. a personal QQ
+// mailbox without IMAP access), a human drops the code into a file and the run
+// picks it up. Same contract as --await-captcha: a 4-8 digit line, consumed
+// once. The file is removed after use so a stale code cannot be replayed.
+const awaitEmailFile = String(arg("await-email-code", ""));
+async function manualEmailCode() {
+  const answerFile = path.resolve(awaitEmailFile);
+  const value = await waitFor(async () => {
+    if (!fs.existsSync(answerFile)) return "";
+    const raw = fs.readFileSync(answerFile, "utf8").trim();
+    return /^\d{4,8}$/.test(raw) ? raw : "";
+  }, 600000, "email-code-manual");
+  if (!value) return null;
+  fs.rmSync(answerFile, { force: true });
+  return { code: value, messageId: "manual", created_at: new Date().toISOString() };
+}
+
 async function latestEmailCode(since) {
   const res = await fetch(`${MAIL_HOST}/api/mails?limit=10&offset=0`, {
     headers: { Authorization: `Bearer ${jwt}` },
@@ -1033,7 +1051,7 @@ async function clickContinue(page, frame, tag = "") {
     const stepStartedAt = Date.now();
     const picked =
       verdict === "email_step"
-        ? await waitFor(() => latestEmailCode(startedAt), 180000, "email-code")
+        ? await (awaitEmailFile ? manualEmailCode() : waitFor(() => latestEmailCode(startedAt), 180000, "email-code"))
         : await waitFor(smsCode, 180000, "sms-code");
     const code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
     // Review A2: the log records that a code arrived, how long it took and which
