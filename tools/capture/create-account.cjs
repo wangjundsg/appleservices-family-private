@@ -841,6 +841,11 @@ async function clickContinue(page, frame, tag = "") {
     await fr.fill('input[name="password"]', password);
     await fr.fill('input[name="confirmPassword"]', password);
     await fr.selectOption('select[name="phoneCode"]', phoneCC);
+  // The widget hydrates ~4-6s later and silently resets the dial code to US;
+  // the number then validates as +1 and the form never submits. Wait it out and
+  // re-assert our choice (run-20261113d 2.1).
+  await sleep(7000);
+  await fr.selectOption('select[name="phoneCode"]', phoneCC).catch(() => {});
     await fr.fill('input[name="phoneNumber"]', phone);
   };
 

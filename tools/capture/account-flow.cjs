@@ -211,7 +211,7 @@ const SUCCESS_TEXT = /you'?re all set|your apple account is ready|account (?:has
 // word "code", decides the step: both screens talk about a code, and the phone
 // step often quotes the account's email address as well.
 const EMAIL_DELIVERY = /(?:sent|delivered|emailed)[^.]{0,40}(?:your email|your inbox|[\w.+-]+@[\w-]+)|verification email|verify your email|check your (?:email|inbox)|email address/i;
-const PHONE_DELIVERY = /text message|\bsms\b|your phone number|mobile number|sent to \+?\d|\+\d{1,3}[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|手机号|短信/i;
+const PHONE_DELIVERY = /text message|\bsms\b|your phone number|mobile number|sent to:? \+?\d|\+\d{1,3}[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|手机号|短信/i;
 
 const SCREEN_STATES = Object.freeze(["email_step", "phone_step", "success", "unknown"]);
 
