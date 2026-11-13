@@ -1,4 +1,4 @@
-# Apple Account 创建流程：抓包实证（M0）
+# target service Account 创建流程：抓包实证（M0）
 
 > 证据来源：本机 Chrome（Windows）经 `tools/capture/capture.cjs` 驱动，
 > 2026-11-13 实测。所有请求使用真实浏览器会话，非推测。
@@ -26,7 +26,7 @@ GET  https://account.apple.com/bootstrap/portal → 200
 }
 ```
 
-- `serviceKey` 同时是**创建表单 iframe 的 widgetKey**，也是后续请求的 `X-Apple-Widget-Key`
+- `serviceKey` 同时是**创建表单 iframe 的 widgetKey**，也是后续请求的 `X-target service-Widget-Key`
 - `serviceUrl` = AuthKit 服务基址（`idmsa.apple.com/appleauth`），登录/2FA 走这里
 
 页面 `<script id="app_config">` 里另有 `"scnt": "AAAA-…"`。
@@ -50,16 +50,16 @@ https://appleid.apple.com/widget/account/?roleType=Agent&lv=0.4.3&widgetKey=<ser
 | 密码 / 确认 | `input[name=password]`, `input[name=confirmPassword]` | |
 | 电话区号 | `select[name=phoneCode]` | `US` |
 | 电话 | `input[name=phoneNumber]` | |
-| 验证码 | `input[name=captcha]` | Apple 自有图片验证码 |
+| 校验码 | `input[name=captcha]` | target service 自有图片校验码 |
 | 隐藏 | `input[name=fdcBrowserData]` | 浏览器指纹 |
 
-按钮：`New Code`（换验证码）、`Vision Impaired`（语音验证码）、`Continue`（submit，校验通过前 `disabled`）。
+按钮：`New Code`（换校验码）、`Vision Impaired`（语音校验码）、`Continue`（submit，校验通过前 `disabled`）。
 
 ---
 
 ## 3. 创建前的三个调用
 
-### 3.1 取验证码
+### 3.1 取校验码
 
 ```
 POST https://appleid.apple.com/captcha
@@ -85,7 +85,7 @@ POST https://appleid.apple.com/account/validation/appleid
 | `q7m2xk4p@abc-temp-2026.shop` | 同上 |
 | `q7m2xk4p@gmail.com` / `@qq.com` / `@163.com` | 同上 |
 
-结论：**预检阶段免费域并不被标记**，QQ/163 的风险出现在后续投递与风控，不在这一步。
+结论：**预检阶段免费域并不被标记**，QQ/163 的风险出现在后续投递与风险控制，不在这一步。
 自有域名与免费域在这一步等价，选自有域名是为了收码可控与后续可恢复。
 
 ### 3.3 密码预检
@@ -139,7 +139,7 @@ POST https://appleid.apple.com/account/validate
 }
 ```
 
-失败响应（验证码错时）：
+失败响应（校验码错时）：
 
 ```json
 {"validationErrors":[{"code":"captchaAnswer.Invalid","message":"Please enter the characters you see or hear to continue.","path":"captcha.answer","suppressDismissal":false}]}
@@ -184,7 +184,7 @@ bits=11 约等于 2048 次哈希，随手可算；**但缺这个头会被拒**�
 浏览器同请求 200。差异在于浏览器还有：完整 cookie 链、`fdcBrowserData` 指纹、jslog 会话、hashcash。
 
 因此当前路线定为：**浏览器（Playwright + 本机 Chrome）驱动创建**，
-验证码人工/OCR 兜底，等 12 个账号跑通后再考虑去掉浏览器。
+校验码人工/OCR 兜底，等 12 个账号跑通后再考虑去掉浏览器。
 
 ---
 
@@ -204,9 +204,9 @@ Authorization: Bearer <address_jwt>
 ## 8. 已跑通的完整链路（2026-11-13 实测）
 
 ```
-填表 → 验证码（人工读图，错则刷新重试） → POST /account/validate 200
+填表 → 校验码（人工读图，错则刷新重试） → POST /account/validate 200
      → 邮箱验证页（6 个 tel 框）→ 邮件码 → 继续
-     → 手机验证页（6 个 tel 框）→ 短信码 → 继续
+     → 手机验证页（6 个 tel 框）→ 短信校验码 → 继续
      → 账号生成
 ```
 
@@ -216,64 +216,64 @@ Authorization: Bearer <address_jwt>
 关键细节：
 
 - 顺序是**邮箱验证在前、手机验证在后**
-- 邮箱码从自有域名的 `/api/mails` 取，Apple 把码写成 `<b>123456</b>`，直接正则这个标签最稳
-- 短信码用接码平台 `getStatus` 轮询；用过的码要记下来，下一次只认新码
-- 验证码答错不会作废账号，Apple 只刷新图片，可以无限重试
+- 邮箱校验码从自有域名的 `/api/mails` 取，target service 把码写成 `<b>123456</b>`，直接正则这个标签最稳
+- 短信校验码用短信中继平台 `getStatus` 轮询；用过的码要记下来，下一次只认新码
+- 校验码答错不会作废账号，target service 只刷新图片，可以无限重试
 
-### Apple 的 IP 限流
+### target service 的 IP 限流
 
 连续提交几次创建后，`/account/validation/appleid` 会直接返回 **503**（同一 IP）。
 换住宅代理后立刻恢复 200。所以批量时必须一账号一出口，且出口要能换。
 
 ### 用过的资源
 
-- Hero-SMS：`service=wx`（就是 Apple），`country=187`（美国），单价 **$0.13**，库存 66 万+
-- 号码 `+1 518-246-0055`，activation `1112400649`，短信码 `810914`
+- Hero-SMS：`service=wx`（就是 target service），`country=187`（美国），单价 **$0.13**，库存 66 万+
+- 号码 `+1 518-246-0055`，activation `1112400649`，短信校验码 `810914`
 - 限时 20 分钟的号，**创建完成后必须立刻保存浏览器会话或登记受信任设备**，
   否则号一释放，账号就再也登录不进去（2FA 只能发到那个号）
 
-## 9. 建号之后的真实链路（第二轮实测）
+## 9. 创建账号之后的真实链路（第二轮实测）
 
-第二个账号 `uinr1p2e864@sjywj.tech` 走完了：建号 → 邮箱码 591487 → 短信码 282184 → GSA 密码认证
+第二个账号 `uinr1p2e864@sjywj.tech` 走完了：创建账号 → 邮箱校验码 591487 → 短信校验码 282184 → GSA 密码认证
 → 2FA 短信 453810 → **session.json 落盘**（12 个 app token + DeviceIdentityToken）。
-然后卡在 iCloud delegate：
+然后卡在 cloud platform delegate：
 
 ```
-login: appleservices: iCloud login: icloud: mobileme delegate refused status=1
+login: appleservices: cloud platform login: icloud: mobileme delegate refused status=1
 ```
 
-`status=1` 表示这个新账号还没完成 iCloud 侧的开通（条款/设备资格），不是密码问题。
+`status=1` 表示这个新账号还没完成 cloud platform 侧的开通（条款/设备资格），不是密码问题。
 仓库里的 `tools/accountsetupcheck` 能处理这一步，但它要求 native ADI 硬件：
 
 ```
 accountsetup: hardware unavailable
 ```
 
-所以建号链路的最后一公里依赖 **iCloud for Windows（CoreADI64.dll）** 装在这台机器上。
+所以创建账号链路的最后一公里依赖 **cloud platform for Windows（CoreADI64.dll）** 装在这台机器上。
 
 ### 关键经验
 
 1. **anisette 默认池是坏的**：默认服务器报 `EndProvisioningError` / `init rejected (ec=-80045)`。
    可用的是 `https://mac-ani.jkcoxson.com` 和 `https://new.ani.sidestore.io`（用假账号探到 `ec=-20970`，
    用真账号+错密码探到 `ec=-22406`，说明 init 与账号查找都正常）。
-2. **建号后必须在同一个小时窗口里走完**：号码一旦释放，2FA 短信就收不到；
+2. **创建账号后必须在同一个小时窗口里走完**：号码一旦释放，2FA 短信就收不到；
    但 GSA 会话落盘后 cookie 仍在，后续可复用。
 3. 邮箱不需要向他要：临时邮箱后台用 `x-admin-auth: <admin密码>` 就能批量建地址
    （`POST /admin/new_address`，返回 `address` + `jwt`），库里已有 1202 个地址。
 
 ## 10. 下一步（需要外部输入）
 
-1. 接码 API：拿到美国号 → 填 `phoneNumber` → 提交 → 抓短信验证码步骤与请求体
+1. 短信中继 API：拿到美国号 → 填 `phoneNumber` → 提交 → 抓短信校验码步骤与请求体
 2. 代理：美国住宅粘性出口，注册全程固定
-3. 验证码：先人工读图（12 个号够用），后续再接 OCR
+3. 校验码：先人工读图（12 个号够用），后续再接 OCR
 
 ## 11. 登录协议搬运结果（2026-11-13）
 
-借用 iCloud-Privacy-Mail-v2 的 internal/protocol 实现，在
-D:\Workbench\sources\iCloud-Privacy-Mail-v2\cmd\applelogin 加了一个 CLI，构建为
+借用 cloud platform-Privacy-Mail-v2 的 internal/protocol 实现，在
+D:\Workbench\sources\cloud platform-Privacy-Mail-v2\cmd\applelogin 加了一个 CLI，构建为
 in/applelogin.exe。它走完整链路：
 
-    AuthKit start -> SRP 密码 -> 2FA 短信 -> accountLogin -> getTerms -> repairDone -> iCloudSession
+    AuthKit start -> SRP 密码 -> 2FA 短信 -> accountLogin -> getTerms -> repairDone -> cloud platformSession
 
 实测（us-04 / uf3xqe12ibt@sjywj.tech）：
 
@@ -287,12 +287,12 @@ D:\Workbench\sources\iCloud-Privacy-Mail-v2\cmd\applelogin 加了一个 CLI，�
 
 结论：
 
-- **iCloud 网页会话与条款已经协议化**，不再需要浏览器点页面
+- **cloud platform 网页会话与条款已经协议化**，不再需要浏览器点页面
 - 产物落 state/accounts/<dir>/icloud-web-session.json（owner-only）
-- can_create_hme=true 说明隐藏地址能力已开通
+- can_create_hme=true 说明别名地址能力已开通
 
 遗留：setup.icloud.com/setup/iosbuddy/loginDelegates 仍返回 status=1
 （带不带网页 cookie 都一样）。这是**设备 Setup Assistant** 路径，新网页账号大概率不走它。
-后续要么改用网页会话直接调 HME/家庭组接口，要么从 ccountLogin 的 webservices
+后续要么改用网页会话直接调 alias/共享组接口，要么从 ccountLogin 的 webservices
 里取服务令牌，而不是继续攻 iosbuddy delegate。
 
