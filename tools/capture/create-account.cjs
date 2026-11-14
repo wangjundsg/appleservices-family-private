@@ -1189,8 +1189,10 @@ async function clickContinue(page, frame, tag = "") {
         // OCR read nothing usable: refresh the image and try again instead of
         // blocking on a human. A refresh costs nothing and keeps the run
         // unattended.
-        const fresh = fr.getByRole("button", { name: /new code/i }).first();
-        if (await fresh.count().catch(() => 0)) await fresh.click().catch(() => {});
+        // Refreshing on every miss burns the site's image quota and looks frantic.
+      // Give the same image a second read first, then ask for a new one.
+      const fresh = attempt % 2 === 0 ? fr.getByRole("button", { name: /new code/i }).first() : null;
+        if (fresh && (await fresh.count().catch(() => 0))) await fresh.click().catch(() => {});
         await sleep(2500);
         continue;
       }
