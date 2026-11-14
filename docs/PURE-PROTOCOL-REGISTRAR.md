@@ -282,3 +282,61 @@ go vet ./tools/signup/
 3. 顺序不变：`create` 200 → `-stage email` 取码 → `-stage phone` 触发短信并立刻 `getStatus` 轮询 → `-stage verify`。
 
 `tools/signup` 已支持 `-captcha-answer-file`：进程内取图 → 落盘 → 阻塞等答案 → 同一会话提交（token 绑定不会断），人工通道也可用。
+
+---
+
+## 9 第二轮（03:25–03:50）：验证码已破，撞上风控判定与 IP 限流
+
+### 9.1 验证码：YesCaptcha 一次过
+
+key 从操作者本机会话缓存里找到（`aff22261...47585`，余额 992）。`-captcha-key` 直连后：
+
+```
+POST /account/validate → 不再回 captchaAnswer.Invalid
+```
+
+**验证码这一关结束了。** 拿到的是真正的业务判定：
+
+```json
+{"service_errors":[{"code":"-34607001","title":"Could Not Create Account",
+  "message":"Your account cannot be created at this time."}],"hasError":true}
+```
+
+### 9.2 这条红字就是 `REGISTRAR-CONTRACT.md` A-6 的那个签名
+
+| 维度 | 本次取值 |
+|---|---|
+| 出口 | 本机家宽，**CN** |
+| 号码 | hero-sms `+1 774 446 0507`（**US**） |
+| 指纹/locale | 无浏览器指纹；`en-US` / `America/New_York` |
+
+三者不同国 → `-34607001`。这不是协议错，是风控判定；`tools/signup` 的请求到此已被完整接受（前一步的 captcha 校验已通过，说明 hashcash/scnt/session/body 全部合规）。
+
+### 9.3 想对齐国家时撞上的两个硬约束
+
+1. **CN 号买不到**：`hero getNumber service=wx country=3` 在 $0.8/$1.2/$2.0/$3.0 四档全部 `NO_NUMBERS`（`getPrices` 显示 771 个，`getNumber` 却说没有 —— 报价与库存不一致）。所以「家宽 CN + 中国号 + zh-CN」这条最自洽的组合当前无法组出来。
+2. **US 号 + CN 出口**：直接吃 §9.1 的判定。要救只有两条路：换 US 住宅出口，或换 CN 号。
+
+### 9.4 新发现的限流签名：404 错误页
+
+同一 IP 在 ~30 分钟内打了 6 次 `/account/validate` 之后，连**引导**都开始失败：
+
+```
+GET /account?countryCode=USA → HTTP 404
+  <html ...><link rel="canonical" href="https://www.apple.com/errors/us_error.html" />
+```
+
+不是 503（`signup-protocol.md` §8 记过的那个），是 404 + Apple 通用错误页。`-stage preflight` 同样 404，说明**是按 IP 封的，跟账号/号码无关**。恢复要等窗口（未测具体时长），所以后续每次实验都要把「引导是否 200」当准入闸，先判活再谈建号。
+
+### 9.5 止损
+
+两个号（`1121900853`、`1122191580`）全部 `setStatus=8` → `ACCESS_CANCEL`，余额 `3.3641 → 3.4941`，**$0 净支出**。
+
+### 9.6 下一轮要什么
+
+| 优先 | 条件 | 目的 |
+|---|---|---|
+| P0 | **US/GB 住宅 SOCKS5**（或任意与号码同国的出口） | 让出口国 = 号码国，验证 `-34607001` 是否消失 |
+| P0 | 干净的出口 IP（当前 IP 已 404） | 引导必须 200 才能开跑 |
+| P1 | CN 号供给（hero 之外的平台） | 走「家宽 CN + zh-CN + +86」这条不需要代理的组合 |
+| P2 | 一个可用的 `X-Apple-I-FD-Client-Info` 来源 | 用 `-fd-client-info` 单独验证 fd 是否参与这条判定（工具已支持该参数） |

@@ -60,29 +60,30 @@ func (e *ProtocolError) Error() string {
 // Session is one browser identity: cookies, scnt counter, session id and the
 // hashcash challenge dropped by the last response.
 type Session struct {
-	base      string
-	portal    string
-	userAgent string
-	locale    string
-	timezone  string
-	widgetKey string
-	client    *http.Client
-
-	scnt        string
-	sessionID   string
-	hcBits      int
-	hcChallenge string
-	lastRequest string
+	base         string
+	portal       string
+	userAgent    string
+	locale       string
+	timezone     string
+	widgetKey    string
+	client       *http.Client
+	scnt         string
+	sessionID    string
+	hcBits       int
+	hcChallenge  string
+	fdClientInfo string
+	lastRequest  string
 }
 
 // SessionOptions configures the transport and the browser identity it claims.
 type SessionOptions struct {
-	Base      string
-	UserAgent string
-	Locale    string
-	Timezone  string
-	Proxy     string
-	Timeout   time.Duration
+	Base         string
+	UserAgent    string
+	Locale       string
+	Timezone     string
+	Proxy        string
+	FDClientInfo string
+	Timeout      time.Duration
 }
 
 func newSession(opts SessionOptions) (*Session, error) {
@@ -114,13 +115,14 @@ func newSession(opts SessionOptions) (*Session, error) {
 		opts.Timezone = "America/New_York"
 	}
 	return &Session{
-		base:      strings.TrimSuffix(opts.Base, "/"),
-		portal:    portalURLFor(strings.TrimSuffix(opts.Base, "/")),
-		userAgent: opts.UserAgent,
-		locale:    opts.Locale,
-		timezone:  opts.Timezone,
-		widgetKey: widgetKeyFallback,
-		client:    &http.Client{Transport: transport, Jar: jar, Timeout: opts.Timeout},
+		base:         strings.TrimSuffix(opts.Base, "/"),
+		portal:       portalURLFor(strings.TrimSuffix(opts.Base, "/")),
+		userAgent:    opts.UserAgent,
+		locale:       opts.Locale,
+		timezone:     opts.Timezone,
+		widgetKey:    widgetKeyFallback,
+		fdClientInfo: opts.FDClientInfo,
+		client:       &http.Client{Transport: transport, Jar: jar, Timeout: opts.Timeout},
 	}, nil
 }
 
@@ -153,6 +155,9 @@ func (s *Session) headers(contentType string, hashcash bool, now time.Time) (htt
 	}
 	if s.sessionID != "" {
 		h.Set("X-Apple-ID-Session-Id", s.sessionID)
+	}
+	if s.fdClientInfo != "" {
+		h.Set("X-Apple-I-FD-Client-Info", s.fdClientInfo)
 	}
 	if hashcash {
 		stamp, err := hashcashStamp(s.hcBits, s.hcChallenge, now)

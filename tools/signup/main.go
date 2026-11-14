@@ -67,6 +67,7 @@ func main() {
 		captchaAns  = flag.String("captcha-answer", "", "answer to use instead of asking YesCaptcha")
 		captchaFile = flag.String("captcha-answer-file", "", "read the answer from this file (blocks until it appears)")
 		captchaWait = flag.Duration("captcha-wait", 180*time.Second, "how long to wait for -captcha-answer-file")
+		fdInfo      = flag.String("fd-client-info", "", "verbatim X-Apple-I-FD-Client-Info JSON; empty sends none")
 		asJSON      = flag.Bool("json", false, "print the stage receipt as one JSON line")
 		timeout     = flag.Duration("timeout", 45*time.Second, "per request timeout")
 	)
@@ -105,12 +106,13 @@ func main() {
 
 	ctx := context.Background()
 	session, err := newSession(SessionOptions{
-		Base:      *base,
-		UserAgent: *userAgent,
-		Locale:    *locale,
-		Timezone:  *timezone,
-		Proxy:     *proxy,
-		Timeout:   *timeout,
+		Base:         *base,
+		UserAgent:    *userAgent,
+		Locale:       *locale,
+		Timezone:     *timezone,
+		Proxy:        *proxy,
+		FDClientInfo: *fdInfo,
+		Timeout:      *timeout,
 	})
 	if err != nil {
 		fatalf("%v", err)
