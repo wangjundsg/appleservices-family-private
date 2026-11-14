@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>注册控制台 · 127.0.0.1:8801</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg-2:#131a23; --bg-3:#1a222d; --line:#243040;
+    --fg:#e6edf3; --fg-2:#9aa7b4; --fg-3:#66707c;
+    --brand:#4f9cf9; --ok:#3fb950; --warn:#d29922; --err:#f85149; --dry:#a371f7;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  a{color:var(--brand);text-decoration:none}
+  .top{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--bg-2);position:sticky;top:0;z-index:20}
+  .top h1{font-size:15px;margin:0;letter-spacing:.3px}
+  .top .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .top .meta{color:var(--fg-3);font-size:12px;font-family:var(--mono)}
+  .top .spacer{flex:1}
+  .btn{background:var(--bg-3);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px;white-space:nowrap}
+  .btn:hover{border-color:var(--brand);color:#fff}
+  .btn.primary{background:linear-gradient(180deg,#2f6fd0,#2457a8);border-color:#3f7fe0;color:#fff;font-weight:600}
+  .btn.primary:hover{filter:brightness(1.1)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.sm{padding:3px 9px;font-size:12px}
+  .wrap{padding:16px 18px 40px;max-width:1680px;margin:0 auto}
+  .kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:14px}
+  .kpi{background:var(--bg-2);border:1px solid var(--line);border-radius:10px;padding:11px 14px}
+  .kpi .k{color:var(--fg-3);font-size:12px}
+  .kpi .v{font-size:22px;font-weight:700;font-family:var(--mono)}
+  .grid{display:grid;grid-template-columns:420px minmax(0,1fr);gap:14px;align-items:start}
+  .card{background:var(--bg-2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card-h{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg-3)}
+  .card-h h2{margin:0;font-size:13px;letter-spacing:.4px;text-transform:uppercase;color:var(--fg-2)}
+  .card-h .spacer{flex:1}
+  .card-b{padding:12px 14px}
+  .stack{display:flex;flex-direction:column;gap:14px}
+  label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg-2)}
+  label.f input,label.f select{background:#0b1017;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:7px 9px;font-size:13px;font-family:inherit}
+  label.f input:focus,label.f select:focus{outline:none;border-color:var(--brand)}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .hint{color:var(--fg-3);font-size:12px;margin:8px 0 0}
+  .warnbox{border:1px dashed var(--warn);background:rgba(210,153,34,.08);color:#e3b341;border-radius:6px;padding:8px 10px;font-size:12px;margin-top:10px}
+  table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+  th{ text-align:left;color:var(--fg-3);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;padding:8px 10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis }
+  td{padding:8px 10px;border-bottom:1px solid #1b232e;vertical-align:top}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#151d27}
+  tbody tr.sel{background:#17253a;box-shadow:inset 2px 0 0 var(--brand)}
+  .id{font-family:var(--mono);font-size:12px;color:var(--fg);word-break:break-all}
+  .dim{color:var(--fg-3)}
+  .mono{font-family:var(--mono);font-size:12px}
+  .badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid transparent;white-space:nowrap}
+  .b-ok{background:rgba(63,185,80,.14);color:#56d364;border-color:rgba(63,185,80,.35)}
+  .b-err{background:rgba(248,81,73,.14);color:#ff7b72;border-color:rgba(248,81,73,.35)}
+  .b-warn{background:rgba(210,153,34,.14);color:#e3b341;border-color:rgba(210,153,34,.35)}
+  .b-dry{background:rgba(163,113,247,.14);color:#c297ff;border-color:rgba(163,113,247,.35)}
+  .b-run{background:rgba(79,156,249,.14);color:#79b8ff;border-color:rgba(79,156,249,.35)}
+  .b-neu{background:#1c2530;color:var(--fg-2);border-color:var(--line)}
+  .tail{font-family:var(--mono);font-size:11.5px;color:var(--fg-3);max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scroll{max-height:430px;overflow:auto}
+  .log{background:#080c11;border-top:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;line-height:1.65;color:#c9d5e1}
+  .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;padding:12px 14px}
+  .shot{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0b1017;cursor:zoom-in}
+  .shot img{display:block;width:100%;height:104px;object-fit:cover;background:#060a0f}
+  .shot .n{font-family:var(--mono);font-size:10.5px;color:var(--fg-3);padding:4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tabs{display:flex;gap:6px}
+  .tab{padding:4px 11px;border-radius:6px;border:1px solid var(--line);background:var(--bg-2);color:var(--fg-2);cursor:pointer;font-size:12px}
+  .tab.on{background:#17253a;border-color:var(--brand);color:#fff}
+  .empty{padding:22px;text-align:center;color:var(--fg-3);font-size:13px}
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:13px;padding:12px 14px}
+  .kv .k{color:var(--fg-3)}
+  .kv .v{font-family:var(--mono);font-size:12px;word-break:break-all}
+  .overlay{position:fixed;inset:0;background:rgba(3,6,10,.88);display:none;align-items:center;justify-content:center;z-index:99;padding:24px}
+  .overlay.on{display:flex}
+  .overlay img{max-width:96vw;max-height:88vh;border:1px solid var(--line);border-radius:8px;background:#000}
+  .overlay .cap{position:absolute;bottom:16px;left:0;right:0;text-align:center;color:var(--fg-2);font-family:var(--mono);font-size:12px}
+  .toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:120}
+  .tmsg{background:var(--bg-3);border:1px solid var(--line);border-left:3px solid var(--brand);border-radius:6px;padding:9px 12px;font-size:12.5px;max-width:520px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+  .tmsg.err{border-left-color:var(--err)} .tmsg.ok{border-left-color:var(--ok)}
+  .mb-addr{font-family:var(--mono);font-size:12px}
+  .code{font-family:var(--mono);font-size:26px;letter-spacing:6px;color:#7ee787;text-align:center;padding:8px 0}
+  .msglist{max-height:340px;overflow:auto;border-top:1px solid var(--line);margin-top:8px}
+  .msglist .m{padding:8px 12px;border-bottom:1px solid #1b232e;font-size:12.5px}
+  .msglist .m .s{color:var(--fg)}
+  .msglist .m .d{color:var(--fg-3);font-family:var(--mono);font-size:11px}
+  @media (max-width:1180px){ .grid{grid-template-columns:1fr} .kpis{grid-template-columns:repeat(3,1fr)} }
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="dot" id="healthDot"></span>
+  <h1>注册控制台</h1>
+  <span class="meta" id="metaLine">连接中…</span>
+  <span class="spacer"></span>
+  <button class="btn sm" id="btnRefresh">刷新</button>
+  <label class="f" style="flex-direction:row;align-items:center;gap:6px;color:var(--fg-2)">
+    <input type="checkbox" id="autoRefresh" checked /> 自动刷新 2s
+  </label>
+</div>
+
+<div class="wrap">
+  <div class="kpis">
+    <div class="kpi"><div class="k">任务总数</div><div class="v" id="kTotal">–</div></div>
+    <div class="kpi"><div class="k">成功</div><div class="v" id="kOk" style="color:#56d364">–</div></div>
+    <div class="kpi"><div class="k">失败 / 硬拒</div><div class="v" id="kErr" style="color:#ff7b72">–</div></div>
+    <div class="kpi"><div class="k">演练 (dry-run)</div><div class="v" id="kDry" style="color:#c297ff">–</div></div>
+    <div class="kpi"><div class="k">邮箱池</div><div class="v" id="kMail" style="color:#79b8ff">–</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="stack">
+      <!-- 发起任务 -->
+      <div class="card">
+        <div class="card-h"><h2>发起任务</h2><span class="spacer"></span><span class="badge b-dry" id="realBadge">仅演练</span></div>
+        <div class="card-b">
+          <div class="row2">
+            <label class="f">任务类型
+              <select id="mode">
+                <option value="outlook">Outlook 邮箱</option>
+                <option value="apple">Apple 账号</option>
+              </select>
+            </label>
+            <label class="f">执行路线
+              <select id="route"></select>
+            </label>
+          </div>
+          <div class="row2" style="margin-top:10px">
+            <label class="f">邮箱（Apple 用）
+              <input id="pEmail" placeholder="留空=脚本自生成" autocomplete="off" />
+            </label>
+            <label class="f">号码（Apple 用）
+              <input id="pPhone" placeholder="如 5182460055" autocomplete="off" />
+            </label>
+          </div>
+          <div class="row2" style="margin-top:10px">
+            <label class="f">取号 ID（Apple 用）
+              <input id="pActivation" placeholder="hero-sms activation id" autocomplete="off" />
+            </label>
+            <label class="f">代理端口（可选）
+              <input id="pPort" placeholder="如 50100 / 留空直连" autocomplete="off" />
+            </label>
+          </div>
+          <label class="f" style="flex-direction:row;align-items:center;gap:8px;margin-top:10px">
+            <input type="checkbox" id="pRoxy" /> 走 Roxy 指纹浏览器（Apple 路线）
+          </label>
+          <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+            <button class="btn primary" id="btnLaunch">发起演练（dry-run）</button>
+            <button class="btn" id="btnReal" disabled title="真跑未接线：脚本需手动执行">真跑（未接线）</button>
+          </div>
+          <p class="hint">演练只写 <span class="mono">.cache/console/jobs/</span>，不起浏览器、不创建账号。真跑请在终端手动执行命令。</p>
+          <div class="warnbox" id="cmdBox" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- 邮箱面板 -->
+      <div class="card">
+        <div class="card-h"><h2>邮箱池</h2><span class="spacer"></span><span class="badge b-neu" id="mailCount">–</span></div>
+        <div class="scroll" id="mailBody"><div class="empty">读取 .cache/mailboxes.json…</div></div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <!-- 任务列表 -->
+      <div class="card">
+        <div class="card-h">
+          <h2>任务列表</h2>
+          <span class="spacer"></span>
+          <input id="q" placeholder="过滤 id / 类型 / 状态" style="background:#0b1017;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:5px 9px;font-size:12px;width:190px" />
+          <span class="badge b-neu" id="taskCount">–</span>
+        </div>
+        <div class="scroll">
+          <table>
+            <colgroup>
+              <col style="width:26%" /><col style="width:74px" /><col style="width:96px" />
+              <col style="width:132px" /><col style="width:62px" /><col style="width:24%" />
+              <col /><col style="width:56px" />
+            </colgroup>
+            <thead><tr><th>任务 / 文件</th><th>类型</th><th>状态</th><th>开始</th><th>耗时</th><th>结果</th><th>日志尾</th><th>截图</th></tr></thead>
+            <tbody id="taskBody"><tr><td colspan="8" class="empty">读取 .cache/**/*.jsonl…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 任务详情 -->
+      <div class="card">
+        <div class="card-h">
+          <h2>任务详情</h2>
+          <span class="mono dim" id="detailId">未选择任务</span>
+          <span class="spacer"></span>
+          <div class="tabs">
+            <button class="tab on" data-tab="log">日志</button>
+            <button class="tab" data-tab="shots">截图 <span id="shotN">0</span></button>
+            <button class="tab" data-tab="info">信息</button>
+          </div>
+        </div>
+        <div id="tab-log"><pre class="log" id="logBox">点上面任务列表任意一行 → 这里显示 run.jsonl 最后 300 条（2 秒刷新）。</pre></div>
+        <div id="tab-shots" style="display:none"><div class="shots" id="shotBox"><div class="empty">该任务目录下没有图片</div></div></div>
+        <div id="tab-info" style="display:none"><div class="kv" id="infoBox"><div class="k">—</div><div class="v">未选择</div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay"><img id="overlayImg" alt="" /><div class="cap" id="overlayCap"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nowClock = () => new Date().toTimeString().slice(0,8);
+
+let TASKS = [];
+let SELECTED = null;
+let SHOTS = [];
+let ROUTES = [];
+
+function toast(msg, kind){
+  const el = document.createElement('div');
+  el.className = 'tmsg ' + (kind || '');
+  el.textContent = '[' + nowClock() + '] ' + msg;
+  $('toast').appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+async function api(path, opts){
+  const r = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opts || {}));
+  const txt = await r.text();
+  let data = {};
+  try { data = JSON.parse(txt); } catch { data = {ok:false, error: txt.slice(0,300)}; }
+  if (!r.ok && data.ok !== false) data = {ok:false, error: r.status + ' ' + (data.error||'')};
+  return data;
+}
+
+function humanMs(ms){
+  if (!ms || ms < 0) return '–';
+  const s = Math.round(ms/1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s/60), r = s%60;
+  if (m < 60) return m + 'm' + (r? r+'s':'');
+  return Math.floor(m/60) + 'h' + (m%60) + 'm';
+}
+
+function statusBadge(t){
+  const s = t.status || '';
+  let cls = 'b-neu';
+  if (s.includes('成功')) cls = 'b-ok';
+  else if (s.includes('失败') || s.includes('硬拒') || s.includes('风控')) cls = 'b-err';
+  else if (s.includes('演练')) cls = 'b-dry';
+  else if (s.includes('进行') || s.includes('等输入')) cls = 'b-warn';
+  return '<span class="badge ' + cls + '">' + esc(s) + '</span>';
+}
+
+function typeBadge(t){
+  const m = {outlook:'Outlook', apple:'Apple', unknown:'其他'};
+  return '<span class="badge ' + (t.type==='outlook'?'b-run':t.type==='apple'?'b-ok':'b-neu') + '">' + (m[t.type]||'其他') + '</span>';
+}
+
+function renderTasks(){
+  const q = ($('q').value || '').trim().toLowerCase();
+  const rows = TASKS.filter(t => !q || (t.id + ' ' + t.type + ' ' + t.status + ' ' + t.result).toLowerCase().includes(q));
+  $('taskCount').textContent = rows.length + ' / ' + TASKS.length;
+
+  const ok = TASKS.filter(t => (t.status||'').includes('成功')).length;
+  const err = TASKS.filter(t => /失败|硬拒|风控/.test(t.status||'')).length;
+  const dry = TASKS.filter(t => (t.status||'').includes('演练')).length;
+  $('kTotal').textContent = TASKS.length;
+  $('kOk').textContent = ok;
+  $('kErr').textContent = err;
+  $('kDry').textContent = dry;
+
+  if (!rows.length){
+    $('taskBody').innerHTML = '<tr><td colspan="8" class="empty">没有匹配的任务</td></tr>';
+    return;
+  }
+  $('taskBody').innerHTML = rows.map(t => {
+    const tail = (t.tail && t.tail.length) ? t.tail[t.tail.length-1] : '';
+    return '<tr data-id="' + esc(t.id) + '" class="' + (t.id===SELECTED?'sel':'') + '">'
+      + '<td class="id">' + esc(t.id) + '</td>'
+      + '<td>' + typeBadge(t) + '</td>'
+      + '<td>' + statusBadge(t) + '</td>'
+      + '<td class="mono dim">' + esc(t.startedAt) + '</td>'
+      + '<td class="mono">' + humanMs(t.durationMs) + '</td>'
+      + '<td class="mono dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(t.result) + '">' + esc(t.result) + '</td>'
+      + '<td><div class="tail" title="' + esc(tail) + '">' + esc(tail) + '</div></td>'
+      + '<td class="mono">' + (t.shotsCount != null ? t.shotsCount : '–') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+async function loadTasks(){
+  const d = await api('/api/tasks?limit=400');
+  if (!d.ok){ $('healthDot').style.background = 'var(--err)'; $('metaLine').textContent = 'API 异常: ' + (d.error||''); return; }
+  TASKS = d.tasks || [];
+  $('healthDot').style.background = 'var(--ok)';
+  $('metaLine').textContent = d.total + ' 个任务 · ' + nowClock() + ' 刷新';
+  renderTasks();
+  if (SELECTED) loadDetail(SELECTED, true);
+}
+
+async function loadDetail(id, quiet){
+  const d = await api('/api/task?id=' + encodeURIComponent(id));
+  if (!d.ok){
+    if (!quiet) toast('任务详情读取失败: ' + (d.error||''), 'err');
+    return;
+  }
+  const t = d.task;
+  SELECTED = id;
+  SHOTS = d.shots || [];
+  $('detailId').textContent = t.id;
+  $('logBox').textContent = (t.tail || []).join('\n') || '（空）';
+  if (!quiet) $('logBox').scrollTop = $('logBox').scrollHeight;
+  $('shotN').textContent = SHOTS.length;
+  renderShots();
+  renderInfo(t);
+  renderTasks();
+}
+
+function renderShots(){
+  if (!SHOTS.length){
+    $('shotBox').innerHTML = '<div class="empty">该任务目录下没有图片</div>';
+    return;
+  }
+  $('shotBox').innerHTML = SHOTS.slice(0, 120).map(s =>
+    '<div class="shot" data-path="' + esc(s.path) + '" data-name="' + esc(s.name) + '">'
+    + '<img loading="lazy" src="/api/shot?path=' + encodeURIComponent(s.path) + '" alt="' + esc(s.name) + '" />'
+    + '<div class="n" title="' + esc(s.path) + '">' + esc(s.name) + '</div></div>').join('');
+}
+
+function renderInfo(t){
+  const rows = [
+    ['任务 id', t.id], ['文件', t.file], ['类型', t.type], ['状态', t.status],
+    ['原始 state', t.rawState || '—'], ['开始', t.startedAt], ['耗时', humanMs(t.durationMs)],
+    ['记录条数', String(t.recordCount)], ['日志行数', String(t.lineCount)], ['错误条数', String(t.errorCount)],
+    ['结果', t.result]
+  ];
+  $('infoBox').innerHTML = rows.map(([k,v]) => '<div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div>').join('');
+}
+
+async function loadMailboxes(){
+  const d = await api('/api/mailboxes');
+  if (!d.ok){ $('mailBody').innerHTML = '<div class="empty">读取失败: ' + esc(d.error||'') + '</div>'; return; }
+  $('kMail').textContent = d.total;
+  $('mailCount').textContent = d.total + ' 个';
+  if (!d.total){ $('mailBody').innerHTML = '<div class="empty">' + esc(d.source) + ' 为空</div>'; return; }
+  $('mailBody').innerHTML = '<table><colgroup><col /><col style="width:76px" /></colgroup>'
+    + '<thead><tr><th>地址 / 状态 / 最近邮件</th><th></th></tr></thead><tbody>'
+    + d.mailboxes.map(mb => {
+      const last = (mb.lastMailAt || '').replace('T', ' ').slice(5, 16);
+      return '<tr title="' + esc((mb.reason||'') + (mb.lastCheckAt ? ' · 最近取码 ' + mb.lastCheckAt : '') + (mb.lastMailSubject ? ' · ' + mb.lastMailSubject : '')) + '">'
+        + '<td style="overflow:hidden">'
+        + '<div class="mb-addr" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(mb.address) + '</div>'
+        + '<div class="dim" style="font-size:11px">'
+        + '<span class="badge ' + (mb.reader==='graph'?'b-run':'b-neu') + '">' + esc(mb.reader||'–') + '</span> '
+        + '<span class="badge ' + (mb.status==='ok'?'b-ok':mb.status==='no_token'?'b-warn':'b-neu') + '">' + esc(mb.status||'–') + '</span>'
+        + ' <span class="mono" style="font-size:10.5px">最近邮件 ' + esc(last || '–') + '</span>'
+        + '</div></td>'
+        + '<td><button class="btn sm" data-mb="' + esc(mb.id) + '">取码</button></td>'
+        + '</tr>';
+    }).join('') + '</tbody></table>';
+}
+
+async function getCode(id, btn){
+  if (btn){ btn.disabled = true; btn.textContent = '读…'; }
+  const d = await api('/api/mail/code', {method:'POST', body: JSON.stringify({id})});
+  if (btn){ btn.disabled = false; btn.textContent = '取码'; }
+  const box = document.createElement('div');
+  box.className = 'tmsg ' + (d.ok ? 'ok' : 'err');
+  if (d.ok){
+    box.innerHTML = '<b>' + esc(d.address) + '</b><br>共 ' + d.count + ' 封 · 用时 ' + d.elapsedMs + 'ms'
+      + (d.code ? '<div class="code">' + esc(d.code) + '</div>' : '<div class="dim" style="margin:6px 0">主题里没有 6 位码，展开下面看原文</div>')
+      + '<div class="msglist">' + (d.messages||[]).map(m => '<div class="m"><div class="s">' + esc(m.subject||'(无主题)') + '</div><div class="d">' + esc(m.received) + ' · ' + esc(m.from) + '</div></div>').join('') + '</div>';
+  } else {
+    box.innerHTML = '<b>取码未完成</b><br>' + esc(d.note || d.error || '') + (d.hint ? '<br><span class="mono dim">' + esc(d.hint) + '</span>' : '');
+  }
+  $('toast').appendChild(box);
+  setTimeout(() => box.remove(), 20000);
+  loadMailboxes();
+}
+
+async function loadRoutes(){
+  const d = await api('/api/routes');
+  if (!d.ok) return;
+  ROUTES = d.modes || [];
+  $('realBadge').textContent = d.allowReal ? '真跑: 开关已开' : '仅演练';
+  $('realBadge').className = 'badge ' + (d.allowReal ? 'b-warn' : 'b-dry');
+  renderRoutes();
+}
+
+function renderRoutes(){
+  const mode = $('mode').value;
+  const m = ROUTES.find(x => x.mode === mode);
+  const list = (m && m.routes) || [];
+  $('route').innerHTML = list.map(r => '<option value="' + esc(r.id) + '">' + esc(r.label) + '</option>').join('');
+}
+
+async function launch(dryRun){
+  const body = {
+    mode: $('mode').value,
+    route: $('route').value,
+    dryRun,
+    params: {
+      email: $('pEmail').value.trim(),
+      phone: $('pPhone').value.trim(),
+      activation: $('pActivation').value.trim(),
+      proxyPort: $('pPort').value.trim(),
+      useRoxy: $('pRoxy').checked
+    }
+  };
+  const d = await api('/api/launch', {method:'POST', body: JSON.stringify(body)});
+  if (d.ok){
+    $('cmdBox').style.display = 'block';
+    $('cmdBox').textContent = '演练已记录: ' + d.file + '\n计划命令: ' + d.command;
+    toast('演练任务已写入 ' + d.jobId, 'ok');
+    await loadTasks();
+    await loadDetail(d.taskId || d.jobId);
+  } else {
+    $('cmdBox').style.display = 'block';
+    $('cmdBox').textContent = (d.error || '发起失败') + (d.command ? '\n可手动执行: ' + d.command : '');
+    toast(d.error || '发起失败', 'err');
+  }
+}
+
+// ------------------------------------------------------------------ 事件绑定
+$('mode').onchange = renderRoutes;
+$('btnRefresh').onclick = () => { loadTasks(); loadMailboxes(); if (SELECTED) loadDetail(SELECTED); };
+$('btnLaunch').onclick = () => launch(true);
+$('btnReal').onclick = () => launch(false);
+$('q').oninput = renderTasks;
+$('taskBody').onclick = (e) => {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  loadDetail(tr.getAttribute('data-id'));
+  if ($('tab-log').style.display === 'none') switchTab('log');
+};
+$('mailBody').onclick = (e) => {
+  const b = e.target.closest('button[data-mb]');
+  if (b) getCode(b.getAttribute('data-mb'), b);
+};
+$('shotBox').onclick = (e) => {
+  const el = e.target.closest('.shot');
+  if (!el) return;
+  $('overlayImg').src = '/api/shot?path=' + encodeURIComponent(el.getAttribute('data-path'));
+  $('overlayCap').textContent = el.getAttribute('data-name');
+  $('overlay').classList.add('on');
+};
+$('overlay').onclick = () => $('overlay').classList.remove('on');
+document.querySelectorAll('.tab').forEach(b => {
+  b.onclick = () => switchTab(b.getAttribute('data-tab'));
+});
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.getAttribute('data-tab') === name));
+  $('tab-log').style.display = name === 'log' ? 'block' : 'none';
+  $('tab-shots').style.display = name === 'shots' ? 'block' : 'none';
+  $('tab-info').style.display = name === 'info' ? 'block' : 'none';
+}
+
+// 轮询：列表 2s（可关），选中任务详情同步刷新
+setInterval(() => {
+  if (!$('autoRefresh').checked) return;
+  loadTasks();
+}, 2000);
+
+(async function boot(){
+  await loadRoutes();
+  await loadTasks();
+  await loadMailboxes();
+  const first = TASKS.find(t => t.status && t.status !== '无终态') || TASKS[0];
+  if (first) loadDetail(first.id);
+})();
+</script>
+</body>
+</html>

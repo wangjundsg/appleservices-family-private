@@ -30,6 +30,10 @@ const activation = String(arg("activation", ""));
 const previous = String(arg("previous", ""));
 const proxy = String(arg("proxy", ""));
 const egressIP = String(arg("egress-ip", ""));
+// The code comes from whichever provider rented the number. Same handler_api
+// protocol, different host: --sms-api keeps hero as the default and lets the
+// country matrix (grizzly) drive the same stage.
+const smsApi = String(arg("sms-api", "https://hero-sms.com/stubs/handler_api.php"));
 
 // Account-level profile: read the frozen fingerprint and record what was
 // actually used. GSA's own User-Agent comes from the anisette identity, so it
@@ -64,7 +68,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function codeOnce() {
   const res = await fetch(
-    `https://hero-sms.com/stubs/handler_api.php?api_key=${heroKey}&action=getStatus&id=${activation}`,
+    `${smsApi}?api_key=${heroKey}&action=getStatus&id=${activation}`,
   );
   const text = (await res.text()).trim();
   if (!text.startsWith("STATUS_OK")) return "";

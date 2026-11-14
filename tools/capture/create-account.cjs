@@ -42,6 +42,15 @@
 // the literal default the script used to fall back to, so a forgotten flag can
 // no longer create an account with a password that is public in this repo.
 //
+// Flow mechanics, rebuilt after the 2026-11-14 G5 run (.cache/cm/G5b) where a
+// rejected captcha re-typed the whole form, the Continue click could land on
+// "Mã Mới", the email step closed the window the moment the inbox was empty,
+// and nothing in run.jsonl said why the run had ended:
+//   A  fillForm types only what is not already right      flow-mechanics.fillField
+//   B  the submit is resolved by type=submit, then label, never by position
+//   C  the email step waits 90s, asks one resend, then 120s more
+//   D  every exit writes one {"kind":"close","reason":"..."} record
+//
 // Exit codes (review item B4 — success needs evidence, not hope):
 //   0  state=success       an explicit terminal screen was read back
 //   1  state=failed        the run provably did not create the account
@@ -53,7 +62,11 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const flow = require("./account-flow.cjs");
+const lifecycle = require("./registration-lifecycle.cjs");
+const privateInput = lifecycle.readInput(process.env.APPLESERVICES_CREATE_INPUT);
+let leaseDeadline = Infinity;
 const lib = require("./capture-lib.cjs");
+const mech = require("./flow-mechanics.cjs");
 const graphMail = require("./graph-mail.cjs");
 const preflight = require("./preflight.cjs");
 const refund = require("./refund.cjs");
@@ -61,6 +74,11 @@ const { chromium } = require("D:/appleservices-family-private/.tools/js/node_mod
 
 const MAIL_HOST = "https://abc-temp-2026.shop";
 const HERO_API = "https://hero-sms.com/stubs/handler_api.php";
+// The provider is a parameter, not a fact: hero-sms and grizzly-sms speak the
+// same handler_api protocol on different hosts, and the country matrix rents
+// from grizzly while the hero runs stay as they were. --sms-api overrides it;
+// the key keeps its --hero-key flag name so existing invocations are unchanged.
+const SMS_API_BASE = String(arg("sms-api", HERO_API) || HERO_API);
 
 function arg(name, fallback) {
   const flag = `--${name}`;
@@ -72,7 +90,7 @@ function arg(name, fallback) {
     }
     if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
   }
-  return fallback;
+  return Object.hasOwn(privateInput, name) ? privateInput[name] : fallback;
 }
 
 // Boolean flags are spelled --flag or --flag=true; a bare "--flag false" is not
@@ -89,7 +107,7 @@ const email = String(arg("email", ""));
 const jwt = String(arg("jwt", ""));
 const phone = String(arg("phone", ""));
 const activation = String(arg("activation", ""));
-const heroKey = String(arg("hero-key", ""));
+const heroKey = String(arg("hero-key", process.env.APPLESERVICES_SMS_KEY || ""));
 const awaitCaptcha = String(arg("await-captcha", ""));
 // --preflight gates the browser on the captcha resource being reachable at all;
 // --auto-refund cancels the number before any non-zero exit (run-20261113 §4.5,
@@ -158,6 +176,49 @@ function writeRunLog() {
 // Module scope so the failure handler can stamp the terminal record too.
 const startedAt = Date.now();
 
+// D: one close record per run, whichever path ends it. The old driver closed the
+// window (or was closed by the caller) with nothing in run.jsonl to say whether
+// Apple had refused, the code never arrived, or the script itself fell over.
+// `reason` is flow-mechanics.closeRecord, so the vocabulary is the shared one and
+// an unexpected value degrades to script-error instead of vanishing.
+let closeLogged = false;
+function logClose(reason, extra = {}) {
+  if (closeLogged) return;
+  closeLogged = true;
+  note("close", mech.closeRecord(reason, extra));
+}
+
+// Identity that goes into the form. The OS A/B randomises it per run (Anglo
+// name pool, birthday anywhere in 1920..2000) and records what was submitted,
+// because "which identity did this attempt carry" is not recoverable from a
+// screenshot after the fact.
+const firstName = String(arg("first", "James"));
+const lastName = String(arg("last", "Carter"));
+const birthMonth = String(arg("birth-month", "07")).padStart(2, "0");
+const birthDay = String(arg("birth-day", "18")).padStart(2, "0");
+const birthYear = String(arg("birth-year", "1992"));
+
+// livePage is the page the run is driving, held at module scope so the failure
+// handler can still capture evidence after an exception unwound the stack.
+// failShot writes the whole page plus its text under
+// fail-<reason>-<timestamp>.png/.txt: a failed attempt with no evidence is a
+// wasted number.
+let livePage = null;
+async function failShot(reason) {
+  const tag = `fail-${String(reason || "unknown").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 60)}-${new Date()
+    .toISOString()
+    .replace(/[:.]/g, "")}`;
+  try {
+    if (livePage) await livePage.screenshot({ path: path.join(outdir, `${tag}.png`), fullPage: true }).catch(() => {});
+    if (livePage) {
+      const text = await livePage.evaluate(() => (document.body ? document.body.innerText : "")).catch(() => "");
+      fs.writeFileSync(path.join(outdir, `${tag}.txt`), String(text).slice(0, 20000), "utf8");
+    }
+  } catch {}
+  note("evidence", { at: "fail-shot", tag });
+  return tag;
+}
+
 // ---- refund (run-20261113 §4.7) -------------------------------------------
 // The number is bought before the form and stays rented when the run dies at
 // the captcha. With --auto-refund the driver cancels it exactly once, before the
@@ -167,6 +228,7 @@ const startedAt = Date.now();
 let refundAttempted = false;
 let phoneSubmitted = false;
 async function autoRefund(reason) {
+  if (!lifecycle.refundable(reason)) return null;
   if (refundAttempted) return null;
   refundAttempted = true;
   if (!autoRefundEnabled) return null;
@@ -176,7 +238,7 @@ async function autoRefund(reason) {
   }
   let result;
   try {
-    result = await refund.refundActivation({ heroKey, activation });
+    result = await refund.refundActivation({ heroKey, activation, apiBase: SMS_API_BASE });
   } catch (e) {
     result = { ok: false, response: "", error: clip(e && e.message ? e.message : e, 160) };
   }
@@ -227,13 +289,20 @@ const awaitEmailFile = String(arg("await-email-code", ""));
 // --graph-token-file is the unattended alternative to --await-email-code: the
 // code is read out of the registration mailbox itself (see graph-mail.cjs).
 const graphTokenFile = String(arg("graph-token-file", ""));
-async function manualEmailCode() {
+async function manualEmailCode(timeoutMs = 600000) {
   const answerFile = path.resolve(awaitEmailFile);
   const value = await waitFor(async () => {
+  try {
+    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
+  } catch {
+    const err = new Error("invalid activation expiry");
+    err.state = "usage";
+    throw err;
+  }
     if (!fs.existsSync(answerFile)) return "";
     const raw = fs.readFileSync(answerFile, "utf8").trim();
     return /^\d{4,8}$/.test(raw) ? raw : "";
-  }, 600000, "email-code-manual");
+  }, timeoutMs, "email-code-manual");
   if (!value) return null;
   fs.rmSync(answerFile, { force: true });
   return { code: value, messageId: "manual", created_at: new Date().toISOString() };
@@ -244,14 +313,14 @@ async function manualEmailCode() {
 // API. Same contract as the two other modes — a code object or null, and the
 // code value itself never reaches run.jsonl (review A2): only whether it
 // arrived, how long the wait took and the id of the message it came from.
-async function graphEmailCode(since) {
+async function graphEmailCode(since, timeoutMs = 180000) {
   const hit = await graphMail.pollCode({
     file: graphTokenFile,
     since,
     mailbox: email,
     senderDomains,
     intervalMs: 5000,
-    timeoutMs: 180000,
+    timeoutMs: Math.max(0, Math.min(timeoutMs, leaseDeadline - Date.now())),
     onTick: ({ round, messages, hit: found }) => note("graph-poll", { round, messages, found }),
   });
   if (!hit.ok) {
@@ -273,15 +342,27 @@ async function latestEmailCode(since) {
 }
 
 async function smsCode() {
-  const url = `${HERO_API}?api_key=${heroKey}&action=getStatus&id=${activation}`;
+  const url = `${SMS_API_BASE}?api_key=${heroKey}&action=getStatus&id=${activation}`;
   const res = await fetch(url);
   const text = (await res.text()).trim();
-  if (text.startsWith("STATUS_OK")) return text.split(":")[1] || "";
+  if (text.startsWith("STATUS_OK")) {
+    const code = text.split(":")[1] || "";
+    // The chain after creation asks Apple for a *second* code on the same
+    // number; gsa-login has to be told which code is already spent. The value
+    // goes to a private file, never to the log (run-20261113 §A2).
+    const codeOut = arg("sms-code-out", "");
+    if (code && codeOut) {
+      try {
+        fs.writeFileSync(path.resolve(String(codeOut)), `${code}\n`, { mode: 0o600 });
+      } catch {}
+    }
+    return code;
+  }
   return "";
 }
 
 async function waitFor(producer, timeoutMs, label) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Math.min(Date.now() + timeoutMs, leaseDeadline);
   while (Date.now() < deadline) {
     try {
       const value = await producer();
@@ -503,6 +584,35 @@ async function widgetText(page) {
   return frame.evaluate(() => document.body?.innerText || "").catch(() => "");
 }
 
+// Apple translates its refusal; the meaning does not change. Folding the
+// diacritics is what makes the Romanian and Vietnamese spellings matchable, and
+// a disabled Submit next to a visible error note is the same verdict without
+// any words at all (the fr-CA form of 2026-11-14 showed only the French
+// sentence, so the English check walked straight past it and spent four
+// captcha rounds on a form Apple had already rejected).
+const HARD_REFUSAL_PHRASES = [
+  "cannot be created at this time",
+  "impossible de creer",
+  "no se puede crear",
+  "tidak dapat dibuat",
+  "khong the tao",
+  "nu poate fi creat",
+  "kann derzeit nicht erstellt",
+];
+const foldText = (value) => String(value == null ? "" : value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+async function hardRefusal(frame, pageText) {
+  const folded = foldText(pageText);
+  const phrase = HARD_REFUSAL_PHRASES.find((item) => folded.includes(item));
+  if (phrase) return { hit: true, signal: "phrase", phrase };
+  // No second signal on purpose. A disabled Submit is what a *wrong captcha*
+  // looks like too: Apple clears the box and greys the button, so the same DOM
+  // state means both "refused" and "try the picture again" (G3, id-ID,
+  // 2026-11-14: the button state ended a run that Apple had not refused). The
+  // sentence is the only signal that distinguishes them.
+  return { hit: false };
+}
+
 
 // Human-paced typing. A .fill() drops a 29-character address in 0 ms, which is
 // the loudest possible automation signal; this types one key at a time with a
@@ -516,6 +626,21 @@ async function selectHuman(locator, value, label = "") {
   await locator.selectOption(value, { timeout: 15000 }).catch(() => {});
   await sleep(250 + Math.floor(Math.random() * 450));
   if (label) note("step", { at: "selected", field: label, value: String(value) });
+}
+
+
+// A rejected captcha only clears the captcha field; the rest of the form keeps
+// its values. Re-typing everything is both slow and, on a retry, looks absurd -
+// so read the field first and leave it alone when it is already right.
+// A is flow-mechanics.fillField; this wrapper only supplies the typer and the
+// log sink, so the rule itself is unit-tested against a fake locator.
+async function fillIfNeeded(locator, value, label = "") {
+  return mech.fillField(locator, value, label, { type: typeHuman, log: note });
+}
+
+// The same read-first rule for the three birthday dropdowns.
+async function selectIfNeeded(locator, value, label = "") {
+  return mech.selectField(locator, value, label, { choose: selectHuman, log: note });
 }
 
 async function typeHuman(locator, text, label = "") {
@@ -610,6 +735,13 @@ async function solveCaptcha(page, fr, tag) {
   note("step", { at: "captcha-image", tag, natural: pick.natural, src_kind: pick.src_kind });
   await locator.screenshot({ path: path.join(outdir, `${tag}.png`), scale: "css" }).catch(() => {});
   const answer = await waitFor(async () => {
+  try {
+    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
+  } catch {
+    const err = new Error("invalid activation expiry");
+    err.state = "usage";
+    throw err;
+  }
     if (!fs.existsSync(answerFile)) return "";
     const v = fs.readFileSync(answerFile, "utf8").trim();
     return v.length >= 4 ? v : "";
@@ -649,36 +781,52 @@ async function readPhase(page) {
   };
 }
 
-// clickContinue carries review item A3. The old version answered a click
-// timeout with `click({force:true})`, which can submit the same form twice and
-// leaves nothing in the log to tell which submit landed. A timeout is now a
-// decision point: read the page back and only click again when the readback
-// proves nothing was submitted (widget still there, form still there, screen
-// unchanged). Anything else is "result unknown" and the run exits non-zero.
+// clickContinue carries review item A3 and mechanism B.
+//
+// B: the button is resolved by flow-mechanics.findSubmit — a real
+// `button[type="submit"]` first, then the label — and the refresh controls
+// ("换一张" / "Mã Mới" / "Send a new code") are excluded by text. The old
+// selector OR-ed a submit button together with any button whose text contained
+// "Continue" and then took `.first()`, which on the vi-VN page could resolve to
+// the refresh control; pressing that after typing a code throws the code away.
+//
+// A3: a click timeout is a decision point, not a retry. The page is read back
+// and the force-click only happens when the readback proves nothing was
+// submitted (widget still there, form still there, screen unchanged).
 async function clickContinue(page, frame, tag = "") {
-  const btn = frame.locator('button[type="submit"], button:has-text("Continue")').first();
   const before = await readPhase(page);
-  try {
-    await btn.click({ timeout: 15000 });
-    return { clicked: true, retried: false };
-  } catch (e) {
-    // A click that times out because the button is disabled looks identical to a
-    // wrong captcha in the log, and that ambiguity cost a whole paid run on
-    // 2026-11-14 (the real cause was Apple's "At least one special character"
-    // rule on the password). The inline form errors and the button state are
-    // captured here so the next reader sees the cause, not the symptom.
-    const diag = await frame
-      .evaluate(() => {
-        const btn = document.querySelector('button[type="submit"]');
-        const errors = [...document.querySelectorAll('[role="alert"], .form-message, .error, .form-textbox-error')]
-          .map((el) => (el.innerText || "").trim().replace(/\s+/g, " ").slice(0, 60))
-          .filter(Boolean)
-          .slice(0, 6);
-        return { disabled: btn ? Boolean(btn.disabled) : null, errors };
-      })
-      .catch(() => null);
-    note("step", { at: "click-timeout", tag, error: clip(e && e.message ? e.message : e, 160), ...(diag || {}) });
+  const tried = await mech.clickSubmit(frame, { mouse: page.mouse, sleep, log: note, tag });
+
+  if (tried.clicked) return { clicked: true, retried: false, via: tried.via };
+
+  if (tried.reason === "submit-not-found" || tried.reason === "submit-disabled") {
+    // No second attempt on the same button: it is either not there or Apple has
+    // already disabled it (a disabled Continue is Apple's own refusal — the
+    // "At least one special character" run died here and was retried 4 times).
+    const err = new Error(`submit button unusable (${tried.reason}) for ${tag || "continue"}`);
+    err.state = "unknown";
+    err.evidence = `${tried.reason}:${tag || "continue"}`;
+    err.closeReason = "submit-failed";
+    throw err;
   }
+
+  // click-timeout: the button was pressed but the click never acknowledged.
+  // A click that times out because the button is disabled looks identical to a
+  // wrong captcha in the log, and that ambiguity cost a whole paid run on
+  // 2026-11-14. The inline form errors and the button state are recorded here so
+  // the next reader sees the cause, not the symptom.
+  const diag = await frame
+    .evaluate(() => {
+      const btn = document.querySelector('button[type="submit"]');
+      const errors = [...document.querySelectorAll('[role="alert"], .form-message, .error, .form-textbox-error')]
+        .map((el) => (el.innerText || "").trim().replace(/\s+/g, " ").slice(0, 60))
+        .filter(Boolean)
+        .slice(0, 6);
+      return { disabled: btn ? Boolean(btn.disabled) : null, errors };
+    })
+    .catch(() => null);
+  note("step", { at: "click-timeout", tag, error: tried.error, ...(diag || {}) });
+
   // Let a possible navigation settle first: the readback has to describe the
   // page the click produced, not the one it was fired from.
   await sleep(1500);
@@ -700,13 +848,43 @@ async function clickContinue(page, frame, tag = "") {
     const err = new Error(`click timed out and the submission result is unknown (${tag || "continue"})`);
     err.state = "unknown";
     err.evidence = `click-timeout:${tag || "continue"}`;
+    err.closeReason = "submit-failed";
     throw err;
   }
-  await btn.click({ force: true }).catch(() => {});
+  await tried.locator.click({ force: true }).catch(() => {});
+  note("step", { at: "submit-retry-after-readback", tag, reason: "nothing was submitted" });
   return { clicked: true, retried: true };
 }
 
+// C: one "send it again" press, by text, after the first 90s did not produce a
+// code. Never by coordinates and never on the captcha refresh control: on the
+// email step the resend action IS "Send a new code" / "Gửi mã mới", which is the
+// same copy the submit finder has to avoid on the form. A control that is not on
+// the page is a logged skip, not a failed run.
+async function resendEmailCode(page, frame) {
+  const found = await mech.findAction(frame, mech.RESEND_LABELS);
+  if (!found.ok) {
+    note("step", { at: "email-resend-not-found", reason: found.reason });
+    return { asked: false, ok: false, how: "not-found" };
+  }
+  try {
+    await mech.clickElement(found.locator, { mouse: page.mouse, sleep });
+  } catch (e) {
+    note("step", { at: "email-resend-failed", text: clip(found.text, 40), error: clip(e && e.message ? e.message : e, 120) });
+    return { asked: true, ok: false, how: "click-failed", text: clip(found.text, 40) };
+  }
+  await sleep(1500);
+  return { asked: true, ok: true, how: "clicked", text: clip(found.text, 40) };
+}
+
 (async () => {
+  try {
+    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
+  } catch {
+    const err = new Error("invalid activation expiry");
+    err.state = "usage";
+    throw err;
+  }
   // The account directory exists before the first refusal so a refused run still
   // leaves run.jsonl (including the refund answer) next to its siblings.
   fs.mkdirSync(outdir, { recursive: true });
@@ -795,7 +973,7 @@ async function clickContinue(page, frame, tag = "") {
 
   const launchOpts = {
     channel: "chrome",
-    headless: true,
+    headless: !flagOn("headed"),
     // Autofill is off at the browser level as well: a saved credential in the
     // profile rewrote the address box once already (group B, 2026-11-14).
     args: [
@@ -957,6 +1135,35 @@ async function clickContinue(page, frame, tag = "") {
   );
     page = await context.newPage();
   }
+  livePage = page;
+  // What the browser actually reports. In attach mode the block above already
+  // wrote it; in standalone mode this is the only measurement of the identity
+  // that went out, because the profile file is what we asked for, not proof.
+  if (!attachMode) {
+    const seen = await page
+      .evaluate(() => ({
+        ua: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        languages: navigator.languages,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        webdriver: navigator.webdriver,
+        screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
+      }))
+      .catch(() => null);
+    if (seen) {
+      try {
+        fs.writeFileSync(path.join(outdir, "actual-fingerprint.json"), `${JSON.stringify(seen, null, 2)}\n`, "utf8");
+      } catch {}
+      note("step", {
+        at: "actual-fingerprint",
+        platform: seen.platform,
+        language: seen.language,
+        timeZone: seen.timeZone,
+        webdriver: seen.webdriver,
+      });
+    }
+  }
   // Review A2: this listener used to copy up to 1200 bytes of every
   // validate/captcha response body into run.jsonl, which echoed the submitted
   // identifier and the captcha verdict. Only status, path and an Apple error
@@ -1012,10 +1219,6 @@ async function clickContinue(page, frame, tag = "") {
   // the address, the password and the phone number on the second pass and made
   // Apple answer "Enter a valid email address" -- our own defect, not a verdict.
   // Every text field is therefore emptied first.
-  const retype = async (locator, text, label) => {
-    await locator.fill("").catch(() => {});
-    await typeHuman(locator, text, label);
-  };
   // The value that gets submitted is the value in the box, not the flag. A
   // saved-credential autofill inside the profile rewrote one digit of the
   // address after it had been typed (2026-11-14 group B: ...167 became ...187
@@ -1023,13 +1226,24 @@ async function clickContinue(page, frame, tag = "") {
   // is therefore read back, re-filled once on disagreement, and the run stops
   // with a named evidence code when it still disagrees.
   const fieldValue = (fr, selector) => fr.$eval(selector, (el) => el.value).catch(() => "");
+  // Some dialling codes make the widget reformat as it is typed: a +1 number
+  // comes back as "(873) 891-9063". That is the same number with punctuation,
+  // not a failed fill, so the phone field is compared on its digits (G2,
+  // 2026-11-14: the run died on a mismatch that was only parentheses).
+  const sameFieldValue = (selector, actual, want) =>
+    selector.includes("phoneNumber")
+      ? String(actual).replace(/\D/g, "") === String(want).replace(/\D/g, "")
+      : actual === want;
   const ensureField = async (fr, selector, want, label, { secret = false } = {}) => {
     let value = await fieldValue(fr, selector);
-    if (value !== want) {
-      await retype(fr.locator(selector), want, `${label}_retry`);
+    if (!sameFieldValue(selector, value, want)) {
+      // The repair goes through the same read-first rule (A): a box that is
+      // already right is never touched, so a retry after a rejected captcha
+      // does not look like a typist with no memory.
+      await fillIfNeeded(fr.locator(selector), want, `${label}_retry`);
       value = await fieldValue(fr, selector);
     }
-    const ok = value === want;
+    const ok = sameFieldValue(selector, value, want);
     note("step", {
       at: "field-check",
       field: label,
@@ -1059,26 +1273,36 @@ async function clickContinue(page, frame, tag = "") {
   };
   const fillForm = async (fr) => {
     await noAutofill(fr);
-    await retype(fr.locator('input[name="firstName"]'), arg("first", "James"), "first_name");
-    await retype(fr.locator('input[name="lastName"]'), arg("last", "Carter"), "last_name");
-    await selectHuman(fr.locator('select[name="countrySelect"]'), "USA", "country");
+    // A rejected captcha returns to this same form with everything still in it,
+    // so every field is read before it is typed into. The first pass types;
+    // every later pass finds the value already there and says so (`field-kept`).
+    await fillIfNeeded(fr.locator('input[name="firstName"]'), firstName, "first_name");
+    await fillIfNeeded(fr.locator('input[name="lastName"]'), lastName, "last_name");
+    await selectIfNeeded(fr.locator('select[name="countrySelect"]'), "USA", "country");
     // The birthday is three separate selects whose DOM order on the 2026-11-14
     // build is day, month, year. Index-based selection sent the day value to the
     // month select and stalled for 30s without submitting anything; the stable
     // handle is the data-testid each of them carries.
-    await selectHuman(fr.locator('select[data-testid="select-month"]'), "07", "birth_month");
-    await selectHuman(fr.locator('select[data-testid="select-day"]'), "18", "birth_day");
-    await selectHuman(fr.locator('select[data-testid="select-year"]'), "1992", "birth_year");
-    await retype(fr.locator('input[name="appleId"]'), email, "apple_id");
-    await retype(fr.locator('input[name="password"]'), password, "password");
-    await retype(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
-    await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
+    await selectIfNeeded(fr.locator('select[data-testid="select-month"]'), birthMonth, "birth_month");
+    await selectIfNeeded(fr.locator('select[data-testid="select-day"]'), birthDay, "birth_day");
+    await selectIfNeeded(fr.locator('select[data-testid="select-year"]'), birthYear, "birth_year");
+    note("step", {
+      at: "identity",
+      first: firstName,
+      last: lastName,
+      birth: `${birthMonth}/${birthDay}/${birthYear}`,
+    });
+    await fillIfNeeded(fr.locator('input[name="appleId"]'), email, "apple_id");
+    await fillIfNeeded(fr.locator('input[name="password"]'), password, "password");
+    await fillIfNeeded(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
+    await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
     // The widget hydrates ~4-6s later and silently resets the dial code to US;
     // the number then validates as +1 and the form never submits. Wait it out and
-    // re-assert our choice (run-20261113d 2.1).
+    // re-assert our choice (run-20261113d 2.1). The re-assert is a read-first
+    // select too, so a widget that kept the value is simply left alone.
     await sleep(7000);
-    await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
-    await retype(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
+    await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+    await fillIfNeeded(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
     // The same hydration pass is what let autofill rewrite the address, so the
     // four value-bearing fields are asserted again after it, right before the
     // captcha is solved and the button is pressed.
@@ -1089,7 +1313,7 @@ async function clickContinue(page, frame, tag = "") {
     await ensureField(fr, 'input[name="phoneNumber"]', phone, "phone_number");
     let dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
     if (dial !== phoneCC) {
-      await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+      await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
       await sleep(400);
       dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
     }
@@ -1169,6 +1393,7 @@ async function clickContinue(page, frame, tag = "") {
       const err = new Error("captcha image stuck: the page kept returning the same picture");
       err.state = "unknown";
       err.evidence = "captcha_image_stuck";
+      err.closeReason = "captcha-exhausted";
       throw err;
     }
     note("step", { at: "captcha-ready", attempt });
@@ -1198,12 +1423,23 @@ async function clickContinue(page, frame, tag = "") {
     }
     if (!answer) {
       answer = await waitFor(async () => {
+  try {
+    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
+  } catch {
+    const err = new Error("invalid activation expiry");
+    err.state = "usage";
+    throw err;
+  }
         if (!fs.existsSync(answerFile)) return "";
         const v = fs.readFileSync(answerFile, "utf8").trim();
         return v.length >= 3 ? v : "";
       }, 240000, "captcha");
     }
-    if (!answer) throw new Error("captcha answer never arrived");
+    if (!answer) {
+      const err = new Error("captcha answer never arrived");
+      err.closeReason = "captcha-exhausted";
+      throw err;
+    }
     note("step", { at: "captcha-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
 
     await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha_inline");
@@ -1237,12 +1473,18 @@ async function clickContinue(page, frame, tag = "") {
       // keeps the form on screen but has already decided (run-20261114-run2
       // section 2, the hard reject). Continuing only hammers the same address
       // and the same exit for nothing.
+      // The sentence is localised (G2, fr-CA: "Impossible de créer votre compte
+      // pour le moment"), so the check is a phrase list over the folded text
+      // plus the language-independent signal: Submit disabled with an error note
+      // on the form.
       const pageText = (await widgetText(page)).replace(/\s+/g, " ");
-      if (/cannot be created at this time/i.test(pageText)) {
-        note("step", { at: "hard-reject", attempt, text: pageText.slice(0, 200) });
-        const err = new Error("apple refused: your account cannot be created at this time");
+      const refusal = await hardRefusal(fr, pageText);
+      if (refusal.hit) {
+        note("step", { at: "hard-reject", attempt, text: pageText.slice(0, 200), signal: refusal.signal, phrase: refusal.phrase });
+        const err = new Error(`apple refused: ${refusal.phrase || "hard refusal"}`);
         err.state = "failed";
         err.evidence = `hard-reject:${attempt}`;
+        err.closeReason = "hard-reject";
         throw err;
       }
       // Apple replaces the image by itself after a rejection; never click
@@ -1255,7 +1497,13 @@ async function clickContinue(page, frame, tag = "") {
     }
     note("step", { at: "submit-result", attempt, stillForm: Boolean(stillForm) });
   }
-  if (!submitted) throw new Error("captcha never accepted");
+  if (!submitted) {
+    const err = new Error("captcha never accepted");
+    err.state = "unknown";
+    err.evidence = "captcha-never-accepted";
+    err.closeReason = "captcha-exhausted";
+    throw err;
+  }
   // A person does not land on Continue the instant the last field is filled:
   // drift the pointer, settle, then commit.
   await page.mouse.move(320 + Math.floor(Math.random() * 260), 380 + Math.floor(Math.random() * 180), { steps: 18 }).catch(() => {});
@@ -1272,6 +1520,13 @@ async function clickContinue(page, frame, tag = "") {
   // `unknown` with a non-zero exit instead of being upgraded to success.
   let finalState = "unknown";
   let finalEvidence = "";
+  // D: why this run ends. Every break sets it, so the close record never has to
+  // guess; an exit that throws carries its own `err.closeReason` into the
+  // handler, and anything else falls back to flow-mechanics.closeReasonFor.
+  let closeReason = "";
+  let closeExtra = {};
+  // C: what the email step waited and whether it asked for a resend.
+  let emailWindow = null;
   for (let step = 1; step <= 8; step += 1) {
     const current = await widgetFrame(page);
     const text = (await widgetText(page)).replace(/\s+/g, " ");
@@ -1279,15 +1534,17 @@ async function clickContinue(page, frame, tag = "") {
       // The widget can disappear because the flow finished (Apple lands on the
       // account page) or because the session died. Only the explicit terminal
       // page counts; everything else is unknown, never success.
-      const verdict = flow.classifyScreen({ text, url: page.url() });
+      const verdict = flow.classifyScreen({ text, url: page.url(), email, phone });
       note("step", { at: `screen-${step}`, state: verdict, text: text.slice(0, 300) });
       if (verdict === "success") {
         finalState = "success";
         finalEvidence = `terminal-page:${step}`;
+        closeReason = "success";
         break;
       }
       finalState = "unknown";
       finalEvidence = "widget-frame-missing";
+      closeReason = "unknown-screen";
       break;
     }
 
@@ -1297,32 +1554,60 @@ async function clickContinue(page, frame, tag = "") {
       continue;
     }
 
-    const verdict = flow.classifyScreen({ text, url: page.url() });
+    const verdict = flow.classifyScreen({ text, url: page.url(), email, phone });
     note("step", { at: `screen-${step}`, state: verdict, text: text.slice(0, 300) });
     if (verdict === "success") {
       finalState = "success";
       finalEvidence = `terminal-screen:${step}`;
+      closeReason = "success";
       break;
     }
     if (verdict === "unknown") {
       finalState = "unknown";
       finalEvidence = `unrecognized-screen:${step}`;
+      closeReason = "unknown-screen";
       break;
     }
 
     const stepStartedAt = Date.now();
     // Priority: a Graph mailbox is unattended, the manual file is a human, and
-    // the legacy temp-mail API is the fallback when neither was given.
+    // the legacy temp-mail API is the fallback when neither was given. Each
+    // picker now takes the window it is given: mechanism C owns the timing.
     const emailPicker = graphTokenFile
-      ? () => graphEmailCode(stepStartedAt)
+      ? (windowMs) => graphEmailCode(stepStartedAt, windowMs)
       : awaitEmailFile
-        ? manualEmailCode
-        : () => waitFor(() => latestEmailCode(startedAt), 180000, "email-code");
-    const picked =
-      verdict === "email_step"
-        ? await emailPicker()
-        : await waitFor(smsCode, 180000, "sms-code");
-    const code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
+        ? (windowMs) => manualEmailCode(windowMs)
+        : (windowMs) => waitFor(() => latestEmailCode(startedAt), windowMs, "email-code");
+    let picked;
+    if (verdict === "email_step") {
+      // C: 90s, one resend, 120s more. The old code treated the first empty poll
+      // as the end of the run and closed the window with a number still rented.
+      const window = await mech.emailCodeWindow({
+        waitCode: (windowMs) => emailPicker(windowMs),
+        resend: () => resendEmailCode(page, current),
+        log: note,
+      });
+      note("step", {
+        at: "email-window",
+        waited_ms: window.waitedMs,
+        waited_s: Math.round(window.waitedMs / 1000),
+        rescanned: window.rescanned ? "yes" : "no",
+        received: Boolean(window.code),
+      });
+      picked = window.picked;
+      emailWindow = window;
+    } else {
+      picked = await waitFor(smsCode, 180000, "sms-code");
+    }
+    let code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
+    if (!code) {
+      const late = await lifecycle.retainInput({
+        deadline: leaseDeadline,
+        notify: () => note("step", { at: verdict, state: "waiting_input", expires_at: new Date(leaseDeadline).toISOString() }),
+        poll: ms => verdict === "email_step" ? emailPicker(ms) : waitFor(smsCode, ms, "sms-code"),
+      });
+      code = late && typeof late === "object" ? String(late.code || "") : String(late || "");
+    }
     // Review A2: the log records that a code arrived, how long it took and which
     // message it came from — never the code itself.
     note("step", {
@@ -1337,9 +1622,24 @@ async function clickContinue(page, frame, tag = "") {
       await shot(`0${step + 1}-no-code`);
       finalState = "waiting_input";
       finalEvidence = `${verdict}-code-timeout`;
+      // C/D: name what was waited and whether the page was asked to send again,
+      // so the close record reads `waited=210s rescanned=yes` verbatim.
+      if (verdict === "email_step") {
+        const waitedS = emailWindow ? Math.round(emailWindow.waitedMs / 1000) : 0;
+        const rescanned = emailWindow && emailWindow.rescanned ? "yes" : "no";
+        closeReason = "email-code-timeout";
+        closeExtra = {
+          waited_ms: emailWindow ? emailWindow.waitedMs : 0,
+          waited: `${waitedS}s`,
+          rescanned,
+          note: `email-code-timeout waited=${waitedS}s rescanned=${rescanned}`,
+        };
+      } else {
+        closeReason = "sms-code-timeout";
+      }
       break;
     }
-    phoneSubmitted = true;
+    phoneSubmitted = verdict === "phone_step";
     await fillDigits(current, code);
     // Review A2: mask the authentication inputs before this screenshot.
     await shot(`0${step + 1}-code-filled`, { maskAuth: true });
@@ -1353,7 +1653,14 @@ async function clickContinue(page, frame, tag = "") {
   // before the terminal record so the log ends with the state of the run
   // (run-20261113 §4.7).
   const exitCode = flow.EXIT_CODES[finalState] ?? flow.EXIT_CODES.failed;
+  // Evidence before teardown: the whole page at the moment the run gave up.
+  if (exitCode !== 0) await failShot(`${finalState}_${clip(finalEvidence, 40)}`);
   if (exitCode !== 0) await autoRefund(finalState);
+
+  // D: the close record goes before the terminal record, so run.jsonl still ends
+  // on the state the process exits with (review B4) while every reader can see
+  // why the window was let go.
+  logClose(closeReason || mech.closeReasonFor({ state: finalState, evidence: finalEvidence }), closeExtra);
 
   // The terminal record goes last so a reader of run.jsonl sees the same state
   // this process exits with.
@@ -1378,7 +1685,15 @@ async function clickContinue(page, frame, tag = "") {
     state = "likely_success";
   }
   note("error", { error: clip(e && e.message ? e.message : e, 300) });
+  await failShot(`${state}_${clip((e && e.evidence) || (e && e.message) || "error", 40)}`);
   await autoRefund(state);
+  // D: a thrown exit names its reason too. The throw sites that know their
+  // category carry `err.closeReason`; everything else is derived from the state
+  // and the evidence the handler already has.
+  logClose(
+    (e && e.closeReason) || mech.closeReasonFor({ state, evidence: (e && e.evidence) || "", message: (e && e.message) || "" }),
+    { state, evidence: clip((e && e.evidence) || "", 120) },
+  );
   note("final", { state, evidence: clip((e && e.evidence) || "", 160), elapsed_ms: Date.now() - startedAt });
   writeRunLog();
   // A usage refusal prints its structured report (the same JSON the caller

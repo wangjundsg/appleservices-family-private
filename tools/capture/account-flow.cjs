@@ -220,10 +220,18 @@ const SCREEN_STATES = Object.freeze(["email_step", "phone_step", "success", "unk
 // review asks for. A screen that still asks for a code is never success even if
 // it also says "welcome", because that is exactly the page a stale run reads
 // right before typing an old code.
-function classifyScreen({ text = "", url = "" } = {}) {
+function classifyScreen({ text = "", url = "", email = "", phone = "" } = {}) {
   const body = String(text || "").replace(/\s+/g, " ").trim();
-  const asksEmail = EMAIL_DELIVERY.test(body);
-  const asksPhone = PHONE_DELIVERY.test(body);
+  // Apple writes these screens in the account's language. The English regexes
+  // below are the primary signal, but the address and the number are literal
+  // whatever the page says: a Vietnamese "Nhập mã xác minh đã gửi đến:
+  // <mailbox>" is an email step with no English in it at all (G5, 2026-11-14,
+  // where the run called that page "unknown" and dropped a submitted form).
+  const literalEmail = String(email || "").trim();
+  const phoneDigits = String(phone || "").replace(/\D/g, "");
+  const bodyDigits = body.replace(/\D/g, "");
+  const asksEmail = EMAIL_DELIVERY.test(body) || (literalEmail.length > 3 && body.includes(literalEmail));
+  const asksPhone = PHONE_DELIVERY.test(body) || (phoneDigits.length >= 7 && bodyDigits.includes(phoneDigits.slice(-8)));
   const askingForCode = asksEmail || asksPhone;
   if (!askingForCode && SUCCESS_URL.test(String(url || ""))) return "success";
   if (!askingForCode && SUCCESS_TEXT.test(body)) return "success";

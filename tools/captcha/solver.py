@@ -1,4 +1,4 @@
-﻿"""Image-challenge solver with a local-first fallback chain.
+"""Image-challenge solver with a local-first fallback chain.
 
 Order:
   1. local OCR (free, fast, ~20% exact match)
@@ -157,6 +157,35 @@ SOLVERS = {
 }
 
 
+def preprocess(path: str, scale: int = 4) -> bytes:
+    """Upscale and harden contrast before the paid read.
+
+    Apple's image challenge is 160x70 with heavy noise; at native size the online
+    readers confuse B/R and 8/3 often enough that a five-attempt run can burn out
+    on near misses (2026-11-14: OCR answered DHCBR for DhCBB). A 4x LANCZOS
+    upscale with a contrast stretch costs milliseconds and lifts the exact-match
+    rate noticeably. Falls back to the raw bytes when Pillow is unavailable.
+    """
+    try:
+        from PIL import Image, ImageEnhance, ImageOps
+    except Exception:
+        with open(path, "rb") as handle:
+            return handle.read()
+    try:
+        img = Image.open(path).convert("RGB")
+        img = ImageOps.autocontrast(img)
+        img = ImageEnhance.Sharpness(img).enhance(2.0)
+        img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+        import io
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        with open(path, "rb") as handle:
+            return handle.read()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
@@ -165,6 +194,7 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("--skip-local", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--upscale", type=int, default=4, help="pre-upscale factor before the paid read (0 disables)")
     args = ap.parse_args()
 
     if not os.path.exists(args.image):
@@ -178,8 +208,8 @@ def main() -> int:
             return 0
 
     key = args.key or os.environ.get(PROVIDERS[args.provider]["env"], "")
-    with open(args.image, "rb") as handle:
-        image_b64 = base64.b64encode(handle.read()).decode()
+    raw = preprocess(args.image, args.upscale) if args.upscale and args.upscale > 0 else open(args.image, "rb").read()
+    image_b64 = base64.b64encode(raw).decode()
 
     if args.dry_run:
         print(

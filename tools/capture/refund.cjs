@@ -30,26 +30,27 @@ function refundAccepted(response) {
   return REFUND_ACCEPTED.has(String(response == null ? "" : response).trim());
 }
 
-function heroURL(heroKey, activation) {
+function heroURL(heroKey, activation, apiBase = HERO_API) {
   const query = new URLSearchParams({
     api_key: String(heroKey),
     action: "setStatus",
     status: "8",
     id: String(activation),
   });
-  return `${HERO_API}?${query.toString()}`;
+  return `${String(apiBase || HERO_API)}?${query.toString()}`;
 }
 
-// refundActivation asks hero-sms to cancel the number. It returns the plain
+// refundActivation asks the provider to cancel the number. It returns the plain
 // answer {ok, response}; a transport failure throws and the caller decides
 // whether that matters (the create driver logs it and keeps its own exit code).
-async function refundActivation({ heroKey, activation, fetchImpl = globalThis.fetch, timeoutMs = 20_000 } = {}) {
+// apiBase exists because the same protocol is spoken by grizzly-sms as well.
+async function refundActivation({ heroKey, activation, apiBase = HERO_API, fetchImpl = globalThis.fetch, timeoutMs = 20_000 } = {}) {
   if (!heroKey || !activation) throw new Error("refund needs --hero-key and --activation");
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(heroURL(heroKey, activation), { signal: controller.signal });
+    const response = await fetchImpl(heroURL(heroKey, activation, apiBase), { signal: controller.signal });
     const text = String(await response.text()).trim();
     return {
       ok: refundAccepted(text),
