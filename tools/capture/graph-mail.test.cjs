@@ -112,6 +112,15 @@ test("codeFromText prefers the bold run and ignores a year or a long number", ()
   assert.equal(graph.codeFromText("<p>Call 09510293847 for help</p>"), "");
 });
 
+test("codeFromText takes the 6-digit code even when the body also carries a year", () => {
+  // The live English mail reads "© 2026 Apple Inc." above the code, so the year
+  // must not win; the year is also not 6 digits, and isYearish keeps a padded
+  // form out of the loose path.
+  assert.equal(graph.codeFromText("<p>© 2026 Apple Inc.</p><p>Your code is <b>390771</b></p>"), "390771");
+  assert.equal(graph.codeFromText("<p>© 2026 Apple Inc.</p><p>enter the code below: 622647</p>"), "622647");
+  assert.equal(graph.codeFromText("<p>ref 001978</p>"), "", "a padded year is still a year");
+});
+
 test("pickCode matches mailbox, sender and subject, newest first", () => {
   const messages = [
     { id: "old", subject: "Your Apple Account verification code", from: "no_reply@email.apple.com", to: [MAILBOX], receivedDateTime: "2026-11-13T01:00:00Z", body: "<b>111111</b>", bodyPreview: "" },
@@ -124,6 +133,77 @@ test("pickCode matches mailbox, sender and subject, newest first", () => {
   assert.ok(hit, "a matching mail must be found");
   assert.equal(hit.messageId, "new");
   assert.equal(hit.code, "222222");
+});
+
+// A normalised message, the shape listMessages hands pickCode.
+function plainMail({ id = "m", subject = "", from = "no_reply@email.apple.com", body = "", received = "2026-11-13T01:00:00Z", to = [MAILBOX] } = {}) {
+  return { id, subject, from, to, receivedDateTime: received, body, bodyPreview: "" };
+}
+
+test("pickCode reads the code out of the English Apple mail", () => {
+  const hit = graph.pickCode(
+    [
+      plainMail({
+        id: "en",
+        subject: "Verify your Apple Account email address",
+        from: "appleid@id.apple.com",
+        body: "<div>enter the code below on the email verification page: <b>622647</b></div>",
+      }),
+    ],
+    { mailbox: MAILBOX },
+  );
+  assert.ok(hit);
+  assert.equal(hit.code, "622647");
+});
+
+test("pickCode reads the code out of a Vietnamese Apple mail (localised subject regression)", () => {
+  const hit = graph.pickCode(
+    [
+      plainMail({
+        id: "vi",
+        subject: "Xác minh địa chỉ email Tài khoản Apple",
+        from: "appleid@id.apple.com",
+        // Deliberately no hint word in the body: the subject has to carry the
+        // mail, which is exactly what the English-only gate refused to do.
+        body: "<div><b>948213</b></div>",
+      }),
+    ],
+    { mailbox: MAILBOX },
+  );
+  assert.ok(hit, "a localised subject must not skip the whole mail");
+  assert.equal(hit.code, "948213");
+});
+
+test("pickCode falls back to an apple.com sender's localised body when the subject says nothing", () => {
+  const hit = graph.pickCode(
+    [plainMail({ id: "tr", subject: "Apple", from: "appleid@id.apple.com", body: "<p>Doğrulama kodunuz: <b>530914</b></p>" })],
+    { mailbox: MAILBOX },
+  );
+  assert.ok(hit);
+  assert.equal(hit.code, "530914");
+});
+
+test("pickCode keeps a 6-digit code from a non-Apple sender out", () => {
+  const hit = graph.pickCode(
+    [plainMail({ id: "gh", subject: "Verify your email address", from: "noreply@github.com", body: "<b>777777</b>" })],
+    { mailbox: MAILBOX },
+  );
+  assert.equal(hit, null);
+});
+
+test("pickCode takes the code and not the year when the body has both", () => {
+  const hit = graph.pickCode(
+    [
+      plainMail({
+        id: "year",
+        subject: "Your Apple Account verification code",
+        body: "<p>© 2026 Apple Inc.</p><p>Your Apple Account code is <b>390771</b></p>",
+      }),
+    ],
+    { mailbox: MAILBOX },
+  );
+  assert.ok(hit);
+  assert.equal(hit.code, "390771");
 });
 
 test("pickCode ignores a mail older than the run start", () => {

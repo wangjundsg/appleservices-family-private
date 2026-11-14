@@ -166,6 +166,15 @@ function stripTags(html) {
     .replace(/\s+/g, " ");
 }
 
+// CODE_HINTS is the one list of "this mail is about a code" words, across the
+// locales Apple actually ships. The copy is translated per account locale, so a
+// subject-only English test drops entire inboxes: the Vietnamese mail says
+// "Xác minh địa chỉ email Tài khoản Apple", the Japanese one "確認コード". The
+// `u` flag is not decoration: without it `i` does no Unicode case folding and
+// `xác minh` would miss the capitalised "Xác minh" Apple sends.
+const CODE_HINTS =
+  /verification code|security code|verify|验证码|驗證碼|確認コード|xác minh|mã xác minh|doğrulama|bestätigung|verificación|コード/iu;
+
 // codeFromText pulls Apple's 6-digit code out of the mail body. Apple puts it in
 // a bold/emphasised element, so a bare "<b>123456</b>" is preferred; the caller
 // gets six digits bounded by non-digits either way so a year or a phone number
@@ -179,8 +188,10 @@ function codeFromText(text) {
   if (!loose) return "";
   const value = loose[1];
   if (isYearish(value)) return "";
-  const around = flat.slice(Math.max(0, loose.index - 90), loose.index + 90).toLowerCase();
-  if (/code|verification|verif|验证码|驗證碼|コード|kode/.test(around)) return value;
+  // There used to be a "context" guard here: a hand-copied keyword list tested
+  // against the text around the match, returning `value` on both branches, so it
+  // could not reject anything. The list lives in CODE_HINTS now and is used where
+  // it really gates, in pickCode.
   return value;
 }
 
@@ -190,8 +201,9 @@ function isYearish(digits) {
 }
 
 // pickCode applies the same three-way match the temp-mail picker uses (this
-// mailbox, Apple as sender, verification semantics in the subject) and then the
-// newest-wins rule: a second mail invalidates the first code.
+// mailbox, Apple as sender, code semantics in the subject or -- for a localised
+// mail -- in the body) and then the newest-wins rule: a second mail invalidates
+// the first code.
 function pickCode(messages, { mailbox, since = 0, senderDomains = ["apple.com"] } = {}) {
   const address = String(mailbox || "").toLowerCase();
   const allowed = (Array.isArray(senderDomains) && senderDomains.length ? senderDomains : ["apple.com"]).map((d) =>
@@ -204,9 +216,16 @@ function pickCode(messages, { mailbox, since = 0, senderDomains = ["apple.com"] 
     if (since && received < since) continue;
     if (!address || !m.to.includes(address)) continue;
     const domain = (m.from.split("@")[1] || "").toLowerCase();
-    const trusted = allowed.some((d) => domain === d || domain.endsWith(`.${d}`)) || /apple/i.test(domain);
-    if (!trusted) continue;
-    if (!flow.VERIFICATION_SUBJECT.test(m.subject) && !/验证码|驗證碼|verification code|security code/i.test(m.subject)) continue;
+    const appleSender = allowed.some((d) => domain === d || domain.endsWith(`.${d}`));
+    if (!appleSender && !/apple/i.test(domain)) continue;
+    // Two ways in, because Apple localises both the subject and the body: a
+    // subject that reads like a code mail in any known locale, or an apple.com
+    // sender whose body carries the hint. A subject-only English test skipped a
+    // whole mailbox worth of mail (the Vietnamese "Xác minh địa chỉ email Tài
+    // khoản Apple", the Japanese "確認コード").
+    const subjectHit = flow.VERIFICATION_SUBJECT.test(m.subject) || CODE_HINTS.test(m.subject);
+    const bodyHit = appleSender && (CODE_HINTS.test(m.body) || CODE_HINTS.test(m.bodyPreview));
+    if (!subjectHit && !bodyHit) continue;
     const code = codeFromText(m.body) || codeFromText(m.bodyPreview);
     if (!code) continue;
     if (!best || received > best.received) best = { code, messageId: m.id, received, subject: m.subject, from: m.from };
@@ -379,6 +398,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  CODE_HINTS,
   DEFAULT_SCOPE,
   TOKEN_URL,
   codeFromText,
