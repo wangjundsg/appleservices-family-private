@@ -180,11 +180,20 @@ func Validate(p Profile) error {
 	}
 
 	// 2. navigator.platform must match the system token in the UA.
-	if p.Platform != "Win32" {
-		return fmt.Errorf("profile: platform %q is not Win32; this pipeline only drives a Windows browser", p.Platform)
-	}
-	if !strings.Contains(p.UA, "Windows NT 10.0") {
-		return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Windows NT 10.0")
+	// Roxy/Forge generates the fingerprint, so a coherent macOS profile is now a
+	// legitimate input: the UA and navigator.platform come from the same source
+	// instead of being patched together by us.
+	switch p.Platform {
+	case "Win32":
+		if !strings.Contains(p.UA, "Windows NT 10.0") {
+			return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Windows NT 10.0")
+		}
+	case "MacIntel":
+		if !strings.Contains(p.UA, "Macintosh") {
+			return fmt.Errorf("profile: platform %s needs %q in the ua", p.Platform, "Macintosh")
+		}
+	default:
+		return fmt.Errorf("profile: platform %q is neither Win32 nor MacIntel", p.Platform)
 	}
 	// The major must come from the frozen table: a hand-edited file must not be
 	// able to invent a build no stage ever measured.

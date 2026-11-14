@@ -109,8 +109,8 @@ func TestValidateRejectsTamperedSignals(t *testing.T) {
 		},
 		{
 			name:   "platform value",
-			mutate: func(p *Profile) { p.Platform = "MacIntel" },
-			want:   "is not Win32",
+			mutate: func(p *Profile) { p.Platform = "Linux x86_64" },
+			want:   "neither Win32 nor MacIntel",
 		},
 		{
 			name:   "ua_mobile",
