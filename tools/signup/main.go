@@ -45,28 +45,30 @@ type state struct {
 
 func main() {
 	var (
-		email      = flag.String("email", "", "Apple ID address to create (required)")
-		password   = flag.String("password", "", "password; generated when empty")
-		first      = flag.String("first", "James", "given name")
-		last       = flag.String("last", "Carter", "family name")
-		birthday   = flag.String("birthday", "1992-07-18", "birthday, yyyy-mm-dd")
-		country    = flag.String("country", "USA", "ISO3 country of the account")
-		language   = flag.String("language", "en_US", "preferredLanguage")
-		phone      = flag.String("phone", "", "phone number, digits only (required for -stage create)")
-		phoneCC    = flag.String("phonecc", "US", "ISO2 dialing country of the phone number")
-		stage      = flag.String("stage", "preflight", "preflight|captcha|create|email|phone|verify|all")
-		code       = flag.String("code", "", "code to submit for the current email/phone stage")
-		statePath  = flag.String("state", "", "state file (default .cache/signup/<email>.json)")
-		base       = flag.String("base", "", "override API host, for the offline tests")
-		proxy      = flag.String("proxy", "", "explicit HTTP proxy; default honours HTTP(S)_PROXY")
-		timezone   = flag.String("tz", "America/New_York", "browser timezone reported in X-Apple-I-Timezone")
-		locale     = flag.String("locale", "en-US", "browser locale")
-		userAgent  = flag.String("user-agent", "", "override User-Agent")
-		captchaKey = flag.String("captcha-key", os.Getenv("YESCAPTCHA_KEY"), "YesCaptcha key; empty means manual")
-		captchaPNG = flag.String("captcha-dump", "", "write the captcha image here so a human can read it")
-		captchaAns = flag.String("captcha-answer", "", "answer to use instead of asking YesCaptcha")
-		asJSON     = flag.Bool("json", false, "print the stage receipt as one JSON line")
-		timeout    = flag.Duration("timeout", 45*time.Second, "per request timeout")
+		email       = flag.String("email", "", "Apple ID address to create (required)")
+		password    = flag.String("password", "", "password; generated when empty")
+		first       = flag.String("first", "James", "given name")
+		last        = flag.String("last", "Carter", "family name")
+		birthday    = flag.String("birthday", "1992-07-18", "birthday, yyyy-mm-dd")
+		country     = flag.String("country", "USA", "ISO3 country of the account")
+		language    = flag.String("language", "en_US", "preferredLanguage")
+		phone       = flag.String("phone", "", "phone number, digits only (required for -stage create)")
+		phoneCC     = flag.String("phonecc", "US", "ISO2 dialing country of the phone number")
+		stage       = flag.String("stage", "preflight", "preflight|captcha|create|email|phone|verify|all")
+		code        = flag.String("code", "", "code to submit for the current email/phone stage")
+		statePath   = flag.String("state", "", "state file (default .cache/signup/<email>.json)")
+		base        = flag.String("base", "", "override API host, for the offline tests")
+		proxy       = flag.String("proxy", "", "explicit HTTP proxy; default honours HTTP(S)_PROXY")
+		timezone    = flag.String("tz", "America/New_York", "browser timezone reported in X-Apple-I-Timezone")
+		locale      = flag.String("locale", "en-US", "browser locale")
+		userAgent   = flag.String("user-agent", "", "override User-Agent")
+		captchaKey  = flag.String("captcha-key", os.Getenv("YESCAPTCHA_KEY"), "YesCaptcha key; empty means manual")
+		captchaPNG  = flag.String("captcha-dump", "", "write the captcha image here so a human can read it")
+		captchaAns  = flag.String("captcha-answer", "", "answer to use instead of asking YesCaptcha")
+		captchaFile = flag.String("captcha-answer-file", "", "read the answer from this file (blocks until it appears)")
+		captchaWait = flag.Duration("captcha-wait", 180*time.Second, "how long to wait for -captcha-answer-file")
+		asJSON      = flag.Bool("json", false, "print the stage receipt as one JSON line")
+		timeout     = flag.Duration("timeout", 45*time.Second, "per request timeout")
 	)
 	flag.Parse()
 
@@ -168,7 +170,7 @@ func main() {
 		if err := writeCaptchaImage(*captchaPNG, c.image); err != nil {
 			fatalf("captcha: %v", err)
 		}
-		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, 90*time.Second)
+		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, *captchaWait, *captchaPNG, *captchaFile)
 		if err != nil {
 			fatalf("%v", err)
 		}
@@ -271,7 +273,7 @@ func main() {
 		if err := writeCaptchaImage(*captchaPNG, c.image); err != nil {
 			fatalf("captcha: %v", err)
 		}
-		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, 90*time.Second)
+		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, *captchaWait, *captchaPNG, *captchaFile)
 		if err != nil {
 			fatalf("%v", err)
 		}

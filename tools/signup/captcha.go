@@ -52,15 +52,43 @@ func (c *captcha) decodeImage() error {
 }
 
 // answerQuestion returns the characters a human or a paid solver read.
-// `manual` wins when set; otherwise YesCaptcha is asked.
-func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout time.Duration) (string, error) {
+// `manual` wins when set; otherwise YesCaptcha is asked. When neither is
+// available and an answer file is configured, the image is written out and the
+// call blocks until a human drops the answer in (same-process, so the captcha
+// token stays bound to this session).
+func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout time.Duration, imagePath, answerPath string) (string, error) {
 	if manual != "" {
 		return strings.ToUpper(strings.TrimSpace(manual)), nil
 	}
-	if key == "" {
-		return "", errors.New("captcha: no manual answer and no YESCAPTCHA_KEY")
+	if key != "" {
+		return solveYesCaptcha(ctx, key, c.image, timeout)
 	}
-	return solveYesCaptcha(ctx, key, c.image, timeout)
+	if answerPath == "" {
+		return "", errors.New("captcha: no manual answer, no YESCAPTCHA_KEY and no -captcha-answer-file")
+	}
+	if imagePath != "" {
+		if err := writeCaptchaImage(imagePath, c.image); err != nil {
+			return "", err
+		}
+	}
+	// A stale answer from the previous round is a guaranteed rejection
+	// (docs/REGISTRAR-CONTRACT.md A-3), so the file starts empty.
+	_ = os.Remove(answerPath)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(answerPath); err == nil {
+			if text := strings.TrimSpace(string(raw)); text != "" {
+				_ = os.Remove(answerPath)
+				return strings.ToUpper(text), nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return "", fmt.Errorf("captcha: no answer appeared in %s within %s", answerPath, timeout)
 }
 
 // YesCaptcha's two-step protocol, as implemented by tools/captcha/solver.py.

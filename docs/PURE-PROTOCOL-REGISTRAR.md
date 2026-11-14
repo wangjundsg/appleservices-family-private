@@ -232,3 +232,53 @@ E1 之前不要谈产能：`docs/RESEARCH-APPLE-SUPPLY.md` P2（账号存活）�
 go test ./tools/signup/ -count=1
 go vet ./tools/signup/
 ```
+
+---
+
+## 8 首次真实建号尝试（2026-11-15 02:12–02:27）
+
+资源：hero-sms 美国号 `+1 475 996 1174`（activation `1121900853`，$0.13，20 分钟窗口）、邮箱 `meganbuchanan8225@outlook.com`（Graph 可读）。
+
+### 8.1 结果：卡在验证码字符，其余全通
+
+三次 `-stage create`，每次都到达 `POST /account/validate`，服务器三次回同一条：
+
+```json
+{"validationErrors":[{"code":"captchaAnswer.Invalid",
+  "message":"Please enter the characters you see or hear to continue.",
+  "path":"captcha.answer","suppressDismissal":false}]}
+```
+
+这条错误码本身就是结论，因为它**不是**下面这些：
+
+| 如果不是字符错，会看到的 | 说明 |
+|---|---|
+| `HTTP 403` / `User session expired` | `scnt` / session 失效时出现（旧探测踩过） |
+| `hashcash.*` | 工作量证明被拒 |
+| `Your account cannot be created at this time` | 出口/号码/语言不同国的风控判定（`REGISTRAR-CONTRACT.md` A-6） |
+| `captcha.id` / token 类错误 | 取图返回的 `id`+`token` 与这次提交不匹配 |
+
+也就是说：**引导、`scnt` 轮换、`X-Apple-ID-Session-Id`、hashcash、请求体结构、captcha `id`/`token` 绑定，全部被苹果接受**，只有那 5(4) 个字符读错了。
+
+### 8.2 验证码是唯一的硬门槛
+
+| 手段 | 结果 |
+|---|---|
+| 人工读图（160×70，字符重叠、噪线） | 0/3 |
+| `tools/captcha/ocr.py`（ddddocr beta） | 读出 4 字符，与人工一致的部分对、缺字 |
+| `tools/captcha/vote.py`（8 变体×2 模型投票） | 给出 4 字符 + `lengths_seen {4:8, 5:6}`，长度本身就不确定 |
+| 字形切分（阈值+列投影） | 全部粘连成 1 个连通带，无法定位字符边界 |
+
+结论：这一批图**不适合本地 OCR + 人眼**，必须上付费识别（YesCaptcha `ImageToTextTask`，本仓 `tools/signup/captcha.go` 已内置客户端）或带放大的专用读图界面。`docs/REGISTRAR-CONTRACT.md` A-2 早就记过同一件事：识别前要 autocontrast+锐化+4× 放大，关键提交走 YesCaptcha。
+
+### 8.3 止损执行
+
+三次失败后按「未收短信立即退号」处置：`setStatus=8` → `ACCESS_CANCEL`，余额 `3.3641 → 3.4941`（$0.13 已退）。号码未收到任何短信，账号未建成，无脏数据。
+
+### 8.4 下一次跑通需要什么
+
+1. `YESCAPTCHA_KEY`（或等价付费识别 key）——**这是唯一缺口**；
+2. 一个新号码（hero-sms `service=wx&country=187`，$0.13）；
+3. 顺序不变：`create` 200 → `-stage email` 取码 → `-stage phone` 触发短信并立刻 `getStatus` 轮询 → `-stage verify`。
+
+`tools/signup` 已支持 `-captcha-answer-file`：进程内取图 → 落盘 → 阻塞等答案 → 同一会话提交（token 绑定不会断），人工通道也可用。

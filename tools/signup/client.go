@@ -425,18 +425,39 @@ func (s *Session) Create(ctx context.Context, a Account, p Phone, c *captcha, an
 	return s.do(ctx, "create", http.MethodPost, "/account/validate", createBody(a, p, c, answer), true)
 }
 
-// SendEmailCode triggers the "we mailed you a code" step.
+// SendEmailCode triggers the "we mailed you a code" step. The widget uses
+// /account/verification and the contactEmail variant for the alternate-address
+// branch; the first one that answers 2xx wins.
 func (s *Session) SendEmailCode(ctx context.Context, email string) ([]byte, error) {
-	return s.do(ctx, "email-send", http.MethodPost, "/account/verification", map[string]any{"name": email}, false)
+	body := map[string]any{"name": email}
+	raw, err := s.do(ctx, "email-send", http.MethodPost, "/account/verification", body, false)
+	if err == nil {
+		return raw, nil
+	}
+	if pe, ok := err.(*ProtocolError); ok && pe.Status >= 400 && pe.Status < 500 {
+		if alt, altErr := s.do(ctx, "email-send", http.MethodPost, "/account/verification/contactEmail", body, false); altErr == nil {
+			return alt, nil
+		}
+	}
+	return nil, err
 }
 
-// SubmitEmailCode answers that step. Apple answers with a fresh scnt and, on
-// success, an empty body.
+// SubmitEmailCode answers that step.
 func (s *Session) SubmitEmailCode(ctx context.Context, email, code string) ([]byte, error) {
-	return s.do(ctx, "email-submit", http.MethodPut, "/account/verification", map[string]any{
+	body := map[string]any{
 		"name":             email,
 		"verificationInfo": map[string]string{"id": "", "answer": code},
-	}, false)
+	}
+	raw, err := s.do(ctx, "email-submit", http.MethodPut, "/account/verification", body, false)
+	if err == nil {
+		return raw, nil
+	}
+	if pe, ok := err.(*ProtocolError); ok && pe.Status >= 400 && pe.Status < 500 {
+		if alt, altErr := s.do(ctx, "email-submit", http.MethodPut, "/account/verification/contactEmail", body, false); altErr == nil {
+			return alt, nil
+		}
+	}
+	return nil, err
 }
 
 // phoneVerification is the shared wrapper both phone steps submit.
