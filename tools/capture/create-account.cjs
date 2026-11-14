@@ -1189,10 +1189,10 @@ async function clickContinue(page, frame, tag = "") {
         // OCR read nothing usable: refresh the image and try again instead of
         // blocking on a human. A refresh costs nothing and keeps the run
         // unattended.
-        // Refreshing on every miss burns the site's image quota and looks frantic.
-      // Give the same image a second read first, then ask for a new one.
-      const fresh = attempt % 2 === 0 ? fr.getByRole("button", { name: /new code/i }).first() : null;
-        if (fresh && (await fresh.count().catch(() => 0))) await fresh.click().catch(() => {});
+        // One image, one attempt: a rejected answer is gone, the site has already
+      // replaced the picture. Ask for a fresh one explicitly.
+      const fresh = fr.getByRole("button", { name: /new code/i }).first();
+        if (await fresh.count().catch(() => 0)) await fresh.click().catch(() => {});
         await sleep(2500);
         continue;
       }
@@ -1259,6 +1259,10 @@ async function clickContinue(page, frame, tag = "") {
     note("step", { at: "submit-result", attempt, stillForm: Boolean(stillForm) });
   }
   if (!submitted) throw new Error("captcha never accepted");
+  // A person does not land on Continue the instant the last field is filled:
+  // drift the pointer, settle, then commit.
+  await page.mouse.move(320 + Math.floor(Math.random() * 260), 380 + Math.floor(Math.random() * 180), { steps: 18 }).catch(() => {});
+  await sleep(600 + Math.floor(Math.random() * 900));
   await shot("02-after-submit");
 
   // Review B4: the flow used to end with an unconditional `done` + exit 0, so an
