@@ -26,6 +26,9 @@ class PipelineTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.job = p.Job(self.root, config())
+        state_patch = patch.object(p, "STATE", self.root / "state")
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
 
     def test_budget_survives_restarts_and_refuses_third_request(self):
         p.reserve_code(self.job.cfg["sms"], self.root)
@@ -131,6 +134,83 @@ class PipelineTests(unittest.TestCase):
         with patch.object(p, "reserve_code", side_effect=p.PipelineError("budget_unavailable")), patch.object(self.job, "process") as process:
             with self.assertRaises(p.PipelineError): self.job.gsa()
         process.assert_not_called()
+
+    def test_direct_exit_clears_inherited_proxies(self):
+        self.job.cfg["egress_mode"] = "direct"
+        del self.job.cfg["roxy"]["proxyInfo"]
+        p.validate(self.job.cfg)
+        with patch.dict(p.os.environ, {"HTTP_PROXY": "http://wrong", "all_proxy": "http://wrong"}):
+            self.assertFalse(any(k.upper().endswith("_PROXY") for k in self.job.env()))
+
+    def test_cancel_stops_child_without_refunding_an_unknown_registration(self):
+        self.job.update(registration_started=True, number_owned=True)
+        def cancel():
+            p.time.sleep(.15)
+            (self.root / "cancel.request").write_text("cancel")
+        thread = p.threading.Thread(target=cancel)
+        thread.start()
+        started = p.time.monotonic()
+        with self.assertRaisesRegex(p.PipelineError, "cancelled_requires_readback"):
+            self.job.process([sys.executable, "-c", "import time; time.sleep(60)"], 65)
+        thread.join()
+        self.assertLess(p.time.monotonic() - started, 10)
+        self.job.update(status="cancelled")
+        with patch.object(p, "sms_call") as sms: self.job.settle_number()
+        sms.assert_not_called()
+        self.assertTrue(self.job.status["refund_deferred"])
+
+    def test_cancel_before_submission_refunds_and_does_not_repeat_refund(self):
+        (self.root / "cancel.request").write_text("cancel")
+        with patch.object(self.job, "create") as create, patch.object(p, "sms_call", return_value="ACCESS_CANCEL") as sms:
+            self.job.run()
+            self.job.settle_number()
+        create.assert_not_called()
+        sms.assert_called_once()
+        self.assertEqual(self.job.status["status"], "cancelled")
+        self.assertTrue(self.job.status["refund_confirmed"])
+
+    def test_rate_limit_stops_chain_and_persists_cooldown(self):
+        self.job.update(stage="gsa")
+        with patch.object(self.job, "gsa", side_effect=p.PipelineError("code_rate_limited", "rate_limited")), patch.object(self.job, "device") as device:
+            self.job.run()
+        device.assert_not_called()
+        self.assertEqual(self.job.status["status"], "rate_limited")
+        self.assertGreater(p.timestamp(self.job.status["cooldown_until"]), p.time.time() + 3500)
+
+    def test_maintenance_recovers_crash_without_replaying_registration(self):
+        folder = p.STATE / self.job.cfg["job_id"]
+        p.atomic(folder / "input.json", self.job.cfg)
+        p.atomic(folder / "result.json", {**self.job.status, "active": True, "registration_started": True})
+        with patch.object(p.Job, "create") as create:
+            p.maintain_once()
+        create.assert_not_called()
+        self.assertEqual(p.read(folder / "result.json")["status"], "needs_review")
+
+    def test_maintenance_skips_a_job_held_by_an_active_child(self):
+        folder = p.STATE / self.job.cfg["job_id"]
+        p.atomic(folder / "input.json", self.job.cfg)
+        p.atomic(folder / "result.json", {**self.job.status, "active": True})
+        with p.lock(folder / ".lock"): p.maintain_once()
+        self.assertTrue(p.read(folder / "result.json")["active"])
+
+    def test_exit_four_probes_account_without_replaying_form(self):
+        self.job.cfg["sms"]["expires_at"] = p.iso(p.time.time() - 1)
+        with patch.object(self.job, "process", return_value=(0, {"state": "account_exists"})) as process:
+            with self.assertRaisesRegex(p.PipelineError, "account_exists_activation_expired"):
+                self.job.authenticate()
+        self.assertIn("probe", process.call_args.args[0])
+        self.assertTrue(self.job.status["account_created"])
+
+    def test_cancelled_unknown_checks_account_at_expiry_before_refund(self):
+        self.job.cfg["sms"]["expires_at"] = p.iso(p.time.time() - 1)
+        self.job.update(status="cancelled", registration_started=True, number_owned=True)
+        (self.root / "cancel.request").write_text("cancel")
+        with patch.object(self.job, "process", return_value=(0, {"state": "account_exists"})) as process, patch.object(p, "sms_call") as sms:
+            self.job.settle_number()
+        sms.assert_not_called()
+        self.assertIn("probe", process.call_args.args[0])
+        self.assertTrue(process.call_args.kwargs["ignore_cancel"])
+        self.assertTrue(self.job.status["account_created"])
 
 
 if __name__ == "__main__": unittest.main()

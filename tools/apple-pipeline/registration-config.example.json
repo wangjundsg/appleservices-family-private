@@ -1,0 +1,19 @@
+{
+  "roxy": {
+    "api": "http://127.0.0.1:50100",
+    "token": "REPLACE_LOCALLY",
+    "workspaceId": "REPLACE_LOCALLY",
+    "projectId": "REPLACE_LOCALLY",
+    "proxyInfo": {
+      "moduleId": 0,
+      "proxyMethod": "custom",
+      "proxyCategory": "SOCKS5",
+      "ipType": "IPV4",
+      "protocol": "SOCKS5",
+      "host": "REPLACE_LOCALLY",
+      "port": 10005,
+      "proxyUserName": "REPLACE_LOCALLY__cr.{country}",
+      "proxyPassword": "REPLACE_LOCALLY"
+    }
+  }
+}

@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-STATE = ROOT / "state" / "pipeline"
+STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
 STAGES = ("create", "login", "terms", "gsa", "device", "keepalive")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
              "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN"}
@@ -129,7 +129,9 @@ def validate(cfg):
     proxy = roxy.get("proxyInfo", {})
     if not all(roxy.get(k) for k in ("token", "workspaceId", "projectId", "locale", "timeZone")):
         raise PipelineError("roxy_settings_required", "usage")
-    if proxy.get("protocol", "").upper() != "SOCKS5" or not proxy.get("host") or not 0 < int(proxy.get("port", 0)) < 65536:
+    if cfg.get("egress_mode", "roxy") not in {"roxy", "direct"}:
+        raise PipelineError("invalid_egress_mode", "usage")
+    if cfg.get("egress_mode") != "direct" and (proxy.get("protocol", "").upper() != "SOCKS5" or not proxy.get("host") or not 0 < int(proxy.get("port", 0)) < 65536):
         raise PipelineError("residential_socks5_required", "usage")
     if cfg.get("accept_terms") is not True:
         raise PipelineError("terms_consent_required", "usage")
@@ -155,7 +157,8 @@ def sms_call(cfg, **params):
     return request(endpoint + "?" + urllib.parse.urlencode({"api_key": cfg["key"], **params})).strip()
 
 
-def reserve_code(sms, state_root=STATE):
+def reserve_code(sms, state_root=None):
+    state_root = STATE if state_root is None else state_root
     key = hashlib.sha256((sms.get("api", "grizzly") + ":" + str(sms["activation"])).encode()).hexdigest()
     path = state_root / "budgets" / (key + ".json")
     with lock(path.with_suffix(".lock")):
@@ -186,12 +189,15 @@ class Job:
         env.update(APPLESERVICES_APPLEID=self.cfg["email"], APPLESERVICES_PASSWORD=self.cfg["password"],
                    APPLESERVICES_CREATE_INPUT=str(self.folder / "create-input.json"))
         if self.cfg.get("yescaptcha_key"): env["YESCAPTCHA_KEY"] = self.cfg["yescaptcha_key"]
-        proxy = self.cfg["roxy"]["proxyInfo"]
+        for key in list(env):
+            if key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: env.pop(key)
+        proxy = self.cfg["roxy"].get("proxyInfo", {})
         user = urllib.parse.quote(str(proxy.get("proxyUserName", "")), safe="")
         password = urllib.parse.quote(str(proxy.get("proxyPassword", "")), safe="")
         auth = f"{user}:{password}@" if user else ""
-        address = f"socks5://{auth}{proxy['host']}:{proxy['port']}"
-        env.update(HTTP_PROXY=address, HTTPS_PROXY=address, NO_PROXY="localhost,127.0.0.1")
+        if self.cfg.get("egress_mode") != "direct":
+            address = f"socks5://{auth}{proxy['host']}:{proxy['port']}"
+            env.update(HTTP_PROXY=address, HTTPS_PROXY=address, NO_PROXY="localhost,127.0.0.1")
         profile = self.folder / "profile.json"
         if profile.exists():
             seen = read(profile)
@@ -274,7 +280,8 @@ class Job:
         atomic(previous, used + [code])
         return code
 
-    def process(self, args, timeout, code_mode=None):
+    def process(self, args, timeout, code_mode=None, ignore_cancel=False):
+        if not ignore_cancel: self.check_cancel()
         messages = queue.Queue()
         end = time.monotonic() + timeout
         output = ""
@@ -292,8 +299,14 @@ class Job:
             thread = threading.Thread(target=consume, daemon=True)
             thread.start()
             next_poll = 0
+            heartbeat = 0
             try:
                 while child.poll() is None or thread.is_alive() or not messages.empty():
+                    if not ignore_cancel: self.check_cancel()
+                    if time.monotonic() >= heartbeat:
+                        self.status["heartbeat_at"] = iso()
+                        atomic(self.folder / "result.json", self.status)
+                        heartbeat = time.monotonic() + 5
                     if time.monotonic() >= end:
                         raise PipelineError("stage_timeout")
                     try: chunk = messages.get(timeout=.1)
@@ -309,7 +322,9 @@ class Job:
                             except ValueError: continue
                             state = event.get("state")
                             if state == "terms": self.update(stage="terms", status="running")
-                            if state == "waiting_input": waiting = True
+                            if state == "waiting_input":
+                                waiting = True
+                                self.update(status="waiting_input", reason="awaiting_sms" if code_mode else "awaiting_registration_code")
                             if state in {"success", "account_exists", "unknown", "rate_limited", "waiting_input", "failed"}: final = event
                     if "verification code requested" in output or "Enter six-digit code" in output:
                         waiting = True
@@ -345,8 +360,9 @@ class Job:
         remaining = timestamp(sms["expires_at"]) - time.time()
         if remaining <= 0: raise PipelineError("activation_expired", "waiting_input")
         self.update(reason="browser_create_pending")
+        proxy = {} if self.cfg.get("egress_mode") == "direct" else {"proxyInfo": roxy["proxyInfo"]}
         resource = self.forge("create", projectId=roxy["projectId"], windowName="apple-" + self.cfg["job_id"],
-                              os="Windows", locale=roxy["locale"], timeZone=roxy["timeZone"], proxyInfo=roxy["proxyInfo"])
+                              os="Windows", locale=roxy["locale"], timeZone=roxy["timeZone"], **proxy)
         if not resource.get("dirId"): raise PipelineError("browser_identity_missing")
         atomic(self.folder / "browser.json", {"dirId": resource["dirId"]})
         try:
@@ -369,7 +385,9 @@ class Job:
             code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)
             if code != 0: raise PipelineError("browser_preflight_failed", "failed")
             self.update(reason="form_running")
-            code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()))
+            self.update(registration_started=True)
+            code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
+            self.update(create_exit_code=code, creation_rejected=code in (1, 2))
             if code not in (1, 2):
                 self.update(stage="login", status="queued", account_created=code == 0,
                             reason="created" if code == 0 else "registration_needs_confirmation")
@@ -379,6 +397,7 @@ class Job:
             self.cleanup_browser()
 
     def begin(self, stage):
+        self.check_cancel()
         attempts = self.status["attempts"]
         attempts[stage] = attempts.get(stage, 0) + 1
         if attempts[stage] > 2: raise PipelineError("stage_attempt_budget_exhausted", "waiting_input")
@@ -430,6 +449,8 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            if self.status["stage"] == "create" and self.cfg["sms"].get("activation") and not self.status.get("number_owned"):
+                self.claim_number()
             stage = self.status["stage"]
             if resume and stage == "create" and self.status["attempts"].get("create"):
                 self.cleanup_browser()
@@ -450,7 +471,8 @@ class Job:
                 elif stage == "keepalive": self.keepalive()
                 else: raise PipelineError("invalid_stage", "usage")
         except PipelineError as error:
-            self.update(status=error.state, reason=error.reason)
+            self.update(status=error.state, reason=error.reason,
+                        cooldown_until=iso(time.time() + 3600) if error.state == "rate_limited" else None)
             if self.status["stage"] == "create" and error.state == "unknown" and self.cfg["sms"].get("activation"):
                 self.update(stage="login", status="queued", reason="registration_needs_confirmation")
                 try:
@@ -462,15 +484,38 @@ class Job:
             self.settle_number()
         except (Exception, KeyboardInterrupt):
             # Retain the stage so a restart cannot mistake an interrupted write for a fresh job.
-            self.update(status="unknown", reason="interrupted_or_local_error")
+            self.update(status="unknown", reason="interrupted_or_local_error",
+                        refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
+        finally:
+            self.update(active=False)
+
+    def check_cancel(self):
+        if (self.folder / "cancel.request").exists():
+            raise PipelineError("cancelled_requires_readback" if self.status.get("registration_started") else "cancelled_before_registration", "cancelled")
 
     def settle_number(self):
         sms = self.cfg["sms"]
-        if not sms.get("activation") or not self.status.get("number_owned") or self.status.get("account_created"): return
+        if not sms.get("activation") or not self.status.get("number_owned") or self.status.get("account_created") or self.status.get("refund_confirmed"): return
         # Only proven creation failure, or lease expiry, releases the rented number.
         expired = timestamp(sms["expires_at"]) <= time.time()
-        if self.status["stage"] != "create" and not expired: return
-        if self.status["status"] not in {"failed", "usage"} and not expired: return
+        if expired and self.status.get("registration_started") and not self.status.get("expiry_checked"):
+            # Password readback sends no SMS and is never a replay of registration.
+            try:
+                code, event = self.process([str(ROOT / "bin/appleweb.exe"), "-mode", "probe", "-session",
+                                           str(self.folder / "icloud-web-session.json"), "-timeout", "90s"], 95, ignore_cancel=True)
+                exists = code == 0 and event and event.get("state") == "account_exists"
+            except PipelineError:
+                exists = False
+            self.update(expiry_checked=True, account_created=bool(exists), refund_deferred=False,
+                        reason="account_exists_activation_expired" if exists else "expired_activation_account_unconfirmed")
+            if exists: return
+        if self.status["stage"] != "create" and not expired:
+            self.update(refund_deferred=True)
+            return
+        safe_cancel = self.status["status"] == "cancelled" and not self.status.get("registration_started")
+        if self.status["status"] not in {"failed", "usage"} and not expired and not safe_cancel:
+            self.update(refund_deferred=True)
+            return
         if self.status.get("refund_attempts", 0) >= 5: return
         if self.status.get("refund_after") and timestamp(self.status["refund_after"]) > time.time(): return
         self.update(refund_attempts=self.status.get("refund_attempts", 0) + 1)
@@ -479,7 +524,7 @@ class Job:
             refunded = reply in {"ACCESS_CANCEL", "ACCESS_CANCEL_ALREADY"}
         except PipelineError:
             refunded = False
-        self.update(refund_pending=not refunded, refund_confirmed=refunded,
+        self.update(refund_deferred=False, refund_pending=not refunded, refund_confirmed=refunded,
                     refund_after=iso(time.time() + 130) if not refunded else None)
 
 
@@ -505,7 +550,11 @@ def execute(action, job_id=None, input_file=None):
             reservation = STATE / "accounts" / (account_key + ".json")
             with lock(reservation.with_suffix(".lock")):
                 if reservation.exists() and read(reservation) != cfg["job_id"]:
-                    raise PipelineError("account_already_has_a_job", "usage")
+                    previous_id = read(reservation)
+                    previous = read(job_path(previous_id) / "result.json")
+                    safe_retry = previous.get("creation_rejected") or (not previous.get("registration_started") and previous.get("status") in {"failed", "usage", "cancelled"})
+                    if cfg.get("retry_of") != previous_id or previous.get("account_created") or previous.get("active") or not safe_retry:
+                        raise PipelineError("account_already_has_a_job", "usage")
                 atomic(reservation, cfg["job_id"])
             atomic(folder / "request-hash.json", hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest())
             atomic(folder / "result.json", Job(folder, cfg).status)
@@ -520,30 +569,46 @@ def execute(action, job_id=None, input_file=None):
             if not job.status.get("registration_accepted"): raise PipelineError("device_stage_incomplete", "usage")
             try: job.keepalive()
             except PipelineError as e: job.update(status=e.state, reason=e.reason)
-        else: job.run(resume=action == "resume")
+        else:
+            job.update(active=True)
+            job.run(resume=action == "resume")
         return job.status
+
+
+def maintain_once():
+    # Read-only recovery of interrupted writes: never restart registration/login here.
+    for receipt in STATE.glob("*/result.json"):
+        try:
+            with lock(receipt.parent / ".lock"):
+                job = Job(receipt.parent, read(receipt.parent / "input.json"), read(receipt))
+                if job.status.get("active"):
+                    job.update(active=False, status="needs_review", reason="interrupted_requires_readback",
+                               refund_deferred=bool(job.status.get("number_owned") and not job.status.get("account_created")))
+                if (receipt.parent / "cancel.request").exists() and job.status.get("status") != "ready":
+                    job.update(status="cancelled", reason="cancelled_requires_readback" if job.status.get("registration_started") else "cancelled_before_registration")
+                if job.status.get("cleanup_pending") or (receipt.parent / "browser.json").exists(): job.cleanup_browser()
+                if job.status.get("refund_pending") or job.status.get("refund_deferred") or job.status.get("status") == "cancelled": job.settle_number()
+                if job.status.get("status") == "ready" and timestamp(job.status["next_run_at"]) <= time.time():
+                    try: job.keepalive()
+                    except PipelineError as e: job.update(status=e.state, reason=e.reason)
+        except (PipelineError, OSError, ValueError, KeyError):
+            continue
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["run", "resume", "status", "keepalive", "refund", "cleanup", "maintain"])
+    parser.add_argument("action", choices=["run", "resume", "status", "keepalive", "refund", "cleanup", "maintain", "maintain-once"])
     parser.add_argument("--input", help="private JSON manifest (run only)")
     parser.add_argument("--job")
     args = parser.parse_args()
     try:
+        if args.action == "maintain-once":
+            maintain_once()
+            return 0
         if args.action == "maintain":
             # Explicit foreground maintenance service; no automatic registration or login retries.
             while True:
-                for receipt in STATE.glob("*/result.json"):
-                    row = read(receipt)
-                    try:
-                        if row.get("cleanup_pending"): execute("cleanup", row["job_id"])
-                        if row.get("refund_pending") and timestamp(row["refund_after"]) <= time.time():
-                            execute("refund", row["job_id"])
-                        if row.get("status") == "ready" and timestamp(row["next_run_at"]) <= time.time():
-                            execute("keepalive", row["job_id"])
-                    except (PipelineError, OSError, ValueError):
-                        continue
+                maintain_once()
                 time.sleep(15)
         if args.action == "run" and not args.input: raise PipelineError("input_required", "usage")
         result = execute(args.action, args.job, args.input)

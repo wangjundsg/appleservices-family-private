@@ -204,12 +204,17 @@ const birthYear = String(arg("birth-year", "1992"));
 // fail-<reason>-<timestamp>.png/.txt: a failed attempt with no evidence is a
 // wasted number.
 let livePage = null;
+async function captureEvidence(page, file, options = {}) {
+  // Every evidence path, including exceptions, masks credentials and OTP inputs.
+  const mask = page.frames().map(frame => frame.locator("input"));
+  await page.screenshot({ ...options, path: file, mask });
+}
 async function failShot(reason) {
   const tag = `fail-${String(reason || "unknown").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 60)}-${new Date()
     .toISOString()
     .replace(/[:.]/g, "")}`;
   try {
-    if (livePage) await livePage.screenshot({ path: path.join(outdir, `${tag}.png`), fullPage: true }).catch(() => {});
+    if (livePage) await captureEvidence(livePage, path.join(outdir, `${tag}.png`), { fullPage: true }).catch(() => {});
     if (livePage) {
       const text = await livePage.evaluate(() => (document.body ? document.body.innerText : "")).catch(() => "");
       fs.writeFileSync(path.join(outdir, `${tag}.txt`), String(text).slice(0, 20000), "utf8");
@@ -1186,7 +1191,7 @@ async function resendEmailCode(page, frame) {
       if (styleHandle) await sleep(150);
     }
     const file = path.join(outdir, `${name}.png`);
-    await page.screenshot({ path: file }).catch(() => {});
+    await captureEvidence(page, file).catch(() => {});
     if (styleHandle) await styleHandle.evaluate((el) => el.remove()).catch(() => {});
     fs.writeFileSync(path.join(outdir, `${name}.txt`), await widgetText(page), "utf8");
   };
@@ -1453,7 +1458,7 @@ async function resendEmailCode(page, frame) {
           JSON.stringify({ attempt, answer, error: errText, at: new Date().toISOString() }, null, 2),
           "utf8",
         );
-        await page.screenshot({ path: path.join(outdir, `captcha-attempt-${attempt}.png`) }).catch(() => {});
+        await captureEvidence(page, path.join(outdir, `captcha-attempt-${attempt}.png`)).catch(() => {});
       } catch {
         // evidence is best effort; never let it break the retry
       }

@@ -12,6 +12,7 @@ import (
 
 func main() {
 	dir := flag.String("dir", "./state", "saved device and session directory")
+	repo := flag.String("repo", ".", "Apple repository root for registration pipeline")
 	worker := flag.String("worker", "./bin/trusted-device-gui.exe", "trusted-device executable")
 	library := flag.String("adi-dll", "./.cache/openbubbles-store/rust_lib_bluebubbles.dll", "verified native module")
 	python := flag.String("python", "python", "64-bit Python executable")
@@ -19,12 +20,13 @@ func main() {
 	port := flag.Int("port", 18741, "loopback dashboard port")
 	flag.Parse()
 	absDir, _ := filepath.Abs(*dir)
+	absRepo, _ := filepath.Abs(*repo)
 	absWorker, _ := filepath.Abs(*worker)
 	absLibrary, _ := filepath.Abs(*library)
 	absMacPushSetup, _ := filepath.Abs(*macPushSetup)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port})
+	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port, RepoRoot: absRepo})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

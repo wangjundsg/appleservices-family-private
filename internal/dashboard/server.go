@@ -29,18 +29,19 @@ import (
 var assets embed.FS
 
 type Config struct {
-	Dir, Worker, Library, Python, MacPushSetup string
-	Port                                       int
+	Dir, Worker, Library, Python, MacPushSetup, RepoRoot string
+	Port                                                 int
 }
 type Server struct {
-	config    Config
-	listener  net.Listener
-	http      *http.Server
-	token     string
-	launchMu  sync.Mutex
-	mu        sync.Mutex
-	launching bool
-	message   string
+	config     Config
+	listener   net.Listener
+	http       *http.Server
+	token      string
+	launchMu   sync.Mutex
+	registerMu sync.Mutex
+	mu         sync.Mutex
+	launching  bool
+	message    string
 	// accounts holds every registered account. The legacy single-account
 	// fields below address the account whose directory is Config.Dir, so the
 	// original one-account behaviour and its tests keep working unchanged.
@@ -73,6 +74,8 @@ type Status struct {
 	FailureStage         string    `json:"failure_stage,omitempty"`
 }
 type view struct {
+	PipelineManaged      bool                    `json:"pipeline_managed,omitempty"`
+	PipelineState        string                  `json:"pipeline_state,omitempty"`
 	Status               Status                  `json:"status"`
 	Devices              []control.Device        `json:"devices"`
 	Pending              *control.Pending        `json:"pending"`
@@ -273,6 +276,7 @@ func maskAccount(appleID string) string {
 
 func (s *Server) URL() string { return "http://" + s.listener.Addr().String() }
 func (s *Server) Serve(ctx context.Context) error {
+	go s.maintainRegistrations(ctx)
 	go func() { <-ctx.Done(); s.http.Close() }()
 	err := s.http.Serve(s.listener)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -764,6 +768,13 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		account, dir = accounts[0], accounts[0].Dir
 	}
 	result := view{Status: s.readStatusFrom(dir), Devices: []control.Device{}}
+	if s.pipelineAccount(account) {
+		result.PipelineManaged = true
+		var receipt pipelineReceipt
+		if readRegisterJSON(filepath.Join(dir, "result.json"), &receipt) == nil {
+			result.PipelineState = receipt.Status
+		}
+	}
 	if account == nil {
 		s.mu.Lock()
 		result.Launching, result.Message = s.launching, s.message
@@ -853,6 +864,9 @@ func (s *Server) startSavedAccount(ctx context.Context, account *Account) contro
 }
 
 func (s *Server) startInMode(ctx context.Context, dir string, creds credentials, account *Account, resume bool) control.Result {
+	if s.pipelineAccount(account) {
+		return control.Result{Message: "此账号由建号产线维护网页会话；请在新建 Apple ID 卡片查看进度。设备受信任状态尚未证实"}
+	}
 	if !s.launchMu.TryLock() {
 		return control.Result{Message: "正在启动，请稍等"}
 	}
@@ -1024,6 +1038,9 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 		accounts := append([]*Account(nil), s.accounts...)
 		s.accountsMu.Unlock()
 		for _, account := range accounts {
+			if s.pipelineAccount(account) {
+				continue
+			}
 			if ctx.Err() != nil || s.accountStatus(account).Running || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
 				continue
 			}
@@ -1096,6 +1113,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case r.URL.Path == "/api/register" || strings.HasPrefix(r.URL.Path, "/api/register/"):
+			s.serveRegistration(w, r)
+			return
 		case r.Method == "GET" && r.URL.Path == "/api/view":
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
@@ -1244,6 +1264,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/app.js":
 		file = "app.js"
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case "/register.js":
+		file = "register.js"
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case "/register.css":
+		file = "register.css"
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	case "/app.css":
 		file = "app.css"
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")

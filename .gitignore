@@ -10,5 +10,6 @@ archive/
 __pycache__/
 *.pyc
 .tools/
+.playwright-cli/
 .cache/
 

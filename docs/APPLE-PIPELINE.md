@@ -3,6 +3,9 @@
 本轮按用户最终确认执行：**只完善本仓库，不安装或接入 gpt-free-service**。
 Apple 产线独立持有资源、凭据、进度和结果。家庭组将来新建；本轮不执行订阅购买、家庭组或隐藏邮箱操作。
 
+18741 面板已提供「新建 Apple ID」入口，启动和配置见 [PANEL-REGISTER-INTEGRATION.md](PANEL-REGISTER-INTEGRATION.md)。
+面板调用同一产线，任务目录使用 `.cache/panel`；建号后不固定等待，遇 423 才停止并记录冷却。
+
 ## 审查结论与实际链路
 
 交接文件的可执行件清单和源码归属已过时。网页登录原实现已有短信发送/提交，主要缺口是
@@ -40,7 +43,7 @@ create → login（网页登录）→ terms（同一次网页登录）
 把 `tools/apple-pipeline/input.example.json` 复制到 `.cache/apple-input.json`，在**本地私密文件**中填写。
 不要在聊天或提交中放密码、API key、验证码、代理密码或邮箱 token。
 
-- `job_id`：一个账号一个稳定任务 ID，重复 `run` 只返回已有状态。同一邮箱不能换 ID 自动重建。
+- `job_id`：一个账号一个稳定任务 ID，重复 `run` 只返回已有状态。同一邮箱不能换 ID 自动重建；仅明确失败的任务允许经 `retry_of` 校验后用新号码创建新任务。
 - `graph_token_file`：已有 Graph token 文件，格式沿用 `graph-mail.cjs`。
 - 手动邮箱取码：删除 `graph_token_file`，改用 `email_code_file` 的绝对路径；将验证码写入该文件。已有 webmail 取码器也可以写同一文件。
 - 图形码：本入口默认人工，将当前答案写到 `state/pipeline/<job_id>/captcha.txt`。当前截图在同目录。一次图像只提交一次答案。
