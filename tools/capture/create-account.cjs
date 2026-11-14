@@ -1189,11 +1189,10 @@ async function clickContinue(page, frame, tag = "") {
         // OCR read nothing usable: refresh the image and try again instead of
         // blocking on a human. A refresh costs nothing and keeps the run
         // unattended.
-        // One image, one attempt: a rejected answer is gone, the site has already
-      // replaced the picture. Ask for a fresh one explicitly.
-      const fresh = fr.getByRole("button", { name: /new code/i }).first();
-        if (await fresh.count().catch(() => 0)) await fresh.click().catch(() => {});
-        await sleep(2500);
+      // Apple swaps the picture itself once an answer is rejected; clicking
+      // "New code" on top of that is both redundant and un-human. Just wait for
+      // the replacement to render and read again.
+      await sleep(1800 + Math.floor(Math.random() * 900));
         continue;
       }
     }
@@ -1246,11 +1245,9 @@ async function clickContinue(page, frame, tag = "") {
         err.evidence = `hard-reject:${attempt}`;
         throw err;
       }
-      // A rejected captcha leaves the same image on screen; ask for a new one
-      // before spending another OCR pass on it.
-      const fresh = fr.getByRole("button", { name: /new code/i }).first();
-      if (await fresh.count().catch(() => 0)) await fresh.click().catch(() => {});
-      await sleep(2500);
+      // Apple replaces the image by itself after a rejection; never click
+      // "New code" for it. Wait for the replacement, then read again.
+      await sleep(1800 + Math.floor(Math.random() * 900));
       // One answer belongs to one image. Without this the manual channel replays
       // the rejected digits on the next round, because the answer file outlives
       // the attempt that consumed it.
