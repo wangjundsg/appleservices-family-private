@@ -120,6 +120,14 @@ const senderDomains = mailFrom.length ? mailFrom : flow.DEFAULT_SENDER_DOMAINS;
 // what the caller already measured for this run, never probed here.
 const profilePath = String(arg("profile", ""));
 const egressIP = String(arg("egress-ip", ""));
+// --cdp-port drives an already-fingerprinted Roxy/Forge window instead of
+// launching a browser of this script's own (REGISTRAR-CONTRACT §1.5). In that
+// mode Roxy owns the UA, platform, locale, timezone, GPU and proxy: the profile
+// file is neither read nor written, and nothing is injected into the page,
+// because a second, contradicting fingerprint is exactly what the A/B is
+// measuring against.
+const cdpPort = String(arg("cdp-port", ""));
+const attachMode = Boolean(cdpPort);
 
 const log = [];
 const clip = (text, max) => String(text || "").slice(0, max);
@@ -495,16 +503,32 @@ async function widgetText(page) {
   return frame.evaluate(() => document.body?.innerText || "").catch(() => "");
 }
 
+
+// Human-paced typing. A .fill() drops a 29-character address in 0 ms, which is
+// the loudest possible automation signal; this types one key at a time with a
+// jittered delay and a short settle afterwards.
+async function typeHuman(locator, text, label = "") {
+  const value = String(text == null ? "" : text);
+  if (!value) return;
+  await locator.click({ timeout: 15000 }).catch(() => {});
+  for (const ch of value) {
+    await locator.pressSequentially(ch, { timeout: 5000 }).catch(() => {});
+    await sleep(80 + Math.floor(Math.random() * 140));
+  }
+  await sleep(300 + Math.floor(Math.random() * 400));
+  if (label) note("step", { at: "typed", field: label, length: value.length });
+}
+
 async function fillDigits(frame, code) {
   const boxes = frame.locator('input[type="tel"]');
   const count = await boxes.count();
   note("code-boxes", { count });
   if (count >= code.length) {
     for (let i = 0; i < code.length; i += 1) {
-      await boxes.nth(i).fill(code[i]).catch(() => {});
+      await boxes.nth(i).pressSequentially(code[i], { timeout: 5000 }).catch(() => {});
     }
   } else {
-    await boxes.first().fill(code).catch(() => {});
+    await boxes.first().pressSequentially(code, { timeout: 5000 }).catch(() => {});
   }
   await sleep(800);
 }
@@ -578,7 +602,7 @@ async function solveCaptcha(page, fr, tag) {
     return v.length >= 4 ? v : "";
   }, 180000, "captcha");
   if (!answer) return "";
-  await fr.fill('input[name="captcha"]', answer);
+  await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha");
   await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
   await sleep(1000);
   await clickContinue(page, fr, tag);
@@ -625,7 +649,22 @@ async function clickContinue(page, frame, tag = "") {
     await btn.click({ timeout: 15000 });
     return { clicked: true, retried: false };
   } catch (e) {
-    note("step", { at: "click-timeout", tag, error: clip(e && e.message ? e.message : e, 160) });
+    // A click that times out because the button is disabled looks identical to a
+    // wrong captcha in the log, and that ambiguity cost a whole paid run on
+    // 2026-11-14 (the real cause was Apple's "At least one special character"
+    // rule on the password). The inline form errors and the button state are
+    // captured here so the next reader sees the cause, not the symptom.
+    const diag = await frame
+      .evaluate(() => {
+        const btn = document.querySelector('button[type="submit"]');
+        const errors = [...document.querySelectorAll('[role="alert"], .form-message, .error, .form-textbox-error')]
+          .map((el) => (el.innerText || "").trim().replace(/\s+/g, " ").slice(0, 60))
+          .filter(Boolean)
+          .slice(0, 6);
+        return { disabled: btn ? Boolean(btn.disabled) : null, errors };
+      })
+      .catch(() => null);
+    note("step", { at: "click-timeout", tag, error: clip(e && e.message ? e.message : e, 160), ...(diag || {}) });
   }
   // Let a possible navigation settle first: the readback has to describe the
   // page the click produced, not the one it was fired from.
@@ -722,20 +761,24 @@ async function clickContinue(page, frame, tag = "") {
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
-  const frozen = loadProfile();
-  const profile = frozen.profile;
-  note("step", {
-    at: "fingerprint",
-    file: frozen.file,
-    created: frozen.created,
-    profile: {
-      ua: profile.ua,
-      screen: profile.screen,
-      tz: profile.timezone,
-      platform: profile.platform,
-      locale: profile.locale,
-    },
-  });
+  const frozen = attachMode ? null : loadProfile();
+  const profile = frozen ? frozen.profile : null;
+  if (attachMode) {
+    note("step", { at: "fingerprint-attach", cdp_port: cdpPort, owned_by: "roxy" });
+  } else {
+    note("step", {
+      at: "fingerprint",
+      file: frozen.file,
+      created: frozen.created,
+      profile: {
+        ua: profile.ua,
+        screen: profile.screen,
+        tz: profile.timezone,
+        platform: profile.platform,
+        locale: profile.locale,
+      },
+    });
+  }
 
   const launchOpts = {
     channel: "chrome",
@@ -785,30 +828,65 @@ async function clickContinue(page, frame, tag = "") {
     }
   }
 
-  const browser = await chromium.launch(launchOpts);
+  // Attach mode: nothing to launch and nothing to patch — the window already
+  // carries the fingerprint (and the proxy) that the A/B is measuring.
+  const browser = attachMode
+    ? await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`, { timeout: 30000 })
+    : await chromium.launch(launchOpts);
 
   // What actually ran goes next to what was intended. The engine label is
   // rebuilt from the UA that goes out (never hand-typed), and the exit address
   // is whatever the caller already measured with --egress-ip; this script does
   // not probe the network itself. Other fields are written back untouched.
-  const actual = {
-    ...(profile.actual || {}),
-    engine: `chrome-${(/Chrome\/(\d+)/.exec(profile.ua) || [])[1]}`,
-    observed_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-  };
-  if (egressIP) actual.egress_ip = egressIP;
-  if (proxy) actual.egress_ref = String(proxy);
-  profile.actual = actual;
-  writeProfile(frozen.file, profile);
-  note("step", {
-    at: "actual",
-    file: frozen.file,
-    engine: actual.engine,
-    egress_ref: actual.egress_ref || "",
-    egress_ip: actual.egress_ip || "",
-  });
+  if (!attachMode) {
+    const actual = {
+      ...(profile.actual || {}),
+      engine: `chrome-${(/Chrome\/(\d+)/.exec(profile.ua) || [])[1]}`,
+      observed_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    };
+    if (egressIP) actual.egress_ip = egressIP;
+    if (proxy) actual.egress_ref = String(proxy);
+    profile.actual = actual;
+    writeProfile(frozen.file, profile);
+    note("step", {
+      at: "actual",
+      file: frozen.file,
+      engine: actual.engine,
+      egress_ref: actual.egress_ref || "",
+      egress_ip: actual.egress_ip || "",
+    });
+  }
 
-  const context = await browser.newContext({
+  let context;
+  let page;
+  if (attachMode) {
+    // Reuse the profile's own context so the window is the one Roxy opened.
+    context = browser.contexts()[0] || (await browser.newContext());
+    page = await context.newPage();
+    const observed = await page.evaluate(() => ({
+      ua: navigator.userAgent,
+      platform: navigator.platform,
+      language: navigator.language,
+      languages: navigator.languages,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      webdriver: navigator.webdriver,
+      screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
+    })).catch(() => null);
+    if (observed) {
+      try {
+        fs.writeFileSync(path.join(outdir, "roxy-fingerprint.json"), `${JSON.stringify(observed, null, 2)}\n`, "utf8");
+      } catch {}
+    }
+    note("step", {
+      at: "roxy-fingerprint",
+      ua: clip(observed && observed.ua, 120),
+      platform: observed ? observed.platform : "",
+      language: observed ? observed.language : "",
+      timeZone: observed ? observed.timeZone : "",
+      screen: observed ? observed.screen : "",
+    });
+  } else {
+  context = await browser.newContext({
     locale: profile.locale,
     timezoneId: profile.timezone,
     viewport: { width: profile.screen[0], height: profile.screen[1] - 120 },
@@ -859,7 +937,8 @@ async function clickContinue(page, frame, tag = "") {
       seed: noiseSeed(profile),
     },
   );
-  const page = await context.newPage();
+    page = await context.newPage();
+  }
   // Review A2: this listener used to copy up to 1200 bytes of every
   // validate/captcha response body into run.jsonl, which echoed the submitted
   // identifier and the captcha verdict. Only status, path and an Apple error
@@ -911,23 +990,23 @@ async function clickContinue(page, frame, tag = "") {
   note("step", { at: "form" });
 
   const fillForm = async (fr) => {
-    await fr.fill('input[name="firstName"]', arg("first", "James"));
-    await fr.fill('input[name="lastName"]', arg("last", "Carter"));
+    await typeHuman(fr.locator('input[name="firstName"]'), arg("first", "James"), "first_name");
+    await typeHuman(fr.locator('input[name="lastName"]'), arg("last", "Carter"), "last_name");
     await fr.selectOption('select[name="countrySelect"]', "USA");
     const selects = fr.locator("select");
     await selects.nth(1).selectOption("07");
     await selects.nth(2).selectOption("18");
     await selects.nth(3).selectOption("1992");
-    await fr.fill('input[name="appleId"]', email);
-    await fr.fill('input[name="password"]', password);
-    await fr.fill('input[name="confirmPassword"]', password);
+    await typeHuman(fr.locator('input[name="appleId"]'), email, "apple_id");
+    await typeHuman(fr.locator('input[name="password"]'), password, "password");
+    await typeHuman(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
     await fr.selectOption('select[name="phoneCode"]', phoneCC);
   // The widget hydrates ~4-6s later and silently resets the dial code to US;
   // the number then validates as +1 and the form never submits. Wait it out and
   // re-assert our choice (run-20261113d 2.1).
   await sleep(7000);
   await fr.selectOption('select[name="phoneCode"]', phoneCC).catch(() => {});
-    await fr.fill('input[name="phoneNumber"]', phone);
+    await typeHuman(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
   };
 
   // A wrong captcha does not burn anything: Apple just refreshes the image and
@@ -1039,7 +1118,7 @@ async function clickContinue(page, frame, tag = "") {
     if (!answer) throw new Error("captcha answer never arrived");
     note("step", { at: "captcha-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
 
-    await fr.fill('input[name="captcha"]', answer);
+    await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha_inline");
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
     submitAttempted = true;
@@ -1057,6 +1136,10 @@ async function clickContinue(page, frame, tag = "") {
       const fresh = fr.getByRole("button", { name: /new code/i }).first();
       if (await fresh.count().catch(() => 0)) await fresh.click().catch(() => {});
       await sleep(2500);
+      // One answer belongs to one image. Without this the manual channel replays
+      // the rejected digits on the next round, because the answer file outlives
+      // the attempt that consumed it.
+      fs.rmSync(answerFile, { force: true });
     }
     note("step", { at: "submit-result", attempt, stillForm: Boolean(stillForm) });
   }
@@ -1161,7 +1244,9 @@ async function clickContinue(page, frame, tag = "") {
   note("final", { state: finalState, evidence: clip(finalEvidence, 160), elapsed_ms: Date.now() - startedAt });
   writeRunLog();
   // A close failure must not turn a recorded outcome into a second final record.
-  await browser.close().catch(() => {});
+  // In attach mode the window belongs to Roxy: closing it is /browser/close's
+  // job, never this driver's (REGISTRAR-CONTRACT §1.5).
+  if (!attachMode) await browser.close().catch(() => {});
   console.log(JSON.stringify({ state: finalState, evidence: finalEvidence, outdir }));
   process.exit(exitCode);
 })().catch(async (e) => {
