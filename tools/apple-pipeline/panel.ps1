@@ -2,7 +2,8 @@ param(
     [int]$Port = 18741,
     [string]$Python = 'python',
     [switch]$Build,
-    [switch]$NoOpen
+    [switch]$NoOpen,
+    [switch]$AllowPurchase
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,7 @@ if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyCon
 Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $taskRoot 'bin'), $taskState | Out-Null
-    foreach ($taskName in @('login', 'appleweb', 'trusted-device', 'dashboard')) {
+    foreach ($taskName in @('login', 'appleweb', 'trusted-device', 'accountsetupcheck', 'nacexchange', 'dashboard')) {
         $taskBinary = Join-Path $taskRoot ('bin\' + $taskName + '.exe')
         if ($Build -or -not (Test-Path -LiteralPath $taskBinary)) {
             & go build -o $taskBinary ('./cmd/' + $taskName)
@@ -50,6 +51,7 @@ try {
         }
     }
     $taskArgs = @('-repo', ('"' + $taskRoot + '"'), '-dir', ('"' + $taskState + '"'), '-python', ('"' + $Python + '"'), '-port', $Port)
+    if ($AllowPurchase) { $taskArgs += '--allow-purchase' }
     $taskProcess = Start-Process -FilePath $taskDashboard -ArgumentList $taskArgs -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $taskState 'dashboard.out.log') -RedirectStandardError (Join-Path $taskState 'dashboard.err.log')
 } finally {

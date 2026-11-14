@@ -213,4 +213,61 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(self.job.status["account_created"])
 
 
+    def test_dashboard_handoff_uses_existing_panel_and_no_legacy_executors(self):
+        self.job.cfg["handoff"]="dashboard"
+        seen=[]
+        observations=iter([{"waiting_sms":True},{"gsa_verified":True},{"activated":True,"online":True}])
+        def panel(action, **body):
+            seen.append(action)
+            if action=="observe": return {"ok":True,**next(observations)}
+            if action=="plan":return {"ok":True,"terms":"fixture-terms"}
+            return {"ok":True}
+        with patch.object(self.job,"panel_call",side_effect=panel), patch.object(self.job,"next_code",return_value="002026"), \
+             patch.object(p.time,"sleep"), patch.object(self.job,"process") as process:
+            self.job.authenticate()
+        process.assert_not_called()
+        self.assertEqual(seen,["attach","start","observe","sms","observe","stop","plan","activate","resume","observe"])
+        self.assertEqual(self.job.status["status"],"ready")
+        self.assertTrue(self.job.status["handoff_complete"])
+        self.assertNotIn("002026",(self.root/"result.json").read_text())
+
+    def test_handoff_unknown_and_changed_intent_cannot_replay(self):
+        with patch.object(self.job,"panel_call",side_effect=p.PipelineError("transport_result_unknown")) as call:
+            for _ in range(2):
+                with self.assertRaises(p.PipelineError):self.job.panel_once("activate",terms="v1")
+            self.assertEqual(call.call_count,1)
+        self.job.status["operations"]={}
+        with patch.object(self.job,"panel_call",return_value={"ok":True}) as call:
+            self.job.panel_once("activate",terms="v1")
+            with self.assertRaises(p.PipelineError):self.job.panel_once("activate",terms="v2")
+            self.assertEqual(call.call_count,1)
+
+    def test_dashboard_unknown_registration_does_not_start_another_login(self):
+        self.job.cfg["handoff"]="dashboard"
+        with patch.object(self.job,"create",side_effect=p.PipelineError("transport_result_unknown")), \
+             patch.object(self.job,"authenticate") as auth,patch.object(self.job,"dashboard_handoff") as handoff, \
+             patch.object(self.job,"settle_number"):
+            self.job.run()
+        auth.assert_not_called();handoff.assert_not_called()
+
+    def test_followup_sms_intent_prevents_retry_after_timeout(self):
+        (self.root/"create-sms.txt").write_text("123456")
+        with patch.object(p,"sms_call",side_effect=p.PipelineError("transport_result_unknown")) as call:
+            for _ in range(2):
+                with self.assertRaises(p.PipelineError):self.job.prepare_followup_sms()
+            self.assertEqual(call.call_count,1)
+
+    def test_safe_number_replacement_stops_after_second_failure(self):
+        self.job.cfg["sms"].update(auto_purchase=True,max_price="1.10",max_total="2.20",currency="USD")
+        with patch.object(self.job,"create",side_effect=p.PipelineError("number_cannot_receive_followup","failed")) as create, \
+             patch.object(self.job,"settle_number"):
+            with self.assertRaisesRegex(p.PipelineError,"account_number_limit"):self.job.create_with_replacement()
+        self.assertEqual(create.call_count,2)
+
+    def test_legacy_purchase_cannot_bypass_explicit_gate(self):
+        self.job.cfg["sms"].pop("activation")
+        with patch.object(p,"sms_call") as call:
+            with self.assertRaisesRegex(p.PipelineError,"purchase_policy_required"):self.job.number()
+        call.assert_not_called()
+
 if __name__ == "__main__": unittest.main()

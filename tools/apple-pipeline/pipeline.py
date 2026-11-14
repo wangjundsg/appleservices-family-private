@@ -21,12 +21,13 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from sms_supply import Supply, SupplyError
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
 STAGES = ("create", "login", "terms", "gsa", "device", "keepalive")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
-             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN"}
+             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM"}
 
 
 class PipelineError(Exception):
@@ -107,14 +108,14 @@ def validate(cfg):
     pw = cfg.get("password", "")
     if len(pw) < 8 or not all(re.search(p, pw) for p in [r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]"]):
         raise PipelineError("password_requires_four_character_classes", "usage")
-    if bool(cfg.get("graph_token_file")) == bool(cfg.get("email_code_file")):
+    if sum(bool(cfg.get(k)) for k in ("graph_token_file", "email_code_file", "code_pool_config")) != 1:
         raise PipelineError("choose_one_email_code_source", "usage")
-    if not Path(cfg.get("graph_token_file") or cfg.get("email_code_file")).is_absolute():
+    if not Path(cfg.get("graph_token_file") or cfg.get("email_code_file") or cfg.get("code_pool_config")).is_absolute():
         raise PipelineError("mailbox_code_source_requires_absolute_path", "usage")
     if cfg.get("graph_token_file") and not Path(cfg["graph_token_file"]).is_file():
         raise PipelineError("mailbox_token_file_missing", "usage")
     sms = cfg.get("sms", {})
-    if not sms.get("key") or not re.fullmatch(r"[A-Z]{2}", sms.get("phonecc", "")):
+    if (not sms.get("auto_purchase") and not sms.get("key")) or not re.fullmatch(r"[A-Z]{2}", sms.get("phonecc", "")):
         raise PipelineError("sms_credentials_and_country_required", "usage")
     if sms["phonecc"] not in COUNTRIES:
         raise PipelineError("unsupported_form_country", "usage")
@@ -123,7 +124,7 @@ def validate(cfg):
             raise PipelineError("activation_phone_and_expiry_required", "usage")
         if timestamp(sms["expires_at"]) <= time.time():
             raise PipelineError("activation_expired", "usage")
-    elif not all(sms.get(k) for k in ("country", "dial_code", "max_price")):
+    elif not sms.get("auto_purchase") and not all(sms.get(k) for k in ("country", "dial_code", "max_price")):
         raise PipelineError("number_purchase_country_dial_code_and_price_required", "usage")
     roxy = cfg.get("roxy", {})
     proxy = roxy.get("proxyInfo", {})
@@ -141,11 +142,11 @@ def validate(cfg):
         raise PipelineError("captcha_key_required", "usage")
 
 
-def request(url, body=None, headers=None):
+def request(url, body=None, headers=None, timeout=25):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=25) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.read(2 << 20).decode()
     except Exception:
         # URLs may contain provider credentials. Do not propagate urllib errors.
@@ -170,13 +171,16 @@ def reserve_code(sms, state_root=None):
 
 
 class Job:
-    def __init__(self, folder, cfg, status=None):
+    def __init__(self, folder, cfg, status=None, allow_purchase=False):
         self.folder, self.cfg = Path(folder), cfg
+        self.allow_purchase = allow_purchase
         self.status = status or {"job_id": cfg["job_id"], "stage": "create", "status": "queued",
                                  "attempts": {}, "account_created": False, "trust_verified": False}
 
     def update(self, **values):
-        self.status.update(values, updated_at=iso())
+        self.status.update(values, updated_at=iso(), schema_version=2,
+                           account_id=hashlib.sha256(self.cfg["email"].strip().lower().encode()).hexdigest(),
+                           revision=self.status.get("revision", 0)+1)
         atomic(self.folder / "result.json", self.status)
         with open(self.folder / "events.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({k: self.status.get(k) for k in ("stage", "status", "reason", "updated_at")}) + "\n")
@@ -241,19 +245,16 @@ class Job:
         if sms.get("activation"):
             self.claim_number()
             return
-        # A timeout here must never buy a second number on resume.
-        self.update(status="running", reason="number_purchase_pending")
-        answer = sms_call(sms, action="getNumber", service="wx", country=sms["country"], maxPrice=sms["max_price"])
-        if answer in {"NO_NUMBERS", "NO_BALANCE", "BAD_KEY", "BAD_SERVICE", "SERVICE_UNAVAILABLE_REGION"}:
-            raise PipelineError("number_unavailable", "failed")
-        match = re.fullmatch(r"ACCESS_NUMBER:(\d+):(\d+)", answer)
-        if not match:
-            raise PipelineError("number_purchase_unconfirmed")
-        phone = match[2]
-        prefix = str(sms["dial_code"])
-        sms.update(activation=match[1], phone=phone.removeprefix(prefix), expires_at=iso(time.time() + 20 * 60))
-        atomic(self.folder / "input.json", self.cfg)
-        self.claim_number()
+        if sms.get("auto_purchase"):
+            self.update(reason="number_purchase_pending")
+            try: purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], sms, self.allow_purchase)
+            except SupplyError as e: raise PipelineError(str(e), "needs_review") from None
+            self.cfg["sms"] = {**sms, **purchased}
+            atomic(self.folder / "input.json", self.cfg)
+            self.claim_number()
+            return
+        # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
+        raise PipelineError("purchase_policy_required", "usage")
 
     def claim_number(self):
         sms = self.cfg["sms"]
@@ -275,6 +276,8 @@ class Job:
         if created.exists(): used.append(created.read_text().strip())
         code = sms_call(self.cfg["sms"], action="getStatus", id=self.cfg["sms"]["activation"])
         if not re.fullmatch(r"STATUS_OK:\d{6}", code): return ""
+        if self.cfg["sms"].get("supply_operation"):
+            self.supply().otp_received(self.cfg["sms"]["supply_operation"])
         code = code.split(":")[1]
         if code in used: return ""
         atomic(previous, used + [code])
@@ -328,7 +331,7 @@ class Job:
                             if state in {"success", "account_exists", "unknown", "rate_limited", "waiting_input", "failed"}: final = event
                     if "verification code requested" in output or "Enter six-digit code" in output:
                         waiting = True
-                    if "tooManyCodesSent" in output or "ec=-22981" in output or re.search(r"(?:HTTP|status)[:= ]+423", output):
+                    if re.search(r'''tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423''', output):
                         raise PipelineError("code_rate_limited", "rate_limited")
                     if waiting and code_mode and not code_delivered and time.monotonic() >= next_poll:
                         self.update(status="waiting_input", reason="awaiting_sms")
@@ -357,6 +360,8 @@ class Job:
     def create(self):
         self.number()
         sms, roxy = self.cfg["sms"], self.cfg["roxy"]
+        if sms.get("auto_purchase") and not sms.get("can_get_another_sms"):
+            raise PipelineError("number_cannot_receive_followup", "failed")
         remaining = timestamp(sms["expires_at"]) - time.time()
         if remaining <= 0: raise PipelineError("activation_expired", "waiting_input")
         self.update(reason="browser_create_pending")
@@ -377,7 +382,8 @@ class Job:
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
                    "expected-locale": roxy["locale"], "expected-timezone": roxy["timeZone"],
                    "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt")}
-            if self.cfg.get("graph_token_file"): inp["graph-token-file"] = self.cfg["graph_token_file"]
+            if self.cfg.get("code_pool_config"): inp["code-pool-config"] = self.cfg["code_pool_config"]
+            elif self.cfg.get("graph_token_file"): inp["graph-token-file"] = self.cfg["graph_token_file"]
             else: inp["await-email-code"] = self.cfg["email_code_file"]
             if self.cfg.get("captcha_solver") == "yes":
                 inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
@@ -388,6 +394,8 @@ class Job:
             self.update(registration_started=True)
             code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
             self.update(create_exit_code=code, creation_rejected=code in (1, 2))
+            if self.cfg.get("handoff") == "dashboard" and code not in (0, 1, 2):
+                raise PipelineError("registration_requires_readback", "needs_review")
             if code not in (1, 2):
                 self.update(stage="login", status="queued", account_created=code == 0,
                             reason="created" if code == 0 else "registration_needs_confirmation")
@@ -395,6 +403,24 @@ class Job:
                 raise PipelineError("registration_rejected", "usage" if code == 2 else "failed")
         finally:
             self.cleanup_browser()
+
+    def create_with_replacement(self):
+        for attempt in range(2):
+            try:
+                return self.create()
+            except PipelineError as error:
+                safe = error.reason == "number_cannot_receive_followup" or (error.reason == "registration_rejected" and self.status.get("creation_rejected"))
+                if not self.cfg["sms"].get("auto_purchase") or not safe or self.status.get("cleanup_pending"):
+                    raise
+                self.settle_number()
+                if self.status.get("spend", {}).get("otp_received"):
+                    raise PipelineError("registration_requires_readback", "needs_review") from None
+                if attempt == 1:
+                    raise PipelineError("account_number_limit", "needs_review") from None
+                sms = self.cfg["sms"]
+                self.cfg["sms"] = {k:sms[k] for k in ("auto_purchase","phonecc","max_price","max_total","currency")}
+                atomic(self.folder / "input.json", self.cfg)
+                self.update(registration_started=False, creation_rejected=False, reason="replacement_number_pending")
 
     def begin(self, stage):
         self.check_cancel()
@@ -404,6 +430,8 @@ class Job:
         self.update(stage=stage, status="running", reason="stage_started", attempts=attempts)
 
     def authenticate(self):
+        if self.cfg.get("handoff") == "dashboard":
+            return self.dashboard_handoff()
         sms = self.cfg["sms"]
         remaining = timestamp(sms["expires_at"]) - time.time()
         if remaining <= 0:
@@ -464,7 +492,8 @@ class Job:
             while self.status["status"] != "ready":
                 stage = self.status["stage"]
                 self.begin(stage)
-                if stage == "create": self.create()
+                if stage == "create": self.create_with_replacement()
+                elif self.cfg.get("handoff") == "dashboard": self.dashboard_handoff()
                 elif stage in {"login", "terms"}: self.authenticate()
                 elif stage == "gsa": self.gsa()
                 elif stage == "device": self.device()
@@ -473,7 +502,7 @@ class Job:
         except PipelineError as error:
             self.update(status=error.state, reason=error.reason,
                         cooldown_until=iso(time.time() + 3600) if error.state == "rate_limited" else None)
-            if self.status["stage"] == "create" and error.state == "unknown" and self.cfg["sms"].get("activation"):
+            if self.cfg.get("handoff") != "dashboard" and self.status["stage"] == "create" and error.state == "unknown" and self.cfg["sms"].get("activation"):
                 self.update(stage="login", status="queued", reason="registration_needs_confirmation")
                 try:
                     self.begin("login")
@@ -487,7 +516,107 @@ class Job:
             self.update(status="unknown", reason="interrupted_or_local_error",
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
         finally:
+            if self.cfg["sms"].get("auto_purchase"):
+                try: self.settle_number()
+                except Exception: self.update(refund_pending=True)
             self.update(active=False)
+
+    def supply(self):
+        return Supply(ROOT / "state" / "sms-supply", self.cfg["email"], atomic, lock, sms_call)
+
+    def panel_call(self, action, **body):
+        bridge = self.cfg["panel_bridge"]
+        url = bridge["url"]
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1": raise PipelineError("invalid_panel_bridge", "usage")
+        self.update(heartbeat_at=iso(), heartbeat_deadline=iso(time.time()+220))
+        reply = json.loads(request(url, {"action":action, **body},
+                                  {"Content-Type":"application/json", "X-App-Token":bridge["token"]}, timeout=210))
+        if reply.get("state") == "rate_limited": raise PipelineError("code_rate_limited", "rate_limited")
+        if reply.get("state") == "unknown": raise PipelineError("panel_handoff_requires_readback", "needs_review")
+        return reply
+
+    def panel_once(self, action, **body):
+        self.check_cancel()
+        operations = self.status.setdefault("operations", {})
+        key = action
+        digest=hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest()
+        if key in operations:
+            if operations[key].get("state") == "succeeded" and operations[key].get("intent_hash")==digest: return operations[key]["result"]
+            raise PipelineError("panel_handoff_requires_readback", "needs_review")
+        operations[key] = {"state":"intent", "started_at":iso(), "intent_hash":digest}
+        self.update(operations=operations)
+        reply = self.panel_call(action, **body)
+        if reply.get("ok") is not True: raise PipelineError("panel_handoff_requires_readback", "needs_review")
+        operations[key].update(state="succeeded", result=reply)
+        self.update(operations=operations)
+        return reply
+
+    def prepare_followup_sms(self):
+        if not (self.folder / "create-sms.txt").exists(): return
+        if self.status.get("followup_sms") == "ready": return
+        if self.status.get("followup_sms"):
+            raise PipelineError("followup_sms_requires_readback", "needs_review")
+        self.update(followup_sms="intent")
+        reply=sms_call(self.cfg["sms"], action="setStatus", status="3", id=self.cfg["sms"]["activation"])
+        if reply != "ACCESS_RETRY_GET":
+            raise PipelineError("followup_sms_requires_readback", "needs_review")
+        self.update(followup_sms="ready")
+
+    def dashboard_handoff(self):
+        # The existing dashboard owns Mac identity/login/NAC; do not run the parallel CLI chain.
+        try:
+            self.panel_once("attach")
+            sms = self.cfg["sms"]
+            if timestamp(sms["expires_at"]) <= time.time(): raise PipelineError("activation_expired", "needs_review")
+            self.prepare_followup_sms()
+            reserve_code(sms)
+            self.panel_once("start")
+            self.update(stage="gsa", reason="panel_login_started")
+            deadline=timestamp(sms["expires_at"])
+            delivered=False
+            while time.time()<deadline:
+                self.check_cancel()
+                observed=self.panel_call("observe")
+                if observed.get("activated"):
+                    self.update(account_created=True, stage="keepalive")
+                    break
+                if observed.get("gsa_verified"):
+                    self.update(account_created=True, stage="terms", reason="panel_activation_started")
+                    self.panel_once("stop")
+                    plan=self.panel_call("plan")
+                    if not plan.get("ok") or not plan.get("terms"): raise PipelineError("panel_activation_plan_unconfirmed", "needs_review")
+                    self.panel_once("activate", terms=plan["terms"])
+                    break
+                if observed.get("waiting_sms") and not delivered:
+                    self.update(status="waiting_input", reason="awaiting_sms")
+                    code=self.next_code()
+                    if code:
+                        self.panel_once("sms", code=code)
+                        delivered=True
+                        self.update(status="running")
+                elif observed.get("failed"):
+                    raise PipelineError("panel_login_unconfirmed", "needs_review")
+                time.sleep(4)
+            else: raise PipelineError("activation_expired", "needs_review")
+            self.check_cancel()
+            self.panel_once("resume")
+            self.update(stage="keepalive", reason="panel_keepalive_started")
+            for _ in range(45):
+                self.check_cancel()
+                state=self.panel_call("observe")
+                if state.get("activated") and state.get("online"):
+                    self.update(status="ready", account_created=True, handoff_complete=True,
+                                reason="panel_handoff_complete", next_run_at=None)
+                    return
+                if state.get("failed"): break
+                time.sleep(2)
+            raise PipelineError("panel_keepalive_unconfirmed", "needs_review")
+        except (Exception, KeyboardInterrupt):
+            # Stop only this task's owned worker, including a GUI worker waiting for an expired OTP.
+            try: self.panel_call("stop")
+            except Exception: pass
+            raise
 
     def check_cancel(self):
         if (self.folder / "cancel.request").exists():
@@ -495,6 +624,13 @@ class Job:
 
     def settle_number(self):
         sms = self.cfg["sms"]
+        if sms.get("auto_purchase"):
+            if (self.folder / "create-sms.txt").exists() and sms.get("supply_operation"):
+                self.supply().otp_received(sms["supply_operation"])
+            summary=self.supply().settle(self.cfg["job_id"])
+            self.update(spend=summary, refund_pending=summary["refund_pending"],
+                        refund_confirmed=summary["refunded"]!="0", refund_after=iso(time.time()+130))
+            return
         if not sms.get("activation") or not self.status.get("number_owned") or self.status.get("account_created") or self.status.get("refund_confirmed"): return
         # Only proven creation failure, or lease expiry, releases the rented number.
         expired = timestamp(sms["expires_at"]) <= time.time()
@@ -528,7 +664,7 @@ class Job:
                     refund_after=iso(time.time() + 130) if not refunded else None)
 
 
-def execute(action, job_id=None, input_file=None):
+def execute(action, job_id=None, input_file=None, allow_purchase=False):
     cfg = read(input_file) if input_file else None
     folder = job_path(cfg["job_id"] if cfg else job_id)
     if action == "status": return read(folder / "result.json")
@@ -560,7 +696,7 @@ def execute(action, job_id=None, input_file=None):
             atomic(folder / "result.json", Job(folder, cfg).status)
             atomic(folder / "input.json", cfg)
             status = None
-        job = Job(folder, cfg, status)
+        job = Job(folder, cfg, status, allow_purchase=allow_purchase)
         if action == "cleanup":
             job.cleanup_browser()
         elif action == "refund":
@@ -588,7 +724,7 @@ def maintain_once():
                     job.update(status="cancelled", reason="cancelled_requires_readback" if job.status.get("registration_started") else "cancelled_before_registration")
                 if job.status.get("cleanup_pending") or (receipt.parent / "browser.json").exists(): job.cleanup_browser()
                 if job.status.get("refund_pending") or job.status.get("refund_deferred") or job.status.get("status") == "cancelled": job.settle_number()
-                if job.status.get("status") == "ready" and timestamp(job.status["next_run_at"]) <= time.time():
+                if job.cfg.get("handoff") != "dashboard" and job.status.get("status") == "ready" and timestamp(job.status["next_run_at"]) <= time.time():
                     try: job.keepalive()
                     except PipelineError as e: job.update(status=e.state, reason=e.reason)
         except (PipelineError, OSError, ValueError, KeyError):
@@ -600,6 +736,7 @@ def main():
     parser.add_argument("action", choices=["run", "resume", "status", "keepalive", "refund", "cleanup", "maintain", "maintain-once"])
     parser.add_argument("--input", help="private JSON manifest (run only)")
     parser.add_argument("--job")
+    parser.add_argument("--allow-purchase", action="store_true", help="explicitly permit a bounded paid SMS purchase")
     args = parser.parse_args()
     try:
         if args.action == "maintain-once":
@@ -611,7 +748,7 @@ def main():
                 maintain_once()
                 time.sleep(15)
         if args.action == "run" and not args.input: raise PipelineError("input_required", "usage")
-        result = execute(args.action, args.job, args.input)
+        result = execute(args.action, args.job, args.input, allow_purchase=args.allow_purchase)
     except PipelineError as e: result = {"status": e.state, "reason": e.reason}
     except Exception: result = {"status": "unknown", "reason": "local_state_unavailable"}
     print(json.dumps(result, ensure_ascii=False))

@@ -18,6 +18,7 @@ func main() {
 	python := flag.String("python", "python", "64-bit Python executable")
 	macPushSetup := flag.String("mac-push-setup", "./tools/mac-push-check.py", "account-isolated Mac APS bootstrap")
 	port := flag.Int("port", 18741, "loopback dashboard port")
+	allowPurchase := flag.Bool("allow-purchase", false, "allow paid number purchases with an explicit configured budget")
 	flag.Parse()
 	absDir, _ := filepath.Abs(*dir)
 	absRepo, _ := filepath.Abs(*repo)
@@ -26,7 +27,7 @@ func main() {
 	absMacPushSetup, _ := filepath.Abs(*macPushSetup)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port, RepoRoot: absRepo})
+	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port, RepoRoot: absRepo, AllowPurchase: *allowPurchase})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

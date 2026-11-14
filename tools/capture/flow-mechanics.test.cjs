@@ -391,7 +391,11 @@ test("wiring C: the email step runs the grace window and presses one resend", ()
   assert.match(source, /resendEmailCode\(page, current\)/, "the resend is not wired into the window");
   assert.match(source, /mech\.findAction\(frame, mech\.RESEND_LABELS\)/, "the resend is not found by text");
   // The pickers take the window they are given instead of owning a fixed one.
-  assert.match(source, /graphEmailCode\(stepStartedAt, windowMs\)/);
+  assert.match(source, /graphEmailCode\(emailRequestedAt, windowMs\)/);
+  const sentAt=source.indexOf('emailRequestedAt = Date.now();',source.indexOf('submissionMayHaveLanded = true;'));
+  const submit=source.indexOf('await clickContinue(page, fr, `create-submit-');
+  assert.ok(sentAt>0 && sentAt<submit,'email query starts after the send and can miss a fast OTP');
+  assert.match(source,/poolEmailCode\(windowMs\)/);
   assert.match(source, /manualEmailCode\(windowMs\)/);
 });
 

@@ -1,4 +1,6 @@
 {
+  "codePoolConfig": "D:\\outlook-workbench\\.cache\\workbench\\api-client.json",
+  "purchase": {"maxPrice": "", "maxTotal": "", "currency": "USD"},
   "roxy": {
     "api": "http://127.0.0.1:50100",
     "token": "REPLACE_LOCALLY",

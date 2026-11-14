@@ -4,11 +4,26 @@
   const token = document.querySelector('meta[name="app-token"]').content;
   const form = $('registerForm');
   const field = name => form.elements.namedItem(name);
-  const stages = ['creating','login','terms','twofa','device','keepalive'];
+  const stages = ['creating','login','twofa','terms','device','keepalive'];
   const stageNames = {queued:'排队',creating:'注册',create:'注册',login:'网页登录',terms:'服务条款',twofa:'账户验证',gsa:'账户验证',device:'设备登记',keepalive:'会话验证',done:'完成'};
   const stateNames = {queued:'等待开始',running:'正在进行',waiting_input:'等待验证码',ready:'流程已完成',failed:'失败',usage:'参数需要修正',unknown:'结果待核实',needs_review:'需要核实',rate_limited:'Apple 要求冷却',needs_login:'会话需要重新验证',cancelled:'已取消'};
   let selected = '', retryOf = '', submitting = false, polling = false;
   let jobs = [];
+  let setup = null;
+  function automaticMode() {
+    const automatic = field('automatic').checked;
+    for (const name of ['email','password','phone','platform','activation','expiresAt']) {
+      field(name).disabled=automatic; field(name).closest('label').hidden=automatic;
+    }
+    for (const option of field('phonecc').options) option.disabled=automatic && !['GB','CA','ID','US','VN'].includes(option.value);
+    if (field('phonecc').selectedOptions[0].disabled) field('phonecc').value='GB';
+    $('registerPasswordHint').hidden=automatic; $('registerExpiryHint').hidden=automatic;
+    $('registerAutomaticHint').hidden=!automatic;
+    const ready=setup && setup.purchaseEnabled && setup.budgetConfigured && setup.mailboxConfigured;
+    $('registerAutomaticHint').textContent=ready ? '自动选取未占用邮箱、生成密码并取码。建号后交给现有面板完成激活。' : '自动购号尚未开放：需先商定并配置价格、邮箱池，再显式开启购号。';
+    $('registerSubmit').disabled=submitting || (automatic && !ready);
+  }
+  field('automatic').addEventListener('change',automaticMode);
   function notice(message) { $('registerNotice').textContent = message; $('registerNotice').hidden = !message; }
   async function api(path, body) {
     const response = await fetch('/api/register'+path, {method:body === undefined ? 'GET':'POST',headers:{'X-App-Token':token,'Content-Type':'application/json'},body:body === undefined ? undefined:JSON.stringify(body)});
@@ -22,6 +37,7 @@
   }
   $('registerToggle').addEventListener('click', () => showForm(form.hidden));
   function validatePassword() {
+    if (field('automatic').checked) { field('password').setCustomValidity(''); return; }
     const value = field('password').value;
     field('password').setCustomValidity(value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value) ? '' : '密码需至少 8 位，包含大小写字母、数字和特殊字符');
   }
@@ -30,15 +46,17 @@
   form.addEventListener('submit', async event => {
     event.preventDefault(); validatePassword(); if (!form.reportValidity() || submitting) return;
     const expiry = new Date(field('expiresAt').value);
-    if (!Number.isFinite(expiry.getTime()) || expiry <= new Date()) { notice('请填写接码平台的实际到期时间，号码不能已过期。'); return; }
+    const automatic=field('automatic').checked;
+    if (!automatic && (!Number.isFinite(expiry.getTime()) || expiry <= new Date())) { notice('请填写接码平台的实际到期时间，号码不能已过期。'); return; }
     submitting=true; $('registerSubmit').disabled=true; notice('正在创建任务…');
     try {
-      const result=await api('',{email:field('email').value.trim(),password:field('password').value,phone:field('phone').value,phonecc:field('phonecc').value,platform:field('platform').value,activation:field('activation').value,expiresAt:expiry.toISOString(),acceptTerms:field('acceptTerms').checked,captchaProvider:'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)},...(retryOf ? {retryOf}: {})});
+      const manual=automatic ? {} : {email:field('email').value.trim(),password:field('password').value,phone:field('phone').value,platform:field('platform').value,activation:field('activation').value,expiresAt:expiry.toISOString(),...(retryOf ? {retryOf}: {})};
+      const result=await api('',{automatic,...manual,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
       selected=result.jobId; retryOf=''; field('password').value=''; $('registerRetryNote').hidden=true;
-      showForm(false); notice('任务已提交。请留意邮箱验证码；短信由接码平台读取。');
+      showForm(false); notice(automatic ? '任务已提交，邮箱和短信验证码将自动读取。' : '任务已提交。请留意邮箱验证码；短信由接码平台读取。');
       await refresh();
     } catch (error) { notice(error.message); }
-    finally { submitting=false; $('registerSubmit').disabled=false; }
+    finally { submitting=false; automaticMode(); }
   });
   function render(job) {
     $('registerState').textContent=(stageNames[job.stage] || '处理')+' · '+(stateNames[job.state] || '待核实');
@@ -50,7 +68,7 @@
       if(i===index) li.setAttribute('aria-current','step'); else li.removeAttribute('aria-current');
     }
     let detail='正在处理；普通等码超时会保留页面和号码，直到号码到期。';
-    if (job.state==='ready') detail=job.imported ? '账号已加入列表。面板运行期间，每 10 分钟验证网页会话；设备受信任状态尚未证实。':'流程完成，正在核对账号会话并加入列表。';
+    if (job.state==='ready') detail=job.handoffComplete ? '账号已加入列表，现有面板已完成激活并确认后台在线。' : '流程完成，请在账号列表核对当前状态。';
     else if (job.state==='rate_limited') detail='已停止发送验证码和登录。冷却至 '+(job.cooldownUntil ? new Date(job.cooldownUntil).toLocaleString():'稍后')+'，之后需核实状态再继续。';
     else if (['unknown','needs_review','needs_login'].includes(job.state)) detail='请先查看证据并核实账号状态。不会自动重复注册或登录。';
     else if (job.state==='cancelled') detail='任务已停止。可能已经提交的注册需要核实，不会重新提交。';
@@ -60,8 +78,9 @@
     if(job.refundConfirmed) detail+=' 平台已确认退号。';
     if(job.cleanupPending) detail+=' 浏览器清理待重试。';
     if(job.message) detail+=' '+job.message;
+    if(job.spend) detail+=' 购号 '+job.spend.purchases+' 次，累计 '+job.spend.gross+' '+job.spend.currency+'，已退 '+job.spend.refunded+'。';
     $('registerDetail').textContent=detail;
-    $('registerCodeForm').hidden=!(job.active && job.stage==='creating');
+    $('registerCodeForm').hidden=!(job.active && job.stage==='creating' && !job.automatic);
     $('registerRetry').hidden=!job.canRetry;
     $('registerCancel').hidden=['ready','cancelled'].includes(job.state);
   }
@@ -94,6 +113,7 @@
   $('registerRetry').addEventListener('click',()=> {
     if(!confirm('重试将创建新任务，需要重新购买号码。确认准备新的号码？')) return;
     retryOf=selected;
+    field('automatic').checked=false; automaticMode();
     for(const name of ['password','phone','activation','expiresAt']) field(name).value='';
     $('registerRetryNote').hidden=false; showForm(true); field('email').focus();
   });
@@ -119,5 +139,6 @@
       }
     } catch(error) { notice(error.message); }
   });
+  automaticMode(); api('/config').then(value=> {setup=value;automaticMode();}).catch(error=>notice(error.message));
   refresh(); setInterval(refresh,3000);
 })();

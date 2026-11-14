@@ -34,10 +34,12 @@
   <section class="request-card registration-card overview-only" aria-labelledby="registerHeading">
     <div class="card-title-row"><div><h3 id="registerHeading">新建 Apple ID</h3><p class="card-description">注册、登录与设备登记，完成后加入账号列表。</p></div><button type="button" class="button button-primary" id="registerToggle" aria-expanded="false" aria-controls="registerForm">新建账号</button></div>
     <form id="registerForm" hidden>
+      <label class="register-consent"><input name="automatic" type="checkbox" checked>自动从 Outlook 邮箱池选取邮箱并购买号码</label>
+      <p id="registerAutomaticHint" class="cache-note">正在检查自动建号配置…</p>
       <div class="register-fields">
         <label>账号邮箱<input name="email" type="email" maxlength="254" autocomplete="off" required placeholder="你的邮箱地址"></label>
         <label>账号密码<input name="password" type="password" minlength="8" maxlength="256" autocomplete="new-password" required aria-describedby="registerPasswordHint"></label>
-        <label>号码国家<select name="phonecc"><option value="GB">英国 +44</option><option value="US">美国 +1</option><option value="CA">加拿大 +1</option><option value="AU">澳大利亚 +61</option><option value="CN">中国 +86</option><option value="DE">德国 +49</option><option value="FR">法国 +33</option><option value="SG">新加坡 +65</option><option value="HK">中国香港 +852</option><option value="JP">日本 +81</option></select></label>
+        <label>号码国家<select name="phonecc"><option value="GB">英国 +44</option><option value="US">美国 +1</option><option value="CA">加拿大 +1</option><option value="ID">印尼 +62</option><option value="VN">越南 +84</option><option value="AU">澳大利亚 +61</option><option value="CN">中国 +86</option><option value="DE">德国 +49</option><option value="FR">法国 +33</option><option value="SG">新加坡 +65</option><option value="HK">中国香港 +852</option><option value="JP">日本 +81</option></select></label>
         <label>手机号码（不含国家码）<input name="phone" inputmode="numeric" pattern="[0-9]{5,15}" maxlength="15" autocomplete="off" required placeholder="7700900123"></label>
         <label>接码平台<select name="platform"><option value="grizzly">Grizzly SMS</option><option value="hero">Hero SMS</option></select></label>
         <label>已购买的激活 ID<input name="activation" pattern="[A-Za-z0-9_\-]{1,100}" maxlength="100" autocomplete="off" required></label>
@@ -54,7 +56,7 @@
     <div id="registerJobs" hidden>
       <label class="register-job-select">注册任务<select id="registerJobSelect" aria-label="查看注册任务"></select></label>
       <div class="register-progress-head"><strong id="registerState">等待开始</strong><span id="registerElapsed" class="cache-note"></span></div>
-      <ol class="register-stages" id="registerStages"><li data-stage="creating">注册</li><li data-stage="login">网页登录</li><li data-stage="terms">服务条款</li><li data-stage="twofa">账户验证</li><li data-stage="device">设备登记</li><li data-stage="keepalive">会话验证</li></ol>
+      <ol class="register-stages" id="registerStages"><li data-stage="creating">注册</li><li data-stage="login">交接面板</li><li data-stage="twofa">登录验证</li><li data-stage="terms">iCloud 激活</li><li data-stage="device">设备登记</li><li data-stage="keepalive">后台在线</li></ol>
       <p id="registerDetail" class="card-description"></p>
       <form id="registerCodeForm" class="register-code" hidden><label for="registerEmailCode">邮箱验证码</label><input id="registerEmailCode" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="one-time-code" required placeholder="4–8 位验证码"><button type="submit" class="button button-light">提交邮箱验证码</button></form>
       <div class="register-actions"><button type="button" class="text-button" id="registerEvidence">查看证据</button><button type="button" class="text-button" id="registerRetry" hidden>用新号码重试</button><button type="button" class="text-button" id="registerCancel">取消任务</button></div>

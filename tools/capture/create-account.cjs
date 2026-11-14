@@ -68,6 +68,7 @@ let leaseDeadline = Infinity;
 const lib = require("./capture-lib.cjs");
 const mech = require("./flow-mechanics.cjs");
 const graphMail = require("./graph-mail.cjs");
+const codePool = require("./code-pool.cjs");
 const preflight = require("./preflight.cjs");
 const refund = require("./refund.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
@@ -295,6 +296,15 @@ const awaitEmailFile = String(arg("await-email-code", ""));
 // --graph-token-file is the unattended alternative to --await-email-code: the
 // code is read out of the registration mailbox itself (see graph-mail.cjs).
 const graphTokenFile = String(arg("graph-token-file", ""));
+const codePoolConfig = String(arg("code-pool-config", ""));
+const usedEmailMessages = [];
+let emailRequestedAt = Date.now();
+async function poolEmailCode(timeoutMs) {
+  const hit = await codePool.pollCode({file:codePoolConfig, mailbox:email, since:emailRequestedAt,
+    timeoutMs:Math.max(0,Math.min(timeoutMs,leaseDeadline-Date.now())), excluded:usedEmailMessages});
+  if (hit) usedEmailMessages.push(hit.messageId);
+  return hit;
+}
 async function manualEmailCode(timeoutMs = 600000) {
   const answerFile = path.resolve(awaitEmailFile);
   const value = await waitFor(async () => {
@@ -1439,6 +1449,7 @@ async function resendEmailCode(page, frame) {
     await sleep(1200);
     submitAttempted = true;
     submissionMayHaveLanded = true;
+    emailRequestedAt = Date.now();
     await clickContinue(page, fr, `create-submit-${attempt}`);
     await sleep(9000);
     await shot(`01-submit-${attempt}`);
@@ -1566,8 +1577,10 @@ async function resendEmailCode(page, frame) {
     // Priority: a Graph mailbox is unattended, the manual file is a human, and
     // the legacy temp-mail API is the fallback when neither was given. Each
     // picker now takes the window it is given: mechanism C owns the timing.
-    const emailPicker = graphTokenFile
-      ? (windowMs) => graphEmailCode(stepStartedAt, windowMs)
+    const emailPicker = codePoolConfig
+      ? (windowMs) => poolEmailCode(windowMs)
+      : graphTokenFile
+      ? (windowMs) => graphEmailCode(emailRequestedAt, windowMs)
       : awaitEmailFile
         ? (windowMs) => manualEmailCode(windowMs)
         : (windowMs) => waitFor(() => latestEmailCode(startedAt), windowMs, "email-code");

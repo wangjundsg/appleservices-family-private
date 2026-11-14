@@ -31,6 +31,7 @@ var assets embed.FS
 type Config struct {
 	Dir, Worker, Library, Python, MacPushSetup, RepoRoot string
 	Port                                                 int
+	AllowPurchase                                        bool
 }
 type Server struct {
 	config     Config
@@ -39,6 +40,7 @@ type Server struct {
 	token      string
 	launchMu   sync.Mutex
 	registerMu sync.Mutex
+	handoffMu  sync.Mutex
 	mu         sync.Mutex
 	launching  bool
 	message    string
@@ -864,6 +866,9 @@ func (s *Server) startSavedAccount(ctx context.Context, account *Account) contro
 }
 
 func (s *Server) startInMode(ctx context.Context, dir string, creds credentials, account *Account, resume bool) control.Result {
+	if s.registrationInProgress(account) && ctx.Value(registrationContextKey{}) != true {
+		return control.Result{Message: "建号任务正在管理此账号，请先查看任务进度"}
+	}
 	if s.pipelineAccount(account) {
 		return control.Result{Message: "此账号由建号产线维护网页会话；请在新建 Apple ID 卡片查看进度。设备受信任状态尚未证实"}
 	}
@@ -1038,6 +1043,10 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 		accounts := append([]*Account(nil), s.accounts...)
 		s.accountsMu.Unlock()
 		for _, account := range accounts {
+			if s.registrationInProgress(account) {
+				_ = s.stopIn(ctx, account.Dir)
+				continue
+			}
 			if s.pipelineAccount(account) {
 				continue
 			}
@@ -1207,6 +1216,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			var result control.Result
+			if s.registrationInProgress(selected) {
+				json.NewEncoder(w).Encode(control.Result{Message: "建号任务正在管理此账号，请在任务卡片操作"})
+				return
+			}
 			if selected != nil && action.Action == "family-remove-member" {
 				result = s.removeFamilyMember(r.Context(), selected, action.Code)
 				json.NewEncoder(w).Encode(result)

@@ -3,12 +3,15 @@
 async page => {
   const check = (value, message) => { if (!value) throw new Error(message); };
   let job = null, submitted = null, delivered = false, cancelled = false;
+  let purchaseEnabled=false;
   await page.route('**/api/register**', async route => {
     const request = route.request(), url = new URL(request.url());
     let value;
-    if (url.pathname === '/api/register' && request.method() === 'POST') {
+    if (url.pathname === '/api/register/config') {
+      value={purchaseEnabled,budgetConfigured:purchaseEnabled,mailboxConfigured:true};
+    } else if (url.pathname === '/api/register' && request.method() === 'POST') {
       submitted = request.postDataJSON();
-      job = {jobId:'reg-20261114-abcdefabcdefabcd',state:'waiting_input',stage:'creating',startedAt:new Date().toISOString(),elapsedMs:12000,active:true,canRetry:false};
+      job = {jobId:'reg-20261114-abcdefabcdefabcd',state:'waiting_input',stage:'creating',startedAt:new Date().toISOString(),elapsedMs:12000,active:true,canRetry:false,automatic:submitted.automatic};
       value = {jobId:job.jobId};
     } else if (url.pathname.endsWith('/input')) {
       delivered = request.postDataJSON().code === '654321'; value = {ok:true};
@@ -25,6 +28,9 @@ async page => {
   await page.locator('#registerForm').waitFor({state:'visible'});
   check(await page.locator('.registration-card').evaluate(e => getComputedStyle(e).opacity === '1'),'registration card invisible');
   const form = page.locator('#registerForm');
+  check(await page.locator('#registerSubmit').isDisabled(),'automatic purchase enabled without configured switch');
+  check(await form.locator('[name=email]').isHidden(),'automatic mode asks for manual mailbox');
+  await form.locator('[name=automatic]').uncheck();
   await form.locator('[name=email]').fill('fixture@example.test');
   await form.locator('[name=password]').fill('weak');
   check(await form.locator('[name=password]').evaluate(e => !e.checkValidity()),'weak password accepted');
@@ -64,6 +70,16 @@ async page => {
   await form.waitFor({state:'visible'});
   check(await form.locator('[name=activation]').inputValue() === '', 'retry reused old activation');
   check(await form.locator('[name=password]').inputValue() === '', 'retry reused password');
+  purchaseEnabled=true;job=null;
+  await page.reload();await page.locator('#registerToggle').click();
+  await page.waitForFunction(()=>!document.getElementById('registerSubmit').disabled);
+  await form.locator('[name=mode]').selectOption('direct');
+  await form.locator('[name=acceptTerms]').check();
+  await page.screenshot({path:'.cache/panel-qa/automatic.png'});
+  await page.locator('#registerSubmit').click();
+  await page.locator('#registerJobs').waitFor({state:'visible'});
+  check(submitted.automatic && !('email' in submitted) && !('activation' in submitted) && !('password' in submitted),'automatic submission includes manual credentials');
+  check(await page.locator('#registerCodeForm').isHidden(),'automatic task asks for manual email code');
   await page.unroute('**/api/register**');
-  return {passed:true,checks:['desktop/mobile','password and activation validation','submit','email code','cancel','safe retry']};
+  return {passed:true,checks:['desktop/mobile','price gate','automatic submit','password and activation validation','submit','email code','cancel','safe retry']};
 }
