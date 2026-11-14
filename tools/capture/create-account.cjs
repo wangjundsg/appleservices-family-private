@@ -1218,6 +1218,20 @@ async function clickContinue(page, frame, tag = "") {
       .catch(() => 0);
     submitted = !stillForm;
     if (!submitted) {
+      // Evidence first: a rejected captcha is the most expensive failure we hit,
+      // and without the image, the answer we typed and the page's own complaint
+      // there is nothing to learn from afterwards.
+      try {
+        const errText = (await fr.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
+        fs.writeFileSync(
+          path.join(outdir, `captcha-attempt-${attempt}.txt`),
+          JSON.stringify({ attempt, answer, error: errText, at: new Date().toISOString() }, null, 2),
+          "utf8",
+        );
+        await page.screenshot({ path: path.join(outdir, `captcha-attempt-${attempt}.png`) }).catch(() => {});
+      } catch {
+        // evidence is best effort; never let it break the retry
+      }
       // A hard refusal is the end of the run, not another captcha round: Apple
       // keeps the form on screen but has already decided (run-20261114-run2
       // section 2, the hard reject). Continuing only hammers the same address
