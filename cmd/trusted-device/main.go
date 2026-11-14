@@ -63,6 +63,7 @@ func run() (runErr error) {
 	controlAPI := flag.Bool("control-api", false, "enable authenticated local dashboard control")
 	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
 	resumeSession := flag.Bool("resume-session", false, "restore the account-bound GSA and accepted iCloud sessions without a password")
+	registerOnly := flag.Bool("register-only", false, "register this device, emit a receipt, and exit without approving requests")
 	flag.Parse()
 	if *background {
 		*controlAPI = true
@@ -405,7 +406,7 @@ func run() (runErr error) {
 	// The reference client sends GSA postdata after 2FA and before requesting
 	// iCloud delegates. For the explicit NAC diagnostic, allow an isolated
 	// delegate retry because accountsetupcheck does not mutate registration.
-	if !*resumeSession && strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1" {
+	if *registerOnly || (!*resumeSession && strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1") {
 		if err := login.PrepareDeviceRegistration(registration); err != nil {
 			return err
 		}
@@ -446,6 +447,11 @@ func run() (runErr error) {
 	}
 	if err := active.SaveSession(); err != nil {
 		return err
+	}
+	if *registerOnly {
+		// Registration acceptance does not prove trusted-device notification delivery.
+		fmt.Println(`{"state":"success","registration_accepted":true,"trust_verified":false}`)
+		return nil
 	}
 	status.Authenticated, status.State = true, "online"
 	if err != nil {

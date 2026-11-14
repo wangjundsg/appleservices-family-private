@@ -1,7 +1,11 @@
-# 交接文档（给工作台侧）：Apple 注册 / 登录一条龙
+# 交接文档：Apple 独立产线
 
-接收方：在 `gpt-free-service` 工作台上部署 Apple 产线的一方。
-目标：把 Apple 的**注册 → 登录 → 条款 → 设备登记**整条链接进工作台，工作台负责调度、并发、落库、续跑。
+2026-11-14 用户最终确认：**本轮只完善 Apple 产线，不安装、不接入 gpt-free-service。**
+产线独立负责注册、登录、条款、设备登记、保活与状态恢复。将来工作台如需使用，只通过接口或文件获取结果。
+家庭组以后新建，本轮暂不处理。
+
+**当前入口、参数、恢复规则和审查结论见 [APPLE-PIPELINE.md](./APPLE-PIPELINE.md)。**
+下方保留早期交接背景；凡“工作台负责落库/调度”、非零退出统一退号、退出统一删浏览器等旧描述，与新契约冲突时以新契约为准。
 
 ---
 
@@ -12,9 +16,9 @@
 | 阶段 | 程序 | 类型 | 产出 |
 | --- | --- | --- | --- |
 | 建号 | `node tools/capture/create-account.cjs` | 浏览器（Roxy 或 Playwright） | `run.jsonl`、截图、账号可用性 |
-| GSA 登录 + 2FA | `bin/login.exe`（源码在工作台侧 `cmd/applelogin` 同仓） | 协议 | `session.json`（含令牌/webservices） |
-| 网页会话 + 条款 | `bin/applelogin.exe` | 协议 | `icloud-web-session.json`（cookie 集，含 `can_create_hme`） |
-| 保活 | `bin/applekeepalive.exe` | 协议 | 会话有效/失效 |
+| GSA 登录 + 2FA | `bin/login.exe -checkpoint`（`cmd/login`） | 协议 | `session.json` + `icloud-accepted.json` |
+| 网页会话 + 条款 | `bin/appleweb.exe`（`cmd/appleweb`） | 协议 | `icloud-web-session.json`（cookie 集，含 `can_create_hme`） |
+| 保活 | `bin/appleweb.exe -mode keepalive` | 协议 | 会话有效/失效，成功后保存轮换 Cookie |
 
 三者共用账号目录约定：`state/accounts/<id>/` 或任意 `--dir`。
 
@@ -98,7 +102,7 @@
 
 ---
 
-## 五、还没跑通、需要工作台侧继续攻的部分
+## 五、原交接时的卡点（历史记录，当前实现见顶部链接）
 
 | # | 问题 | 现状 |
 | --- | --- | --- |

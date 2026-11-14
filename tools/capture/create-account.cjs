@@ -227,6 +227,7 @@ async function failShot(reason) {
 // something to retry.
 let refundAttempted = false;
 let phoneSubmitted = false;
+let submissionMayHaveLanded = false;
 async function autoRefund(reason) {
   if (!lifecycle.refundable(reason)) return null;
   if (refundAttempted) return null;
@@ -292,13 +293,6 @@ const graphTokenFile = String(arg("graph-token-file", ""));
 async function manualEmailCode(timeoutMs = 600000) {
   const answerFile = path.resolve(awaitEmailFile);
   const value = await waitFor(async () => {
-  try {
-    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
-  } catch {
-    const err = new Error("invalid activation expiry");
-    err.state = "usage";
-    throw err;
-  }
     if (!fs.existsSync(answerFile)) return "";
     const raw = fs.readFileSync(answerFile, "utf8").trim();
     return /^\d{4,8}$/.test(raw) ? raw : "";
@@ -735,13 +729,6 @@ async function solveCaptcha(page, fr, tag) {
   note("step", { at: "captcha-image", tag, natural: pick.natural, src_kind: pick.src_kind });
   await locator.screenshot({ path: path.join(outdir, `${tag}.png`), scale: "css" }).catch(() => {});
   const answer = await waitFor(async () => {
-  try {
-    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
-  } catch {
-    const err = new Error("invalid activation expiry");
-    err.state = "usage";
-    throw err;
-  }
     if (!fs.existsSync(answerFile)) return "";
     const v = fs.readFileSync(answerFile, "utf8").trim();
     return v.length >= 4 ? v : "";
@@ -862,6 +849,7 @@ async function clickContinue(page, frame, tag = "") {
 // same copy the submit finder has to avoid on the form. A control that is not on
 // the page is a logged skip, not a failed run.
 async function resendEmailCode(page, frame) {
+  if (Date.now() >= leaseDeadline) return { asked: false, ok: false, how: "activation-expired" };
   const found = await mech.findAction(frame, mech.RESEND_LABELS);
   if (!found.ok) {
     note("step", { at: "email-resend-not-found", reason: found.reason });
@@ -1190,7 +1178,7 @@ async function resendEmailCode(page, frame) {
       caret-color: transparent !important;
       text-shadow: none !important;
     }`;
-  const shot = async (name, { maskAuth = false } = {}) => {
+  const shot = async (name, { maskAuth = true } = {}) => {
     let styleHandle = null;
     if (maskAuth) {
       const current = await widgetFrame(page);
@@ -1278,7 +1266,7 @@ async function resendEmailCode(page, frame) {
     // every later pass finds the value already there and says so (`field-kept`).
     await fillIfNeeded(fr.locator('input[name="firstName"]'), firstName, "first_name");
     await fillIfNeeded(fr.locator('input[name="lastName"]'), lastName, "last_name");
-    await selectIfNeeded(fr.locator('select[name="countrySelect"]'), "USA", "country");
+    await selectIfNeeded(fr.locator('select[name="countrySelect"]'), String(arg("country", "USA")), "country");
     // The birthday is three separate selects whose DOM order on the 2026-11-14
     // build is day, month, year. Index-based selection sent the day value to the
     // month select and stalled for 30s without submitting anything; the stable
@@ -1318,6 +1306,12 @@ async function resendEmailCode(page, frame) {
       dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
     }
     note("step", { at: "dial-code", want: phoneCC, got: dial });
+    const country = await fr.locator('select[name="countrySelect"]').inputValue();
+    if (dial !== phoneCC || country !== String(arg("country", "USA"))) {
+      const err = new Error("country selection changed before submission");
+      err.state = submissionMayHaveLanded ? "unknown" : "failed";
+      throw err;
+    }
   };
 
   // A wrong captcha does not burn anything: Apple just refreshes the image and
@@ -1408,7 +1402,7 @@ async function resendEmailCode(page, frame) {
       const ocr = lib.runCaptchaCommand(String(ocrCmd), png);
       if (!ocr.ok) note("ocr-error", { error: clip(ocr.error || "", 160), ms: ocr.ms });
       answer = ocr.ok ? ocr.text : "";
-      if (answer && (answer.length < 4 || answer.length > 6)) { note("step", { at: "ocr-short", attempt, answer }); answer = ""; }
+      if (answer && (answer.length < 4 || answer.length > 6)) { note("step", { at: "ocr-short", attempt, length: answer.length }); answer = ""; }
       note("step", { at: "ocr-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0, ms: ocr.ms });
       if (!answer) {
         // OCR read nothing usable: refresh the image and try again instead of
@@ -1423,13 +1417,6 @@ async function resendEmailCode(page, frame) {
     }
     if (!answer) {
       answer = await waitFor(async () => {
-  try {
-    leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
-  } catch {
-    const err = new Error("invalid activation expiry");
-    err.state = "usage";
-    throw err;
-  }
         if (!fs.existsSync(answerFile)) return "";
         const v = fs.readFileSync(answerFile, "utf8").trim();
         return v.length >= 3 ? v : "";
@@ -1446,6 +1433,7 @@ async function resendEmailCode(page, frame) {
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
     submitAttempted = true;
+    submissionMayHaveLanded = true;
     await clickContinue(page, fr, `create-submit-${attempt}`);
     await sleep(9000);
     await shot(`01-submit-${attempt}`);
@@ -1649,9 +1637,7 @@ async function resendEmailCode(page, frame) {
   }
   if (!finalEvidence) finalEvidence = "no-terminal-screen";
 
-  // A non-zero exit means the rented number is not needed any more; cancel it
-  // before the terminal record so the log ends with the state of the run
-  // (run-20261113 §4.7).
+  // Consult the outcome before refunding: unknown/waiting/likely-success still own the number.
   const exitCode = flow.EXIT_CODES[finalState] ?? flow.EXIT_CODES.failed;
   // Evidence before teardown: the whole page at the moment the run gave up.
   if (exitCode !== 0) await failShot(`${finalState}_${clip(finalEvidence, 40)}`);
@@ -1684,6 +1670,7 @@ async function resendEmailCode(page, frame) {
   if (state === "failed" && phoneSubmitted && /detached|target page, context or browser has been closed|navigat/i.test(String(e && e.message))) {
     state = "likely_success";
   }
+  if (state === "failed" && submissionMayHaveLanded && !(e && e.state === "failed")) state = "unknown";
   note("error", { error: clip(e && e.message ? e.message : e, 300) });
   await failShot(`${state}_${clip((e && e.evidence) || (e && e.message) || "error", 40)}`);
   await autoRefund(state);

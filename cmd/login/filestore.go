@@ -2,11 +2,45 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 
 	"github.com/Laky-64/appleservices"
 )
+
+func (s fileStore) saveAccepted(account string, session appleservices.RestoredICloudSession) error {
+	if session.ADSID == "" || session.DSID == "" || session.MMEAuthToken == "" || session.ServiceData == nil {
+		return errors.New("incomplete iCloud checkpoint")
+	}
+	data, err := json.Marshal(map[string]any{
+		"session": appleservices.Session{AppleID: account, DSID: session.DSID, Tokens: map[string]string{
+			"mmeAuthToken": session.MMEAuthToken, "cloudKitToken": session.CloudKitToken}},
+		"adsid": session.ADSID, "service-data": session.ServiceData,
+	})
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(s.dir, ".accepted-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(f.Name(), filepath.Join(s.dir, "icloud-accepted.json"))
+}
 
 type fileStore struct {
 	dir string

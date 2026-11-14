@@ -166,10 +166,11 @@ test("§4.5: --preflight runs before the browser exists", () => {
   assert.match(source, /preflight\.probe\(/, "the probe is not the shared helper");
 });
 
-test("§4.7: --auto-refund cancels the number on every non-zero exit", () => {
+test("§4.7: exits consult the state-aware refund policy", () => {
   const source = read("create-account.cjs");
   assert.equal(source.split("await autoRefund(").length - 1, 2, "a non-zero exit path skips the refund");
   assert.match(source, /refund\.refundActivation\(/, "the refund does not go through the shared helper");
+  assert.match(source, /if \(!lifecycle\.refundable\(reason\)\) return null/, "uncertain outcomes must retain the number");
   assert.match(source, /note\("refund"/, "the refund result is not recorded in run.jsonl");
   // A usage refusal is thrown through the same handler, so it refunds too.
   const usage = source.indexOf('err.state = "usage"');

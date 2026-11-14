@@ -1,6 +1,8 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { expiry, refundable, retainInput } = require("./registration-lifecycle.cjs");
 
 test("only a proven failure or unused input may refund the activation", () => {
@@ -26,4 +28,12 @@ test("waiting ends at the original lease expiry", async () => {
   assert.deepEqual(windows, [30_000, 15_000]);
   assert.throws(() => expiry("bad"));
   assert.throws(() => expiry(new Date(0).toISOString(), 1));
+});
+
+test("driver sets the lease once and checks both country fields before a submit", () => {
+  const source = fs.readFileSync(path.join(__dirname, "create-account.cjs"), "utf8");
+  assert.equal(source.split('leaseDeadline = lifecycle.expiry(').length - 1, 1);
+  assert.match(source, /dial !== phoneCC \|\| country !==/);
+  assert.match(source, /phoneSubmitted = verdict === "phone_step"/);
+  assert.match(source, /!lifecycle.refundable\(reason\)/);
 });

@@ -342,6 +342,12 @@ type Client struct {
 	serviceData     map[string]any
 }
 
+// ResumeCheckpoint contains credentials; persist it only in the account's private directory.
+func (c *Client) ResumeCheckpoint() RestoredICloudSession {
+	return RestoredICloudSession{DSID: c.DSID, ADSID: c.ADSID, MMEAuthToken: c.MMEAuthToken,
+		CloudKitToken: c.CloudKitToken, ServiceData: c.serviceData}
+}
+
 // Client exchanges the authenticated Apple ID session for iCloud tokens.
 // A session is saved only after iCloud accepts the login, with or without 2FA.
 func (l *Login) Client() (*Client, error) {

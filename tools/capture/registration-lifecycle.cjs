@@ -23,12 +23,15 @@ function refundable(state) {
   return state === "failed" || state === "usage";
 }
 
-async function retainInput({ deadline, poll, notify, now = Date.now }) {
+async function retainInput({ deadline, poll, notify, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!Number.isFinite(deadline)) return null;
   notify();
   while (now() < deadline) {
+    const started = now();
     const value = await poll(Math.min(30_000, deadline - now()));
     if (value && (typeof value !== "object" || value.code)) return value;
+    // A failed mailbox refresh can return immediately; do not spin on its API.
+    if (now() - started < 1000 && now() < deadline) await sleep(Math.min(1000, deadline - now()));
   }
   return null;
 }

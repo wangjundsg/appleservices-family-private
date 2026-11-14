@@ -1,0 +1,34 @@
+{
+  "job_id": "apple-001",
+  "email": "your-owned-mailbox@hotmail.com",
+  "password": "REPLACE-with-a-private-password-123!",
+  "accept_terms": true,
+  "graph_token_file": "D:/private/mailbox-token.json",
+  "sms": {
+    "api": "https://api.grizzlysms.com/stubs/handler_api.php",
+    "key": "REPLACE",
+    "phonecc": "GB",
+    "activation": "REPLACE",
+    "phone": "REPLACE_WITH_NUMBER_WITHOUT_COUNTRY_CODE",
+    "expires_at": "REPLACE_WITH_ACTUAL_ISO_8601_EXPIRY"
+  },
+  "roxy": {
+    "api": "http://127.0.0.1:50100",
+    "token": "REPLACE",
+    "workspaceId": "REPLACE",
+    "projectId": "REPLACE",
+    "locale": "en-GB",
+    "timeZone": "Europe/London",
+    "proxyInfo": {
+      "moduleId": 0,
+      "proxyMethod": "custom",
+      "proxyCategory": "SOCKS5",
+      "protocol": "SOCKS5",
+      "ipType": "IPV4",
+      "host": "REPLACE",
+      "port": 1080,
+      "proxyUserName": "REPLACE",
+      "proxyPassword": "REPLACE"
+    }
+  }
+}

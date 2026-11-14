@@ -30,6 +30,7 @@ func run(args []string, input io.Reader, output, errOutput io.Writer) error {
 	factor := flags.String("twofactor", "trusted-device", "verification method: trusted-device or sms")
 	server := flags.String("anisette", "", "custom anisette server URL (default: public pool)")
 	logout := flags.Bool("logout", false, "clear local trusted-session cookies and exit")
+	checkpoint := flags.Bool("checkpoint", false, "save an account-bound delegate checkpoint for device registration")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -82,8 +83,14 @@ func run(args []string, input io.Reader, output, errOutput io.Writer) error {
 		}
 	}
 	fmt.Fprintln(errOutput, "Completing iCloud login ...")
-	if _, err := login.Client(); err != nil {
+	client, err := login.Client()
+	if err != nil {
 		return err
+	}
+	if *checkpoint {
+		if err := store.saveAccepted(*appleID, client.ResumeCheckpoint()); err != nil {
+			return err
+		}
 	}
 	// Do not print account IDs, credentials, cookies, or tokens.
 	fmt.Fprintln(output, "iCloud authentication successful. Session cookies saved.")

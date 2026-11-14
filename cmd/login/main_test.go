@@ -100,3 +100,18 @@ func TestVerificationResendAndMethodSwitchUseSameLogin(t *testing.T) {
 		t.Fatal("printed verification code")
 	}
 }
+
+func TestAcceptedCheckpointIsBoundAndPrivate(t *testing.T) {
+	s := fileStore{dir: t.TempDir()}
+	if err := s.saveAccepted("owner@example.test", appleservices.RestoredICloudSession{}); err == nil {
+		t.Fatal("accepted an incomplete delegate result")
+	}
+	checkpoint := appleservices.RestoredICloudSession{DSID: "test-dsid", ADSID: "test-adsid", MMEAuthToken: "test-token", ServiceData: map[string]any{"test": true}}
+	if err := s.saveAccepted("owner@example.test", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(s.dir + "/icloud-accepted.json")
+	if err != nil || !bytes.Contains(data, []byte(`"adsid":"test-adsid"`)) || !bytes.Contains(data, []byte(`"AppleID":"owner@example.test"`)) {
+		t.Fatal("lost checkpoint account binding")
+	}
+}

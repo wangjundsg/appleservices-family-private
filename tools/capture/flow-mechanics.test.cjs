@@ -353,7 +353,7 @@ test("D: the reason is derived from the evidence the run already holds", () => {
 
 // ---- wiring: the driver really calls all four ----------------------------
 
-const source = fs.readFileSync(path.join(__dirname, "create-account.cjs"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "create-account.cjs"), "utf8").replace(/\r\n/g, "\n");
 
 test("wiring A: every main-form field goes through fillIfNeeded / selectIfNeeded", () => {
   for (const name of ["firstName", "lastName", "appleId", "password", "confirmPassword", "phoneNumber"]) {
