@@ -507,15 +507,28 @@ async function widgetText(page) {
 // Human-paced typing. A .fill() drops a 29-character address in 0 ms, which is
 // the loudest possible automation signal; this types one key at a time with a
 // jittered delay and a short settle afterwards.
+
+// Picking from a real dropdown: click it open, wait like a person reading the
+// list, choose, then let the widget settle before the next field.
+async function selectHuman(locator, value, label = "") {
+  await locator.click({ timeout: 15000 }).catch(() => {});
+  await sleep(300 + Math.floor(Math.random() * 500));
+  await locator.selectOption(value, { timeout: 15000 }).catch(() => {});
+  await sleep(250 + Math.floor(Math.random() * 450));
+  if (label) note("step", { at: "selected", field: label, value: String(value) });
+}
+
 async function typeHuman(locator, text, label = "") {
   const value = String(text == null ? "" : text);
   if (!value) return;
   await locator.click({ timeout: 15000 }).catch(() => {});
   for (const ch of value) {
     await locator.pressSequentially(ch, { timeout: 5000 }).catch(() => {});
-    await sleep(80 + Math.floor(Math.random() * 140));
+    // Real typing is uneven: a quick burst, then a pause to think.
+    await sleep(120 + Math.floor(Math.random() * 230));
+    if (Math.random() < 0.12) await sleep(400 + Math.floor(Math.random() * 700));
   }
-  await sleep(300 + Math.floor(Math.random() * 400));
+  await sleep(700 + Math.floor(Math.random() * 900));
   if (label) note("step", { at: "typed", field: label, length: value.length });
 }
 
@@ -783,7 +796,12 @@ async function clickContinue(page, frame, tag = "") {
   const launchOpts = {
     channel: "chrome",
     headless: true,
-    args: ["--disable-blink-features=AutomationControlled"],
+    // Autofill is off at the browser level as well: a saved credential in the
+    // profile rewrote the address box once already (group B, 2026-11-14).
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
+    ],
   };
   const proxy = arg("proxy", "");
   if (proxy) {
@@ -989,24 +1007,93 @@ async function clickContinue(page, frame, tag = "") {
   if (!frame) throw new Error("widget frame missing");
   note("step", { at: "form" });
 
+  // A rejected submission returns to the same form, so every retry fills it
+  // again. typeHuman appends to whatever is already in the box, which doubled
+  // the address, the password and the phone number on the second pass and made
+  // Apple answer "Enter a valid email address" -- our own defect, not a verdict.
+  // Every text field is therefore emptied first.
+  const retype = async (locator, text, label) => {
+    await locator.fill("").catch(() => {});
+    await typeHuman(locator, text, label);
+  };
+  // The value that gets submitted is the value in the box, not the flag. A
+  // saved-credential autofill inside the profile rewrote one digit of the
+  // address after it had been typed (2026-11-14 group B: ...167 became ...187
+  // and Apple mailed the code to a mailbox nobody owned). Every non-secret field
+  // is therefore read back, re-filled once on disagreement, and the run stops
+  // with a named evidence code when it still disagrees.
+  const fieldValue = (fr, selector) => fr.$eval(selector, (el) => el.value).catch(() => "");
+  const ensureField = async (fr, selector, want, label, { secret = false } = {}) => {
+    let value = await fieldValue(fr, selector);
+    if (value !== want) {
+      await retype(fr.locator(selector), want, `${label}_retry`);
+      value = await fieldValue(fr, selector);
+    }
+    const ok = value === want;
+    note("step", {
+      at: "field-check",
+      field: label,
+      ok,
+      length: String(value).length,
+      // Never the value itself for a password; a length is enough to tell a
+      // truncated fill from a correct one.
+      head: secret ? "" : String(value).slice(0, 3) + "***",
+    });
+    if (!ok) {
+      const err = new Error(`field ${label} does not hold the value that was typed`);
+      err.state = "failed";
+      err.evidence = label === "apple_id" ? "email_field_mismatch" : `field_mismatch:${label}`;
+      throw err;
+    }
+    return value;
+  };
+  const noAutofill = async (fr) => {
+    // Chrome's own autofill is what overwrote the address; the page-level
+    // attribute stops it from offering a saved value for these boxes at all.
+    await fr.evaluate(() => {
+      for (const el of document.querySelectorAll("input")) {
+        if (el.type === "password") el.setAttribute("autocomplete", "new-password");
+        else el.setAttribute("autocomplete", "off");
+      }
+    }).catch(() => {});
+  };
   const fillForm = async (fr) => {
-    await typeHuman(fr.locator('input[name="firstName"]'), arg("first", "James"), "first_name");
-    await typeHuman(fr.locator('input[name="lastName"]'), arg("last", "Carter"), "last_name");
-    await fr.selectOption('select[name="countrySelect"]', "USA");
-    const selects = fr.locator("select");
-    await selects.nth(1).selectOption("07");
-    await selects.nth(2).selectOption("18");
-    await selects.nth(3).selectOption("1992");
-    await typeHuman(fr.locator('input[name="appleId"]'), email, "apple_id");
-    await typeHuman(fr.locator('input[name="password"]'), password, "password");
-    await typeHuman(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
-    await fr.selectOption('select[name="phoneCode"]', phoneCC);
-  // The widget hydrates ~4-6s later and silently resets the dial code to US;
-  // the number then validates as +1 and the form never submits. Wait it out and
-  // re-assert our choice (run-20261113d 2.1).
-  await sleep(7000);
-  await fr.selectOption('select[name="phoneCode"]', phoneCC).catch(() => {});
-    await typeHuman(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
+    await noAutofill(fr);
+    await retype(fr.locator('input[name="firstName"]'), arg("first", "James"), "first_name");
+    await retype(fr.locator('input[name="lastName"]'), arg("last", "Carter"), "last_name");
+    await selectHuman(fr.locator('select[name="countrySelect"]'), "USA", "country");
+    // The birthday is three separate selects whose DOM order on the 2026-11-14
+    // build is day, month, year. Index-based selection sent the day value to the
+    // month select and stalled for 30s without submitting anything; the stable
+    // handle is the data-testid each of them carries.
+    await selectHuman(fr.locator('select[data-testid="select-month"]'), "07", "birth_month");
+    await selectHuman(fr.locator('select[data-testid="select-day"]'), "18", "birth_day");
+    await selectHuman(fr.locator('select[data-testid="select-year"]'), "1992", "birth_year");
+    await retype(fr.locator('input[name="appleId"]'), email, "apple_id");
+    await retype(fr.locator('input[name="password"]'), password, "password");
+    await retype(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
+    await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
+    // The widget hydrates ~4-6s later and silently resets the dial code to US;
+    // the number then validates as +1 and the form never submits. Wait it out and
+    // re-assert our choice (run-20261113d 2.1).
+    await sleep(7000);
+    await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+    await retype(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
+    // The same hydration pass is what let autofill rewrite the address, so the
+    // four value-bearing fields are asserted again after it, right before the
+    // captcha is solved and the button is pressed.
+    await sleep(1200);
+    await ensureField(fr, 'input[name="appleId"]', email, "apple_id");
+    await ensureField(fr, 'input[name="password"]', password, "password", { secret: true });
+    await ensureField(fr, 'input[name="confirmPassword"]', password, "confirm_password", { secret: true });
+    await ensureField(fr, 'input[name="phoneNumber"]', phone, "phone_number");
+    let dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
+    if (dial !== phoneCC) {
+      await selectHuman(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+      await sleep(400);
+      dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
+    }
+    note("step", { at: "dial-code", want: phoneCC, got: dial });
   };
 
   // A wrong captcha does not burn anything: Apple just refreshes the image and
@@ -1020,7 +1107,7 @@ async function clickContinue(page, frame, tag = "") {
   // 76 solver points. `tracker` counts consecutive repeats and the run stops
   // before paying for a third solve of the same bytes.
   const captchaTracker = new lib.CaptchaTracker();
-  for (let attempt = 1; attempt <= 16 && !submitted; attempt += 1) {
+  for (let attempt = 1; attempt <= 4 && !submitted; attempt += 1) {
     const fr = await widgetFrame(page);
     if (!fr) break;
     await fillForm(fr);
@@ -1131,6 +1218,18 @@ async function clickContinue(page, frame, tag = "") {
       .catch(() => 0);
     submitted = !stillForm;
     if (!submitted) {
+      // A hard refusal is the end of the run, not another captcha round: Apple
+      // keeps the form on screen but has already decided (run-20261114-run2
+      // section 2, the hard reject). Continuing only hammers the same address
+      // and the same exit for nothing.
+      const pageText = (await widgetText(page)).replace(/\s+/g, " ");
+      if (/cannot be created at this time/i.test(pageText)) {
+        note("step", { at: "hard-reject", attempt, text: pageText.slice(0, 200) });
+        const err = new Error("apple refused: your account cannot be created at this time");
+        err.state = "failed";
+        err.evidence = `hard-reject:${attempt}`;
+        throw err;
+      }
       // A rejected captcha leaves the same image on screen; ask for a new one
       // before spending another OCR pass on it.
       const fresh = fr.getByRole("button", { name: /new code/i }).first();
