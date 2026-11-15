@@ -290,6 +290,12 @@ func (w *workflow) finish(ctx context.Context) error {
 		return nil
 	})
 }
+
+// verify reads the address back. `used` is not proof of our account: Apple also
+// reports used=true while an address is held by an unfinished registration
+// (observed 2026-11-15 on an address whose email code was never submitted). That
+// is why the creation receipt is checked first and a bare used=true can never
+// turn into accountExists.
 func (w *workflow) verify(ctx context.Context) error {
 	if !w.state.Created || w.state.Operations["finalize"].Status != "succeeded" {
 		return errors.New("final_creation_receipt_required")

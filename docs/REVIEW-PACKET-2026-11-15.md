@@ -22,6 +22,16 @@
 - 「画像、节奏、设备三处都有版本和签名」不成立。实际是：**画像**有 schema+内容签名；**设备**有 schema 版本，本轮补了设备级锁（`withLock`，30s 陈旧锁可回收）；**节奏**只有配置字段，没有版本与签名。
 - 「Edge 普通窗口通过、Chrome 无痕失败」这条对照**同时改变了浏览器与配置状态**，只能作为线索，不足以断言浏览器历史是决定性因素；而且进入邮箱验证页也不等于建号成功。原文已按此降级。
 
+## 0.000 事实更正：`used: true` 不等于账号存在
+
+2026-11-15 实测：`2897667304@qq.com` 在**邮箱验证码从未提交**的情况下，`POST /account/validation/appleid` 返回 `used: true`。
+
+结论：`used` 有两个含义 —— **账号已存在**，或**地址正被一次未完成的注册占用**（reservation/hold）。所以：
+
+- `verify` 阶段先检查 `created + finalize` 回执，再读 `used`；**单独的 `used=true` 永远不会变成 `accountExists`**（`TestUsedAddressWithoutReceiptIsNotOurAccount`）；
+- 预检失败文案是 `mailbox_not_confirmed_available`，只陈述"未确认可用"，不声称账号存在；
+- 一个未完成的注册会让地址在一段时间内不可复用，具体释放时间未知，不能按"已建号"处理。
+
 ## 0.00 第三轮复审修复（针对 `83d211e` 的 2 条）
 
 | # | 意见 | 处理 | 证据 |

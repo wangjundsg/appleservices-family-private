@@ -4,7 +4,11 @@ package main
 // legacy preset alias must never be accepted (or silently replaced) on its own.
 
 import (
+	"context"
 	"fmt"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,5 +117,33 @@ func TestLegacyAliasMigrationRefusesVersionMismatch(t *testing.T) {
 	cap.HelloVersions = map[string]string{"HelloChrome_133": "133"}
 	if _, err := fingerprint.MigrateLegacyProfile(profile, cap); err == nil {
 		t.Fatal("migration must refuse when no preset matches the profile version")
+	}
+}
+
+// A reserved address (used=true, no creation receipt of ours) must never be
+// reported as an account this task produced.
+func TestUsedAddressWithoutReceiptIsNotOurAccount(t *testing.T) {
+	fixture := newFlowFixture("held@example.test")
+	// Pretend the address is already held by an unfinished registration.
+	fixture.phase = "created"
+	srv := httptest.NewServer(fixture.handler())
+	defer srv.Close()
+
+	st := newProfileState("held@example.test")
+	st.Stage = "preflight"
+	session, err := newSession(SessionOptions{Base: srv.URL, Locale: "en-US", Timezone: "America/New_York", Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	w := &workflow{state: st, session: session, path: filepath.Join(t.TempDir(), "t.json")}
+	err = w.verify(context.Background())
+	if err == nil {
+		t.Fatal("used=true without a creation receipt must not pass verify")
+	}
+	if !strings.Contains(err.Error(), "final_creation_receipt_required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.Created {
+		t.Fatal("verify must not mark the task created")
 	}
 }
