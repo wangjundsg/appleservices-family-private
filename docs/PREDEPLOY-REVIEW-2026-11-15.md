@@ -2,7 +2,24 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## e937712：归属修正通过，但未决任务被重新 create（最新）
+## 0c3cf43：准入仍被旧恢复逻辑绕过，intent 不能证明可续跑（最新）
+
+基线 `0c3cf43d51d57795d7909046b38e02c1a6088770`，远端一致。独立 git archive 快照中的 Python 81 项测试通过。上一轮 email-sent 状态组的准入复现通过，unknown/needs_review 不再在该场景调用适配器。仍有两个必须关闭的 P1，暂不接真实执行器。
+
+1. **准入不在所有状态改写之前。** `pipeline.py:555` 的旧 create 恢复分支位于新准入之前，仍对 protocol 任务调用 cleanup_browser、将 stage 改为 login、status 改为 queued，并覆盖原原因。真实 execute("resume") 恢复 stage=create、attempts.create=1 的 unknown 或 needs_review 任务时，实测两种状态都调用适配器 1 次、浏览器清理 1 次，原因最终变成 waiting_input。修复应把协议准入置于整个恢复逻辑之前，并将旧浏览器恢复分支限定为 browser；不应仅把准入放在 while 内。真实入口验收需覆盖 create/email-sent/phone-sent 与 unknown/needs_review 的组合，资源、清理、create、resume、handoff 均不得发生，原原因保持不变。
+2. **intent 分支直接 resume，不符合未知结果先核实的契约。** `protocol_action` 将 registration_started、create_attempted 或 attempts.create 任一非空视为可 resume；这些字段在调用外部执行器前已写入，无法区分“尚未发出”“已发出且响应丢失”“已完成”。构造实际可能的中断状态 stage=create/status=running/create_attempted=True、没有任何挑战或完成证据，仍调用 resume 1 次。禁止重调 create 并不能证明 resume 无副作用。该分支应进入 review 或明确只读 reconcile；只有核实原操作已完成且存在与任务绑定的等待挑战、无未决操作，才可续跑。现有 test_unresolved_intent_resumes 应改成拒绝执行的测试；另保留“已确认等待允许 resume”的正向用例。
+
+执行规则进一步明确：新任务且无提交意图 → create；绑定当前挑战的已确认等待 → resume；仅有 intent 或中断标记 → 先核实；unknown/needs_review → 保留原因并拒绝有副作用的动作。不要从“等待”这个字符串或调用计数推导确认事实，也不要把安全性完全留给未来真实适配器。
+
+复现文件在 `C:/Users/HUAWEI/AppData/Local/Temp/apple-review-0c3-ff46f62b89f0415299fd3b54cb32b4a1/`，source 为独立快照：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-0c3-ff46f62b89f0415299fd3b54cb32b4a1/review_intent.py
+```
+
+两组测试包含三个失败场景；同目录 review_admission.py 的上一轮状态组通过。新测试只使用本地适配器/浏览器清理替身，没有执行真实登录、注册或购买。未改业务实现和其他未提交文件，未部署。
+
+## e937712：归属修正通过，但未决任务被重新 create（历史记录）
 
 基线 `e9377126d7cc7a2cda65f674f1a877eaad0911c0`，远端一致。独立提交快照中 Python 76 项、定向 vet、Go 五包全部通过，前期等待/输入/取消/维护补充用例也通过。缺适配器恢复时不再购号；未建号任务不再误交接登录。恢复复核夹具补上明确的 create 返回字典后，原两组断言通过；这次明确计数 create 调用后发现下面的问题。
 
