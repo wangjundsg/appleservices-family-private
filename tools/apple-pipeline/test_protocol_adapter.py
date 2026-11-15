@@ -19,25 +19,26 @@ import protocol_adapter
 
 
 class FakeAdapter:
-    """Records calls; returns the configured outcome and never touches the network."""
+    """Records calls on the class; the registry builds a new instance per resolve."""
 
-    instances = []
+    calls = {"create": 0, "resume": 0, "cancel": 0}
+    next_outcome = {"state": "waiting_input", "stage": "email-sent"}
 
-    def __init__(self):
-        self.calls = {"create": 0, "resume": 0, "cancel": 0}
-        self.outcome = {"state": "waiting_input", "stage": "email-sent"}
-        FakeAdapter.instances.append(self)
+    @classmethod
+    def reset(cls, outcome=None):
+        cls.calls = {"create": 0, "resume": 0, "cancel": 0}
+        cls.next_outcome = outcome or {"state": "waiting_input", "stage": "email-sent"}
 
     def create(self, job):
-        self.calls["create"] += 1
-        return dict(self.outcome)
+        FakeAdapter.calls["create"] += 1
+        return dict(FakeAdapter.next_outcome)
 
     def resume(self, job, inputs=None):
-        self.calls["resume"] += 1
-        return dict(self.outcome)
+        FakeAdapter.calls["resume"] += 1
+        return dict(FakeAdapter.next_outcome)
 
     def cancel(self, job):
-        self.calls["cancel"] += 1
+        FakeAdapter.calls["cancel"] += 1
         return {"state": "cancelled"}
 
 
@@ -65,7 +66,7 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.folder = Path(self.tmp.name)
         Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
-        FakeAdapter.instances.clear()
+        FakeAdapter.reset()
         os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
 
     def tearDown(self):
@@ -95,7 +96,7 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
         cfg = make_config(self.folder)
         job = pipeline.Job(self.folder, cfg)
         job.status.update(number_owned=True, number="4155550134", stage="create", status="queued")
-        self.assertTrue(job.protocol_create())
+        self.assertTrue(job.protocol_step())
 
         restored = pipeline.Job(self.folder, cfg, pipeline.read(self.folder / "result.json"))
         self.assertEqual(restored.status["status"], "waiting_input")
@@ -111,6 +112,7 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
             ("auto_purchase", {"auto_purchase": True, "phonecc": "US", "key": "k", "api": "https://fixture.invalid/api"}),
         ):
             with self.subTest(label):
+                FakeAdapter.reset()
                 folder = self.folder / label
                 folder.mkdir(parents=True, exist_ok=True)
                 cfg = make_config(folder, sms=sms)
@@ -119,7 +121,8 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
                 job.save = lambda **kw: None
 
                 counts = {"claim": 0, "settle": 0, "browser": 0, "login": 0}
-                job.claim_number = lambda: counts.__setitem__("claim", counts["claim"] + 1)
+                job.number = lambda: (job.status.update(number_owned=True, number="4155550134"),
+                                      counts.__setitem__("claim", counts["claim"] + 1))[1]
                 job.settle_number = lambda: counts.__setitem__("settle", counts["settle"] + 1)
                 job.cleanup_browser = lambda: counts.__setitem__("browser", counts["browser"] + 1)
                 job.authenticate = lambda: counts.__setitem__("login", counts["login"] + 1)
@@ -130,15 +133,15 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
                 self.assertEqual(counts["settle"], 0, "the number was released while waiting")
                 self.assertEqual(counts["browser"], 0, "browser cleanup ran for a protocol job")
                 self.assertEqual(counts["login"], 0, "the job jumped to the login stage")
-                if label == "auto_purchase":
-                    self.assertEqual(counts["claim"], 1, "auto purchase should happen before the adapter")
+                self.assertEqual(counts["claim"], 1, "the number must be bought/claimed before the adapter")
+                self.assertEqual(FakeAdapter.calls["create"], 1)
 
     def test_cancel_is_explicit(self):
         os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
         adapter = protocol_adapter.resolve(None)
         result = adapter.cancel(pipeline.Job(self.folder, make_config(self.folder)))
         self.assertEqual(result["state"], "cancelled")
-        self.assertEqual(FakeAdapter.instances[-1].calls["cancel"], 1)
+        self.assertEqual(FakeAdapter.calls["cancel"], 1)
 
     def test_waiting_keeps_resources(self):
         os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
@@ -163,11 +166,11 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
         job.authenticate = authenticate
         job.cleanup_browser = lambda: counters.__setitem__("release_email", counters["release_email"] + 1)
 
-        waiting = job.protocol_create()
+        waiting = job.protocol_step()
         self.assertTrue(waiting)
         self.assertEqual(job.status["status"], "waiting_input")
         self.assertEqual(job.status["stage"], "email-sent")
-        self.assertEqual(FakeAdapter.instances[-1].calls["create"], 1)
+        self.assertEqual(FakeAdapter.calls["create"], 1)
         for name, value in counters.items():
             self.assertEqual(value, 0, f"{name} ran while waiting")
         self.assertEqual(job.status.get("number"), "4155550134")
@@ -182,6 +185,84 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError) as caught:
             pipeline.validate(cfg)
         self.assertEqual(caught.exception.reason, "invalid_registration_method")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ProtocolResumeTest(unittest.TestCase):
+    """A waiting job resumes through the adapter, not through the login handoff."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        FakeAdapter.reset()
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _resume_job(self, outcome):
+        cfg = make_config(self.folder)
+        job = pipeline.Job(self.folder, cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", account_created=False)
+        handoffs = {"count": 0}
+
+        def handoff():
+            handoffs["count"] += 1
+            job.update(status="ready", stage="done")
+
+        job.dashboard_handoff = handoff
+        job.begin = lambda stage: None
+        FakeAdapter.reset(outcome)
+        job.run()
+        return job, handoffs
+
+    def test_resume_goes_back_to_the_adapter(self):
+        job, handoffs = self._resume_job({"state": "waiting_input", "stage": "phone-sent"})
+        self.assertEqual(FakeAdapter.calls["resume"], 1, "resume did not reach the adapter")
+        self.assertEqual(FakeAdapter.calls["create"], 0, "resume repeated the create stage")
+        self.assertEqual(handoffs["count"], 0, "a waiting job was handed to login")
+        self.assertEqual(job.status["status"], "waiting_input")
+        self.assertEqual(job.status["stage"], "phone-sent")
+
+    def test_handover_happens_only_after_ready(self):
+        job, handoffs = self._resume_job({"state": "ready", "reason": "protocol_registration_complete"})
+        self.assertEqual(FakeAdapter.calls["resume"], 1)
+        self.assertEqual(handoffs["count"], 1, "a finished protocol job was not handed over")
+        self.assertEqual(job.status["status"], "ready")
+        self.assertTrue(job.status["account_created"])
+
+    def test_needs_review_does_not_settle_the_number(self):
+        cfg = make_config(self.folder)
+        job = pipeline.Job(self.folder, cfg)
+        job.status.update(stage="create", status="queued", number_owned=True, number="4155550134")
+        settled = {"count": 0}
+        job.number = lambda: None
+        job.settle_number = lambda: settled.__setitem__("count", settled["count"] + 1)
+        job.begin = lambda stage: None
+        job.save = lambda **kw: None
+        FakeAdapter.reset({"state": "failed", "status": "needs_review", "reason": "adapter_needs_review"})
+        job.run()
+        self.assertEqual(job.status["status"], "needs_review")
+        self.assertEqual(settled["count"], 0, "a needs_review job released its number")
+        self.assertTrue(job.status.get("refund_deferred"))
+
+
+class ProtocolMethodFieldsTest(unittest.TestCase):
+    def test_conflicting_fields_are_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name)
+        Path(folder / "email-code.txt").write_text("", encoding="utf-8")
+        cfg = make_config(folder, registrationMethod="browser")
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            pipeline.validate(cfg)
+        self.assertEqual(caught.exception.reason, "registration_method_conflict")
 
 
 if __name__ == "__main__":

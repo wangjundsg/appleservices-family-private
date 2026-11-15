@@ -143,7 +143,10 @@ def validate(cfg):
         raise PipelineError("unsupported_captcha_solver", "usage")
     if cfg.get("captcha_solver") == "yes" and not cfg.get("yescaptcha_key"):
         raise PipelineError("captcha_key_required", "usage")
-    method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
+    snake, camel = cfg.get("registration_method"), cfg.get("registrationMethod")
+    if snake and camel and snake != camel:
+        raise PipelineError("registration_method_conflict", "usage")
+    method = snake or camel or "browser"
     if method not in {"browser", "protocol"}:
         raise PipelineError("invalid_registration_method", "usage")
 
@@ -263,14 +266,19 @@ class Job:
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
 
-    def protocol_create(self):
-        """Delegate the create stage to the configured adapter.
+    def protocol_step(self):
+        """One delegation to the adapter: create the first time, resume afterwards.
 
-        Returns True when the job is left waiting for input, in which case the run
-        loop stops and every resource stays where it is.
+        Returns True when the job must stay waiting — the caller then leaves the
+        run loop without releasing anything.
         """
+        if not self.status.get("number_owned"):
+            # Same lifecycle as the browser path: buy when allowed, claim the
+            # activation, and record it before the adapter sees anything.
+            self.number()
         adapter = adapter_registry.resolve(self.cfg.get("protocol"))
-        outcome = adapter.create(self) or {}
+        waiting = self.status.get("status") == "waiting_input"
+        outcome = (adapter.resume(self) if waiting else adapter.create(self)) or {}
         state = outcome.get("state")
         if state == "waiting_input":
             self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
@@ -504,13 +512,10 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
-            if self.status["stage"] == "create" and self.cfg["sms"].get("activation") and not self.status.get("number_owned"):
-                self.claim_number()
-            # The browser path buys its number inside create(); a protocol job never
-            # reaches that code, so it buys here — still before the adapter runs and
-            # long before anything is submitted.
-            if (self.method == "protocol" and self.status["stage"] == "create"
-                    and self.cfg["sms"].get("auto_purchase") and not self.status.get("number_owned")):
+            # Browser jobs claim the activation here; protocol jobs do it inside
+            # protocol_step so the purchase and the claim stay together.
+            if (self.method != "protocol" and self.status["stage"] == "create"
+                    and self.cfg["sms"].get("activation") and not self.status.get("number_owned")):
                 self.claim_number()
             stage = self.status["stage"]
             if resume and stage == "create" and self.status["attempts"].get("create"):
@@ -525,12 +530,13 @@ class Job:
             while self.status["status"] != "ready":
                 stage = self.status["stage"]
                 self.begin(stage)
-                if stage == "create":
-                    if self.method == "protocol":
-                        if self.protocol_create():
-                            return
-                    else:
-                        self.create_with_replacement()
+                if self.method == "protocol" and (stage == "create" or self.status.get("status") == "waiting_input"):
+                    # The adapter owns the create stage and any resume of a waiting
+                    # job; once it reports ready the loop continues to the next
+                    # stage instead of delegating again.
+                    if self.protocol_step():
+                        return
+                elif stage == "create": self.create_with_replacement()
                 elif self.cfg.get("handoff") == "dashboard": self.dashboard_handoff()
                 elif stage in {"login", "terms"}: self.authenticate()
                 elif stage == "gsa": self.gsa()
@@ -540,7 +546,8 @@ class Job:
         except PipelineError as error:
             self.update(status=error.state, reason=error.reason,
                         cooldown_until=iso(time.time() + 3600) if error.state == "rate_limited" else None)
-            if self.cfg.get("handoff") != "dashboard" and self.status["stage"] == "create" and error.state == "unknown" and self.cfg["sms"].get("activation"):
+            if (self.method != "protocol" and self.cfg.get("handoff") != "dashboard" and self.status["stage"] == "create"
+                    and error.state == "unknown" and self.cfg["sms"].get("activation")):
                 self.update(stage="login", status="queued", reason="registration_needs_confirmation")
                 try:
                     self.begin("login")
@@ -548,7 +555,10 @@ class Job:
                 except PipelineError as e:
                     self.update(status=e.state, reason=e.reason)
                 if self.status["status"] == "queued": self.run()
-            self.settle_number()
+            if error.state not in {"needs_review", "waiting_input", "unknown"}:
+                self.settle_number()
+            else:
+                self.update(refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
         except (Exception, KeyboardInterrupt):
             # Retain the stage so a restart cannot mistake an interrupted write for a fresh job.
             self.update(status="unknown", reason="interrupted_or_local_error",
