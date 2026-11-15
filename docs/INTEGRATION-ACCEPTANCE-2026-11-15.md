@@ -1,6 +1,25 @@
 # T01–T16 验收证据表（W1/W2 部分，W3–W5 未实现）
 
-## 2026-11-16 中途复核：76454cb（当前）
+## 2026-11-16 中途复核：2837794（当前，可继续整批开发）
+
+基线 `2837794557bcc6a899dfbc2daaf4c28ab7f81773`，审查时远端一致。上一轮审查的是 76454cb；be2d8de 为其后的修复，本轮已按最新提交重新验收，不沿用旧失败结论。
+
+独立 git archive 快照：Python 112 项通过；review_policy_batch.py 6/6、review_gate_edges.py 2/2、review_decision_application.py 5/5，共 13/13 通过。**上一轮对应的原因保留、退款 probe 拒绝、挑战错绑/缺字段拒绝、同阶段挑战更新、持久停止调用等复现项关闭。** 这不是未知 schema/面板/迁移等尚未完成范围的整体验收通过。
+
+**可以继续 W2 收尾 → W3，再完成 W4/W5，无需逐条申请确认。** 原 T01–T16 发布门槛不变。开发推进与真实交易/部署授权分开，当前没有新增付费或线上执行授权。
+
+R01 原始场景已通过：采购账本成功后注入 input.json 绑定写入失败，使用持久 result.json 的 acquisition_id 重建 Job，只购买一次，恢复原 activation 并返回 recovered=true。旧 review_system.py 夹具本次补上重载 result.json；原来只加载 input.json 会丢失新实现明确保存于结果快照的 acquisition_id，不能用那种不完整恢复误报该场景未修复。
+
+**R01 仍有两个 W2 内的契约边界，标部分而非完全关闭：**
+
+1. **P1 / 同一意图在订单状态变化后重新购买。** Supply.purchase 只在 result=PURCHASED 时复用；将同一订单状态分别设为 OTP_RECEIVED、REFUND_PENDING、REFUNDED，再调用同一 acquisition_id，每个子场景都额外调用一次模拟购买、得到新 activation。意图到订单的映射必须独立于订单生命周期：已收码可返回原引用，退款中/已退则受控拒绝或查询原结果，但不能在同一 ID 下新购。合法 replacement 必须通过明确决策生成新的 acquisition_id，并记前驱；不能借普通恢复生成新采购。
+2. **P1 / 同 ID 不同采购参数没有拒绝。** 已购英国号后，将同 acquisition_id 的 country 改为 CA，现有恢复分支按新请求的 dial/country 重新截取和标注旧号码，无冲突错误。本轮未发第二个真实请求。应在首次意图固定 account/job/国家/服务/预算等请求摘要，同 ID 摘要不符直接拒绝；恢复使用原订单字段，不用当前参数重新解释订单。
+
+以上是资源函数的离线边界复现，不声称当前 UI 会自动触发所有场景。新夹具 review_acquisition.py 三组：原始绑定崩溃恢复通过；状态变化组的三个子场景失败；国家冲突组失败，共四个失败断言。review_system.py 当前四项为三过一失败，仍失败的是已明确待完成的 I01“投递前被标已消费”。一起并入 W2，不新开实施阶段。
+
+本机快照：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-2837-14697969131c4b83b2323e3275005ca1/source`。夹具设置 APPLESERVICES_REVIEW_ROOT 指向快照，再执行 `python docs/review-fixtures/registration-2026-11-15/review_acquisition.py -v`。本轮未改业务实现、未重跑未变更的 Go 包、未真实购号/退号/注册/订阅/部署。
+
+## 2026-11-16 中途复核：76454cb（历史）
 
 审查基线 `76454cb1be14873f3bb74440b31bf27b1467c264`。独立快照 Python 105 项通过；上轮 review_policy_batch.py 六组全部通过，带时区冷却、未知 operation、策略层双退款条件及阶段不匹配的拒绝已改善。但 **W1 仍为部分，不能标完成**：已有 review_gate_edges.py 两项均因原始原因被覆盖而失败；本轮应用层五项补充均失败。尚未实现的 W2–W5 继续原计划，不按新缺陷重新开范围。
 

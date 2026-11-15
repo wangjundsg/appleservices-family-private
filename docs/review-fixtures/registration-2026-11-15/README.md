@@ -61,3 +61,15 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 ```powershell
 python docs/review-fixtures/registration-2026-11-15/review_decision_application.py -v
 ```
+
+## 2837794 复验与 R01 边界（2026-11-16）
+
+最新快照上 review_policy_batch.py、review_gate_edges.py、review_decision_application.py 共 13/13 通过。对应旧缺陷关闭，不能继续引用修复前结果。
+
+`review_acquisition.py` 验证完整读取持久 Job 后的采购恢复：账本成功/input.json 绑定写失败的场景通过；同一 acquisition_id 在 OTP_RECEIVED/REFUND_PENDING/REFUNDED 三种状态下不得再采购的子场景失败，同 ID 改国家须拒绝的场景失败。全部购买调用都是 Mock。
+
+```powershell
+python docs/review-fixtures/registration-2026-11-15/review_acquisition.py -v
+```
+
+review_system.py 的采购恢复夹具已补上读取 result.json，避免测试自己丢弃已持久化 acquisition_id。其当前四项三过一失败，未通过的输入提前消费仍属既定 I01 待完成范围。

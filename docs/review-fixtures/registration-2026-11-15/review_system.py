@@ -28,7 +28,8 @@ class SystemReview(unittest.TestCase):
             with patch.object(p,'atomic',side_effect=fail_input):
                 with self.assertRaises(OSError): job.number()
             # Restart with the unchanged manifest after the successful ledger write.
-            restored=p.Job(self.folder,p.read(self.folder/'input.json'),allow_purchase=True)
+            restored=p.Job(self.folder,p.read(self.folder/'input.json'),
+                           p.read(self.folder/'result.json'),allow_purchase=True)
             restored.number()
         self.assertEqual(call.call_count,1,'same acquisition bought a second order after restart')
 
