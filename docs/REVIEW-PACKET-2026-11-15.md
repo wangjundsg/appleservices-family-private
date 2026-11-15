@@ -22,6 +22,16 @@
 - 「画像、节奏、设备三处都有版本和签名」不成立。实际是：**画像**有 schema+内容签名；**设备**有 schema 版本，本轮补了设备级锁（`withLock`，30s 陈旧锁可回收）；**节奏**只有配置字段，没有版本与签名。
 - 「Edge 普通窗口通过、Chrome 无痕失败」这条对照**同时改变了浏览器与配置状态**，只能作为线索，不足以断言浏览器历史是决定性因素；而且进入邮箱验证页也不等于建号成功。原文已按此降级。
 
+## 0.0 第二轮复审修复（针对 `b41c911` 的 3 条 + 夹具与文档意见）
+
+| # | 意见 | 处理 | 证据 |
+|---|---|---|---|
+| 1 | P1 已提交任务画像丢失后，设备入口仍自动补回 | 设备画像只补给**无 intent** 的任务；有 intent 且无画像 → 走 `profile_blocked` | `TestSubmittedTaskDoesNotBorrowDeviceProfile` |
+| 2 | P1 设备锁未覆盖"读→改→写"，并发丢更新 | 新增 `updateDevice`：**同一临界区内**重读、修改、写回；锁改为有界重试（5s），30s 陈旧锁可回收 | `TestDeviceUpdatesDoNotLoseVisits`（12 并发 → visits=12） |
+| 3 | P2 Safari 15.3/15.5 仍映射到 Safari 16 预设 | 能力表新增 `HelloVersions`，**只保留版本与预设精确一致的模板**；Safari 只剩 16.0、iOS 14.0、Firefox 120、Chrome 131/133 | `TestTemplatesNeedAnExactPreset` |
+| 4 | 跨进程 mock 不校验 cookie/scnt/verificationId/请求体 | 夹具重写：绑定 cookie、scnt 轮换、`verificationId` 进入提交体、`captcha`/`account`/`phoneNumberVerification` 形状全部校验，违规计数为 0 才通过 | `TestHumanDeviceTelemetryAcrossProcesses`、`TestFlowFixtureValidatesSessionBindings` |
+| 5 | §4 仍保留"浏览器历史是决定性因素" | 已降级为"线索，两个变量同时变化"；并注明 `ageDays` 不能作为接受率证据 | 本文 §4 |
+
 ## 0.1 结论口径（请按这个审）
 
 - **已交付**：多画像配置 + utls 引擎 + 浏览器式预热 + 节奏 + jslog 回放 + 设备档案。
@@ -93,14 +103,14 @@ go test ./internal/fingerprint ./internal/engine ./internal/pacing ./tools/signu
 
 ## 4 真实证据
 
-**① 浏览器 vs 无痕（关键对照，人工操作，非本仓库代码）**
+**① 浏览器 vs 无痕（线索，不是结论）**
 
 同一台机器、同网络、同美国号、同邮箱 `2897667304@qq.com`：
 
-- Edge 普通窗口 → **通过创建，进入「验证电子邮件地址」页**；
+- Edge 普通窗口 → 通过创建，进入「验证电子邮件地址」页；
 - Chrome 无痕 → 被拒。
 
-结论：决定性是「浏览器是否被用过」，不是 UA 也不是 IP。
+**这条对照同时改变了浏览器与配置状态两个变量，只能作为线索，不足以断言"浏览器历史是决定性因素"；进入邮箱验证页也不等于建号成功。**
 
 **② 设备养护（本仓库，刚才实测）**
 
@@ -111,6 +121,7 @@ go test ./internal/fingerprint ./internal/engine ./internal/pacing ./tools/signu
 ```
 
 `loaded=51` 是本次从设备恢复的 cookie 记录数；`reused=true` 说明画像没被重抽；四轮运行画像 id 恒定。
+`ageDays` 只是本地档案年龄（首次见到到现在），**不能作为 Apple 接受率变化的证据**。
 
 **③ 协议侧真实跑过的组合（全部 `-34607001`，作为反向证据）**
 

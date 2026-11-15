@@ -1,97 +1,20 @@
 package main
 
 // Cross-process acceptance: profile engine + warm-up + pacing + telemetry +
-// persistent device, driven through three real CLI processes.
-//
-// This is the check the review asked for: everything switched on at once, each
-// stage in its own process, and the invariants that only show up across
-// restarts (no second bootstrap, no replayed telemetry, no profile drift, no
-// device cookies overwriting a resumed task).
+// persistent device, driven through three real CLI processes, against a fixture
+// that also validates the session bindings (cookie, scnt rotation,
+// verificationId, request bodies).
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-// flowFixture is a permissive Apple stand-in: the happy path plus the warm-up
-// documents. Unlike strictSignup it does not police call counts, because a
-// warmed device legitimately re-visits the portal.
-type flowFixture struct {
-	mu            sync.Mutex
-	scnt, session string
-	phase         string
-	hits          map[string]int
-}
-
-func newFlowFixture() *flowFixture {
-	return &flowFixture{scnt: "flow-1", session: "flow-session", hits: map[string]int{}}
-}
-
-func (f *flowFixture) handler(t *testing.T) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.hits[r.Method+" "+r.URL.Path]++
-		w.Header().Set("scnt", f.scnt)
-		w.Header().Set("X-Apple-ID-Session-Id", f.session)
-		w.Header().Set("X-Apple-HC-Bits", "8")
-		w.Header().Set("X-Apple-HC-Challenge", "cafebabe")
-
-		switch {
-		case r.URL.Path == "/bootstrap/portal":
-			fmt.Fprint(w, `{"serviceKey":"flow-widget"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/account" && r.URL.RawQuery == "":
-			http.SetCookie(w, &http.Cookie{Name: "landing", Value: "1", Path: "/"})
-			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprint(w, "<html>portal</html>")
-		case r.Method == http.MethodGet && r.URL.Path == "/account":
-			fmt.Fprint(w, `{"locale":"en_US"}`)
-		case strings.HasPrefix(r.URL.Path, "/widget/account/"):
-			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprint(w, "<html>widget</html>")
-		case r.URL.Path == "/account/validation/appleid":
-			fmt.Fprintf(w, `{"valid":true,"used":%t}`, f.phase == "created")
-		case r.URL.Path == "/account/validate/password":
-			w.WriteHeader(204)
-		case r.URL.Path == "/captcha":
-			fmt.Fprintf(w, `{"id":7,"token":"flow-token","payload":{"content":%q}}`,
-				base64.StdEncoding.EncodeToString([]byte("flow-image")))
-		case r.URL.Path == "/account/validate":
-			f.phase = "validated"
-			fmt.Fprint(w, `{}`)
-		case r.URL.Path == "/account/verification" && r.Method == http.MethodPost:
-			f.phase = "email-sent"
-			fmt.Fprint(w, `{"verificationId":"flow-vid"}`)
-		case r.URL.Path == "/account/verification":
-			f.phase = "email-verified"
-			fmt.Fprint(w, `{}`)
-		case r.URL.Path == "/account/verification/phone" && r.Method == http.MethodPost:
-			f.phase = "phone-sent"
-			fmt.Fprint(w, `{}`)
-		case r.URL.Path == "/account/verification/phone":
-			f.phase = "phone-verified"
-			fmt.Fprint(w, `{}`)
-		case r.URL.Path == "/account" && r.Method == http.MethodPost:
-			f.phase = "created"
-			fmt.Fprintf(w, `{"name":%q}`, "fixture@example.test")
-		case r.URL.Path == "/jslog" || r.URL.Path == "/v2/jslogs":
-			w.WriteHeader(204)
-		default:
-			fmt.Fprint(w, `{}`)
-		}
-	})
-}
 
 // runChild invokes the CLI in a separate process and returns exit code + receipt.
 func runChild(t *testing.T, args ...string) (int, map[string]any) {
@@ -124,8 +47,8 @@ func runChild(t *testing.T, args ...string) (int, map[string]any) {
 }
 
 func TestHumanDeviceTelemetryAcrossProcesses(t *testing.T) {
-	fixture := newFlowFixture()
-	srv := httptest.NewTLSServer(fixture.handler(t))
+	fixture := newFlowFixture("fixture@example.test")
+	srv := newTLSFixture(t, fixture.handler())
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -175,8 +98,7 @@ func TestHumanDeviceTelemetryAcrossProcesses(t *testing.T) {
 		t.Fatalf("process 1 has no profile: %v", first["profile"])
 	}
 
-	// Process 2: resume with the email code; telemetry must not be replayed and
-	// the device must not overwrite the task's cookies.
+	// Process 2: resume with the email code.
 	if err := os.WriteFile(emailCode, []byte("012345"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +135,18 @@ func TestHumanDeviceTelemetryAcrossProcesses(t *testing.T) {
 
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	// One bootstrap, one final creation, exactly one telemetry batch.
+	if fixture.violations != 0 {
+		t.Fatalf("session bindings were violated %d times: %v", fixture.violations, fixture.violationNotes)
+	}
+	if !fixture.sawSessionCookie {
+		t.Fatal("the fixture never saw the bound cookie on an API call")
+	}
+	if !fixture.sawRotatedScnt {
+		t.Fatal("the fixture never saw a correctly rotated scnt")
+	}
+	if !fixture.sawVerificationID {
+		t.Fatal("the fixture never saw the verificationId in the submit body")
+	}
 	if got := fixture.hits["POST /account"]; got != 1 {
 		t.Fatalf("final creation ran %d times", got)
 	}

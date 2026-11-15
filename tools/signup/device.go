@@ -57,15 +57,22 @@ func withLock(path string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
-	handle, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
+	var handle *os.File
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		handle, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			break
+		}
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
 			_ = os.Remove(lockPath) // stale lock from a crashed run
-			handle, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			continue
 		}
-		if err != nil {
+		if time.Now().After(deadline) {
 			return fmt.Errorf("device: %s is locked by another run", lockPath)
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	defer func() {
 		handle.Close()
@@ -93,20 +100,26 @@ func loadDevice(dir, id string, now time.Time) (*deviceState, error) {
 	if err != nil {
 		return nil, err
 	}
-	var raw []byte
-	var readErr error
-	lockErr := withLock(path, func() error {
-		raw, readErr = os.ReadFile(path)
+	var device *deviceState
+	err = withLock(path, func() error {
+		loaded, readErr := readDevice(path, id, now)
+		device = loaded
 		return readErr
 	})
-	if lockErr != nil && !os.IsNotExist(lockErr) {
-		return nil, lockErr
+	if err != nil {
+		return nil, err
 	}
-	if os.IsNotExist(lockErr) {
+	return device, nil
+}
+
+// readDevice is the unlocked read; callers must already hold the lock.
+func readDevice(path, id string, now time.Time) (*deviceState, error) {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
 		return &deviceState{SchemaVersion: deviceSchemaVersion, ID: id, CreatedAt: now.UTC(), LastUsedAt: now.UTC()}, nil
 	}
-	if readErr != nil {
-		return nil, readErr
+	if err != nil {
+		return nil, err
 	}
 	var device deviceState
 	if err := json.Unmarshal(raw, &device); err != nil {
@@ -121,12 +134,43 @@ func loadDevice(dir, id string, now time.Time) (*deviceState, error) {
 	return &device, nil
 }
 
-// save writes the record atomically enough for one process (write then rename).
+// updateDevice performs read-modify-write inside ONE critical section. Two
+// tasks that each loaded the record separately and then saved would otherwise
+// lose one of the two visits.
+func updateDevice(dir, id string, now time.Time, mutate func(*deviceState) error) (*deviceState, error) {
+	path, err := devicePath(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	var out *deviceState
+	err = withLock(path, func() error {
+		device, readErr := readDevice(path, id, now)
+		if readErr != nil {
+			return readErr
+		}
+		if err := mutate(device); err != nil {
+			return err
+		}
+		out = device
+		return writeDevice(path, device)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// save writes the record under its own lock (single writer).
 func (d *deviceState) save(dir string) error {
 	path, err := devicePath(dir, d.ID)
 	if err != nil {
 		return err
 	}
+	return withLock(path, func() error { return writeDevice(path, d) })
+}
+
+// writeDevice is the unlocked write; callers must already hold the lock.
+func writeDevice(path string, d *deviceState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -134,13 +178,11 @@ func (d *deviceState) save(dir string) error {
 	if err != nil {
 		return err
 	}
-	return withLock(path, func() error {
-		temp := path + ".tmp"
-		if err := os.WriteFile(temp, raw, 0o600); err != nil {
-			return err
-		}
-		return os.Rename(temp, path)
-	})
+	temp := path + ".tmp"
+	if err := os.WriteFile(temp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temp, path)
 }
 
 // ageDays is the receipt-friendly age of this browser profile.

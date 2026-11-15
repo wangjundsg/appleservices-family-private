@@ -171,7 +171,10 @@ func (s *Session) sendTelemetry(ctx context.Context, plan *replayPlan, pacer *pa
 			header.Set("Accept-Language", env.Headers["accept-language"])
 		}
 		target := s.base + env.Path + env.Query
-		status, _, _, err := s.send(ctx, env.Method, target, header, []byte(env.Body))
+		status, respHeader, _, err := s.send(ctx, env.Method, target, header, []byte(env.Body))
+		if err == nil {
+			s.absorb(respHeader)
+		}
 		if err != nil || status < 200 || status > 299 {
 			failures = append(failures, fmt.Sprintf("%s:%d", env.Path, status))
 			continue

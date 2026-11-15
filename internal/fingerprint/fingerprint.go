@@ -159,6 +159,10 @@ type Capability struct {
 	// kind. Zero means "no declared cap"; templates above it are filtered out
 	// before weighting.
 	MaxBrowser map[Kind]int `json:"maxBrowser,omitempty"`
+	// HelloVersions is the exact browser version a preset poses as. A template
+	// whose version differs is not reachable: "lower than the cap" is not the
+	// same as "the engine has a preset for this version".
+	HelloVersions map[string]string `json:"helloVersions,omitempty"`
 }
 
 // Supports reports whether this engine can emulate the given hello at all.
@@ -299,6 +303,9 @@ func reachableTemplates(kind Kind, engine Capability) []Template {
 			continue
 		}
 		if limit, ok := engine.MaxBrowser[kind]; ok && limit > 0 && t.Major > limit {
+			continue
+		}
+		if want, ok := engine.HelloVersions[t.Engineering.Name]; ok && want != t.BrowserVersion {
 			continue
 		}
 		out = append(out, t)

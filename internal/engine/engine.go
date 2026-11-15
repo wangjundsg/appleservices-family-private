@@ -66,6 +66,13 @@ func Capabilities() fingerprint.Capability {
 		Version:    moduleVersion(),
 		Hellos:     names,
 		MaxBrowser: maxBrowser,
+		HelloVersions: map[string]string{
+			"HelloChrome_131":  "131",
+			"HelloChrome_133":  "133",
+			"HelloFirefox_120": "120",
+			"HelloSafari_16_0": "16.0",
+			"HelloIOS_14":      "14.0",
+		},
 	}
 }
 

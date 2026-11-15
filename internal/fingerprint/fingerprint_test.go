@@ -11,6 +11,10 @@ func utlsCap() Capability {
 		Name:    "utls",
 		Version: "1.8.2",
 		Hellos:  []string{"HelloChrome_131", "HelloChrome_133", "HelloFirefox_120", "HelloSafari_16_0", "HelloIOS_14"},
+		HelloVersions: map[string]string{
+			"HelloChrome_131": "131", "HelloChrome_133": "133",
+			"HelloFirefox_120": "120", "HelloSafari_16_0": "16.0", "HelloIOS_14": "14.0",
+		},
 		MaxBrowser: map[Kind]int{
 			KindChrome:    133,
 			KindFirefox:   120,
@@ -129,39 +133,60 @@ func TestExplicitKindNeedsEngineSupport(t *testing.T) {
 	}
 }
 
-func TestNewerTemplatesAreFilteredByEngineCap(t *testing.T) {
-	// An engine capped at Chrome 133 must never hand out 150-154.
-	opts := Options{Kind: KindChrome, Timezone: "America/New_York", Region: Region{Country: "US", Source: "explicit"}, Engine: utlsCap()}
-	for seed := int64(1); seed <= 50; seed++ {
+// TestTemplatesNeedAnExactPreset pins the review finding: "not newer than the
+// cap" is not enough. Safari 15.3/15.5 used to be selectable while the only
+// reachable preset was Safari 16.0, so the profile claimed a version the socket
+// could not pose as.
+func TestTemplatesNeedAnExactPreset(t *testing.T) {
+	engine := utlsCap()
+
+	cases := []struct {
+		kind      Kind
+		wantVer   string
+		wantHello string
+	}{
+		{KindMacSafari, "16.0", "HelloSafari_16_0"},
+		{KindIOSSafari, "14.0", "HelloIOS_14"},
+		{KindFirefox, "120", "HelloFirefox_120"},
+	}
+	for _, tc := range cases {
+		opts := Options{Kind: tc.kind, Timezone: "America/New_York", Region: Region{Country: "US", Source: "explicit"}, Engine: engine}
+		for seed := int64(1); seed <= 20; seed++ {
+			opts.Seed = seed
+			p, err := Select(opts)
+			if err != nil {
+				t.Fatalf("%s seed %d: %v", tc.kind, seed, err)
+			}
+			if p.BrowserVersion != tc.wantVer {
+				t.Fatalf("%s seed %d: selected %s, want %s", tc.kind, seed, p.BrowserVersion, tc.wantVer)
+			}
+			if p.Engine.Name != tc.wantHello {
+				t.Fatalf("%s seed %d: hello %s does not match %s", tc.kind, seed, p.Engine.Name, tc.wantVer)
+			}
+		}
+	}
+
+	// Chrome: only 131/133 have presets, and the hello must match the version.
+	opts := Options{Kind: KindChrome, Timezone: "America/New_York", Region: Region{Country: "US", Source: "explicit"}, Engine: engine}
+	seen := map[string]string{}
+	for seed := int64(1); seed <= 60; seed++ {
 		opts.Seed = seed
 		p, err := Select(opts)
 		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
+			t.Fatalf("chrome seed %d: %v", seed, err)
 		}
+		seen[p.BrowserVersion] = p.Engine.Name
 		if p.Major > 133 {
-			t.Fatalf("seed %d: got chrome %d above the engine cap", seed, p.Major)
+			t.Fatalf("chrome %d has no engine preset but was selected", p.Major)
 		}
 	}
-	// With no cap the newer templates become reachable again.
-	uncapped := utlsCap()
-	uncapped.MaxBrowser = nil
-	sawNewer := false
-	for seed := int64(1); seed <= 50; seed++ {
-		opts.Seed = seed
-		opts.Engine = uncapped
-		p, err := Select(opts)
-		if err != nil {
-			t.Fatalf("uncapped seed %d: %v", seed, err)
-		}
-		if p.Major > 133 {
-			sawNewer = true
-		}
+	if seen["131"] != "HelloChrome_131" || seen["133"] != "HelloChrome_133" {
+		t.Fatalf("chrome version/hello pairing is wrong: %v", seen)
 	}
-	if !sawNewer {
-		t.Fatal("an uncapped engine should reach Chrome 150-154")
+	if len(seen) != 2 {
+		t.Fatalf("chrome selection reached versions without a preset: %v", seen)
 	}
 }
-
 func TestAutoSelectionRenormalisesAroundUnsupportedKinds(t *testing.T) {
 	// An engine with Chrome only: auto must produce chrome every time.
 	cap := Capability{Name: "utls-fake", Hellos: []string{"HelloChrome_131"}, MaxBrowser: map[Kind]int{KindChrome: 133}}

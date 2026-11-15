@@ -224,7 +224,10 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		if err != nil {
 			return fail("device_state_invalid")
 		}
-		if device.Profile != nil && st.Profile == nil {
+		// Only a task without intent may borrow the device's profile. A submitted
+		// task whose profile went missing must hit the block below, not be patched
+		// back to health behind the reviewer's back.
+		if device.Profile != nil && st.Profile == nil && !hasIntent(st) {
 			st.Profile = device.Profile
 			profileReused = true
 		}
@@ -323,15 +326,21 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 				}
 			}
 		}
-		device.noteVisit(paths, time.Now())
-		device.noteTask(st.Email)
-		device.captureCookies(session)
-		if st.Profile != nil {
-			device.Profile = st.Profile
-		}
-		if err := device.save(*deviceDir); err != nil {
+		// Read-modify-write under one lock: a warming run and a registration run
+		// can overlap, and two separate load+save pairs would drop one visit.
+		updated, err := updateDevice(*deviceDir, *deviceID, time.Now(), func(d *deviceState) error {
+			d.noteVisit(paths, time.Now())
+			d.noteTask(st.Email)
+			d.captureCookies(session)
+			if st.Profile != nil {
+				d.Profile = st.Profile
+			}
+			return nil
+		})
+		if err != nil {
 			return fail("device_state_write_failed")
 		}
+		device = updated
 	}
 	w := &workflow{state: st, session: session, path: *statePath, options: opts, emailFile: *emailFile, phoneFile: *phoneFile, wait: *codeWait}
 	if st.Human != nil {
