@@ -251,6 +251,7 @@ async function pollCode({
   senderDomains,
   intervalMs = POLL_INTERVAL_MS,
   timeoutMs = POLL_TIMEOUT_MS,
+  clockSkewMs = 90_000,
   fetchImpl = globalThis.fetch,
   onTick = () => {},
 } = {}) {
@@ -270,7 +271,7 @@ async function pollCode({
   let seen = 0;
   // `since` is the moment the form was submitted; a mail that arrives a second
   // earlier is still this run's code, so the window is nudged back.
-  const floor = since ? since - 90_000 : 0;
+  const floor = since ? since - clockSkewMs : 0;
   while (Date.now() - started < timeoutMs) {
     rounds += 1;
     const list = await listMessages(cfg, tok.access_token, { fetchImpl });

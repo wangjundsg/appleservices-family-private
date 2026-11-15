@@ -1,6 +1,6 @@
 # 纯协议 Apple Account 注册机（无浏览器）
 
-> **2026-11-15 审查更正：以下为历史实验记录，不能作为“全链路通过”或“已排除指纹/协议问题”的证明。传输配置未生效、跨进程会话丢失及测试模型偏差见 [复核报告](PROTOCOL-SIGNUP-AUDIT-2026-11-15.md)。本轮没有确认 Apple 拒绝的根因。**
+> **2026-11-15 审查更正：以下为历史实验记录，不能作为“全链路通过”或“已排除指纹/协议问题”的证明。问题分析见 [复核报告](PROTOCOL-SIGNUP-AUDIT-2026-11-15.md)，最新会话续接与最终创建步骤见 [当前执行说明](PROTOCOL-SIGNUP-RUNBOOK.md)。尚未确认 Apple 拒绝的根因。**
 
 日期：2026-11-15。范围：`appleservices-family-private`。实现：`tools/signup/`。
 替代对象：`tools/capture/create-account.cjs`（Roxy 指纹浏览器 + Playwright 驱动建号）。

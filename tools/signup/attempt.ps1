@@ -53,7 +53,7 @@ $receipt = [ordered]@{
   attempt  = (Get-Date -Format 'yyyyMMdd-HHmmss')
   email    = $Email
   provider = $Provider
-  exit     = "$ExitCountry/$ExitPort"
+  exit_hint = "$ExitCountry/$ExitPort" # Annotation only; not an observed IP.
   locale   = $Locale
   tz       = $Tz
   stage    = 'buy'
@@ -106,15 +106,27 @@ function Refund {
 
 function Run-Signup {
   param([string[]]$Arguments)
-  $output = & $Binary @Arguments 2>&1 | Out-String
-  $processExit = $LASTEXITCODE
+  $previousCaptcha = $env:YESCAPTCHA_KEY
+  try {
+    $env:YESCAPTCHA_KEY = $CaptchaKey
+    $output = & $Binary @Arguments 2>&1 | Out-String
+    $processExit = $LASTEXITCODE
+  } finally { $env:YESCAPTCHA_KEY = $previousCaptcha }
   $json = $null
   foreach ($line in ($output -split "`r?`n")) {
     if ($line.Trim().StartsWith('{')) { try { $json = $line | ConvertFrom-Json } catch { } }
   }
-  if ($processExit -ne 0) { $json = [pscustomobject]@{ error = ('signup process failed (exit ' + $processExit + ')') } }
+  if ($processExit -ne 0 -and (-not $json -or -not $json.error)) { $json = [pscustomobject]@{ error = ('signup process failed (exit ' + $processExit + ')') } }
   return @{ raw = $output.Trim(); json = $json; exitCode = $processExit }
 }
+
+# Validate local mailbox ownership and binary capabilities before any purchase.
+$graphConfig = Get-Content -LiteralPath $GraphCfg -Raw | ConvertFrom-Json
+if (-not $graphConfig.mailbox -or $graphConfig.mailbox.Trim().ToLowerInvariant() -ne $Email.Trim().ToLowerInvariant()) { throw 'Graph mailbox does not match this task.' }
+$capabilities = Run-Signup @('-capabilities')
+if ($capabilities.exitCode -ne 0 -or -not $capabilities.json.sessionResume -or -not $capabilities.json.finalize) { throw 'Rebuild signup: resumable-session/finalize support is required.' }
+$preflight = Run-Signup @('-email', $Email, '-phonecc', $PhoneCC, '-stage', 'preflight', '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json')
+if ($preflight.exitCode -ne 0 -or $preflight.json.stage -ne 'preflight') { throw 'Preflight did not produce a fresh registration task; no number purchased.' }
 
 # ---- 1) buy -----------------------------------------------------------------
 $buy = Sms-Call "action=getNumber&service=wx&country=$SmsCountry&maxPrice=$MaxPrice"
@@ -133,7 +145,7 @@ $receipt['stage'] = 'create'
 $create = Run-Signup @(
   '-email', $Email, '-phone', $national, '-phonecc', $PhoneCC,
   '-tz', $Tz, '-locale', $Locale, '-proxy', $proxy, '-skip-landing',
-  '-captcha-key', $CaptchaKey, '-stage', 'create', '-json'
+  '-stage', 'create', '-json'
 )
 if (-not $create.json -or $create.json.error) {
   $verdict = if ($create.json) { $create.json.error } else { $create.raw }
@@ -141,16 +153,20 @@ if (-not $create.json -or $create.json.error) {
   exit 1
 }
 $createdAt = (Get-Date).ToUniversalTime().ToString('o')
-$receipt['created'] = $true
+$receipt['validated'] = $true
 
 # ---- 3) email code ----------------------------------------------------------
 $receipt['stage'] = 'email'
+$since = (Get-Date).ToUniversalTime().ToString('o')
 $sendEmail = Run-Signup @('-email', $Email, '-stage', 'email', '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json')
-$since = (Get-Date).AddMinutes(-2).ToUniversalTime().ToString('o')
+if ($sendEmail.exitCode -ne 0 -or -not $sendEmail.json.ok) {
+  Save-Receipt @{ stage = 'email-send'; error = 'email send unconfirmed'; refund = (Refund $activation $started) }
+  exit 1
+}
 $emailCode = ''
 $deadline = (Get-Date).AddSeconds($EmailWaitSeconds)
 while (-not $emailCode -and (Get-Date) -lt $deadline) {
-  $poll = & node tools/capture/graph-code.cjs --file $GraphCfg --since $since 2>&1 | Out-String
+  $poll = & node tools/capture/graph-code.cjs --file $GraphCfg --mailbox $Email --since $since --wait ($EmailWaitSeconds * 1000) 2>&1 | Out-String
   $hit = $null
   foreach ($line in ($poll -split "`r?`n")) { if ($line.Trim().StartsWith('{')) { try { $hit = $line | ConvertFrom-Json } catch { } } }
   if ($hit -and $hit.ok -and $hit.code) { $emailCode = $hit.code }
@@ -192,7 +208,14 @@ if (-not $submitSms.json -or $submitSms.json.error) {
   exit 1
 }
 
-# ---- 5) prove it exists ----------------------------------------------------
+# ---- 5) final creation, then independent readback ----------------------------
+$receipt['stage'] = 'finalize'
+$final = Run-Signup @('-email', $Email, '-stage', 'finalize', '-json')
+if ($final.exitCode -ne 0 -or -not $final.json.created) {
+  Save-Receipt @{ stage = 'finalize'; error = 'final creation unconfirmed; do not replay' }
+  exit 1
+}
+$receipt['created'] = $true
 $receipt['stage'] = 'verify'
 $verify = Run-Signup @('-email', $Email, '-stage', 'verify', '-proxy', $proxy, '-skip-landing', '-json')
 $exists = ($verify.json -and -not $verify.json.error -and $verify.json.accountExists)

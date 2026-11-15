@@ -4,7 +4,7 @@
 // is right for a log but useless for automation: this wrapper polls the same
 // code path and prints only {ok, code} on stdout. Nothing is written.
 //
-// Usage: node tools/capture/graph-code.cjs --file <graph.json> [--since ISO] [--wait ms]
+// Usage: node tools/capture/graph-code.cjs --file <graph.json> --mailbox <address> --since <ISO> [--wait ms]
 
 "use strict";
 
@@ -29,8 +29,14 @@ function arg(name, fallback = "") {
     console.log(JSON.stringify({ ok: false, error: String(error.message || error) }));
     process.exit(1);
   }
-  const since = arg("since") ? Date.parse(arg("since")) : 0;
-  const hit = await pollCode({ file: cfg.file, since });
+  const mailbox = arg("mailbox").trim().toLowerCase();
+  const since = Date.parse(arg("since"));
+  const timeoutMs = Number(arg("wait", "150000"));
+  if (!mailbox || mailbox !== cfg.mailbox || !Number.isFinite(since) || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600000) {
+    console.log(JSON.stringify({ ok: false, error: "mailbox binding, since and wait are required and must be valid" }));
+    process.exit(2);
+  }
+  const hit = await pollCode({ file: cfg.file, mailbox, since, timeoutMs, clockSkewMs: 0 });
   console.log(JSON.stringify({ ok: Boolean(hit.ok), code: hit.code || "", error: hit.error || "" }));
   process.exit(hit.ok ? 0 : 1);
 })().catch((error) => {

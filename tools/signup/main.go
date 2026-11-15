@@ -1,328 +1,249 @@
-// Command signup creates an Apple Account over plain HTTP.
-//
-// It is the protocol-only replacement for the browser driver in
-// tools/capture/create-account.cjs: same endpoints, same bodies, no page load.
-// Stages are resumable through a state file so a human (or the SMS relay) can
-// step in with a code, then re-run.
-//
-//	signup -email a@b.c -password ... -stage all          # up to the email code
-//	signup -email a@b.c -stage email -code 123456         # submit it
-//	signup -email a@b.c -stage phone -phone 4155550134 -phonecc US -code 654321
-//
-// Nothing is written on Apple's side before -stage create; -stage preflight and
-// -stage captcha are read-only.
+// Command signup uses one persisted private session across registration stages.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-// state is the resumable job record. It holds no tokens and no session
-// material: cookies live in memory for one run, by design.
 type state struct {
-	Email     string    `json:"email"`
-	Password  string    `json:"password,omitempty"`
-	FirstName string    `json:"firstName,omitempty"`
-	LastName  string    `json:"lastName,omitempty"`
-	Birthday  string    `json:"birthday,omitempty"`
-	Country   string    `json:"country,omitempty"`
-	Language  string    `json:"language,omitempty"`
-	Phone     string    `json:"phone,omitempty"`
-	PhoneCC   string    `json:"phoneCC,omitempty"`
-	Stage     string    `json:"stage"`
-	Created   bool      `json:"created"`
-	EmailDone bool      `json:"emailVerified"`
-	PhoneDone bool      `json:"phoneVerified"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Version          int                  `json:"version"`
+	Email            string               `json:"email"`
+	Password         string               `json:"password,omitempty"`
+	FirstName        string               `json:"firstName,omitempty"`
+	LastName         string               `json:"lastName,omitempty"`
+	Birthday         string               `json:"birthday,omitempty"`
+	Country          string               `json:"country,omitempty"`
+	Language         string               `json:"language,omitempty"`
+	Phone            string               `json:"phone,omitempty"`
+	PhoneCC          string               `json:"phoneCC,omitempty"`
+	Stage            string               `json:"stage"`
+	Status           string               `json:"status"`
+	Failure          string               `json:"failure,omitempty"`
+	HTTPStatus       int                  `json:"httpStatus,omitempty"`
+	ErrorCodes       []string             `json:"errorCodes,omitempty"`
+	Created          bool                 `json:"created"`
+	EmailDone        bool                 `json:"emailVerified"`
+	PhoneDone        bool                 `json:"phoneVerified"`
+	UpdatedAt        time.Time            `json:"updatedAt"`
+	Session          *sessionState        `json:"session,omitempty"`
+	Operations       map[string]operation `json:"operations,omitempty"`
+	Body             map[string]any       `json:"body,omitempty"`
+	Captcha          *captcha             `json:"captcha,omitempty"`
+	VerificationID   json.RawMessage      `json:"verificationId,omitempty"`
+	EmailRequestedAt time.Time            `json:"emailRequestedAt,omitempty"`
+	PhoneRequestedAt time.Time            `json:"phoneRequestedAt,omitempty"`
 }
 
-func main() {
-	var (
-		email       = flag.String("email", "", "Apple ID address to create (required)")
-		password    = flag.String("password", "", "password; generated when empty")
-		first       = flag.String("first", "James", "given name")
-		last        = flag.String("last", "Carter", "family name")
-		birthday    = flag.String("birthday", "1992-07-18", "birthday, yyyy-mm-dd")
-		country     = flag.String("country", "USA", "ISO3 country of the account")
-		language    = flag.String("language", "en_US", "preferredLanguage")
-		phone       = flag.String("phone", "", "phone number, digits only (required for -stage create)")
-		phoneCC     = flag.String("phonecc", "US", "ISO2 dialing country of the phone number")
-		stage       = flag.String("stage", "preflight", "preflight|captcha|create|email|phone|verify|all")
-		code        = flag.String("code", "", "code to submit for the current email/phone stage")
-		statePath   = flag.String("state", "", "state file (default .cache/signup/<email>.json)")
-		base        = flag.String("base", "", "override API host, for the offline tests")
-		proxy       = flag.String("proxy", "", "explicit HTTP proxy; default honours HTTP(S)_PROXY")
-		timezone    = flag.String("tz", "America/New_York", "browser timezone reported in X-Apple-I-Timezone")
-		locale      = flag.String("locale", "en-US", "browser locale")
-		userAgent   = flag.String("user-agent", "", "override User-Agent")
-		captchaKey  = flag.String("captcha-key", os.Getenv("YESCAPTCHA_KEY"), "YesCaptcha key; empty means manual")
-		captchaPNG  = flag.String("captcha-dump", "", "write the captcha image here so a human can read it")
-		captchaAns  = flag.String("captcha-answer", "", "answer to use instead of asking YesCaptcha")
-		captchaFile = flag.String("captcha-answer-file", "", "read the answer from this file (blocks until it appears)")
-		captchaWait = flag.Duration("captcha-wait", 180*time.Second, "how long to wait for -captcha-answer-file")
-		chHints     = flag.Bool("ch-hints", true, "send Sec-Ch-Ua/Sec-Fetch-* like Chrome (some edges flag the mismatch)")
-		skipLanding = flag.Bool("skip-landing", false, "skip the portal landing page (no cookies)")
-		curlMode    = flag.Bool("curl", false, "send through installed curl.exe; no automatic fallback or browser emulation")
-		http2       = flag.Bool("http2", false, "enable HTTP/2 negotiation; curl must support it")
-		fdInfo      = flag.String("fd-client-info", "", "verbatim X-Apple-I-FD-Client-Info JSON; empty sends none")
-		asJSON      = flag.Bool("json", false, "print the stage receipt as one JSON line")
-		timeout     = flag.Duration("timeout", 45*time.Second, "per request timeout")
-	)
-	flag.Parse()
+func main() { os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
 
+func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
+	fs := flag.NewFlagSet("signup", flag.ContinueOnError)
+	fs.SetOutput(diagnostic)
+	email := fs.String("email", "", "account email (required)")
+	password := fs.String("password", os.Getenv("APPLESERVICES_SIGNUP_PASSWORD"), "password; preferably supplied through environment")
+	first := fs.String("first", "James", "given name")
+	last := fs.String("last", "Carter", "family name")
+	birthday := fs.String("birthday", "1992-07-18", "birthday")
+	country := fs.String("country", "USA", "account ISO3 country")
+	language := fs.String("language", "en_US", "account language")
+	phone := fs.String("phone", "", "national or international phone number")
+	phoneCC := fs.String("phonecc", "US", "phone ISO2 country")
+	stage := fs.String("stage", "preflight", "preflight|captcha|create|email|phone|finalize|verify|all")
+	code := fs.String("code", "", "current verification code")
+	statePath := fs.String("state", "", "private state path")
+	base := fs.String("base", "", "loopback server override for offline testing")
+	proxy := fs.String("proxy", "", "proxy; frozen with the session")
+	timezone := fs.String("tz", "America/New_York", "timezone")
+	locale := fs.String("locale", "en-US", "locale")
+	ua := fs.String("user-agent", "", "User-Agent")
+	key := fs.String("captcha-key", os.Getenv("YESCAPTCHA_KEY"), "captcha service key; prefer environment")
+	capImage := fs.String("captcha-dump", "", "private captcha image path")
+	answer := fs.String("captcha-answer", "", "answer for the saved challenge")
+	answerFile := fs.String("captcha-answer-file", "", "manual challenge answer file")
+	capWait := fs.Duration("captcha-wait", 180*time.Second, "captcha answer deadline")
+	ch := fs.Bool("ch-hints", true, "send consistent Windows Chrome client hints")
+	skip := fs.Bool("skip-landing", false, "skip landing page")
+	curl := fs.Bool("curl", false, "use system curl; no automatic fallback")
+	h2 := fs.Bool("http2", false, "request HTTP/2 negotiation")
+	fd := fs.String("fd-client-info", "", "FD JSON matching configured UA and locale")
+	asJSON := fs.Bool("json", false, "structured redacted receipt")
+	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
+	emailFile := fs.String("email-code-file", "", "private six-digit email code file")
+	phoneFile := fs.String("phone-code-file", "", "private six-digit SMS code file")
+	codeWait := fs.Duration("code-wait", 0, "wait for input files; default returns waiting_input")
+	capabilities := fs.Bool("capabilities", false, "print offline protocol capabilities")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *capabilities {
+		_ = json.NewEncoder(out).Encode(map[string]any{"stateVersion": signupStateVersion, "sessionResume": true, "finalize": true})
+		return 0
+	}
+	fail := func(reason string) int {
+		if *asJSON {
+			_ = json.NewEncoder(out).Encode(map[string]any{"ok": false, "reason": reason})
+		} else {
+			fmt.Fprintln(diagnostic, reason)
+		}
+		return 2
+	}
 	if strings.TrimSpace(*email) == "" {
-		fatalf("-email is required")
+		return fail("email_required")
+	}
+	allowed := map[string]bool{"preflight": true, "captcha": true, "create": true, "email": true, "phone": true, "finalize": true, "verify": true, "all": true}
+	if !allowed[*stage] || *timeout <= 0 || *codeWait < 0 {
+		return fail("invalid_stage_or_timeout")
+	}
+	if *base != "" {
+		r, err := http.NewRequest("GET", *base, nil)
+		if err != nil || (r.URL.Hostname() != "127.0.0.1" && r.URL.Hostname() != "localhost" && r.URL.Hostname() != "::1") {
+			return fail("base_override_must_be_loopback")
+		}
 	}
 	if *statePath == "" {
-		*statePath = filepath.Join(".cache", "signup", safeName(*email)+".json")
+		*statePath = filepath.Join(".cache", "signup", safeName(strings.ToLower(strings.TrimSpace(*email)))+".json")
 	}
+	unlock, err := lockState(*statePath)
+	if err != nil {
+		return fail("task_locked_requires_review")
+	}
+	defer unlock()
 	st, err := loadState(*statePath)
 	if err != nil {
-		fatalf("state: %v", err)
+		return fail("state_unreadable")
 	}
+	if st.Email != "" && (!strings.EqualFold(st.Email, strings.TrimSpace(*email)) || st.Version != signupStateVersion) {
+		return fail("state_identity_or_version_mismatch")
+	}
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 	if st.Email == "" {
+		st.Version = signupStateVersion
 		st.Email = strings.TrimSpace(*email)
-	}
-	if st.Password == "" {
 		st.Password = *password
 		if st.Password == "" {
 			st.Password = GeneratedPassword(14)
 		}
-	}
-	st.FirstName = orDefault(st.FirstName, *first)
-	st.LastName = orDefault(st.LastName, *last)
-	st.Birthday = orDefault(st.Birthday, *birthday)
-	st.Country = orDefault(st.Country, *country)
-	st.Language = orDefault(st.Language, *language)
-	if *phone != "" {
+		st.FirstName = *first
+		st.LastName = *last
+		st.Birthday = *birthday
+		st.Country = *country
+		st.Language = *language
 		st.Phone = digitsOnly(*phone)
-	}
-	if st.PhoneCC == "" {
 		st.PhoneCC = strings.ToUpper(*phoneCC)
+	} else {
+		values := map[string][2]string{"password": {st.Password, *password}, "first": {st.FirstName, *first}, "last": {st.LastName, *last}, "birthday": {st.Birthday, *birthday}, "country": {st.Country, *country}, "language": {st.Language, *language}, "phonecc": {st.PhoneCC, strings.ToUpper(*phoneCC)}}
+		for name, pair := range values {
+			if visited[name] && pair[0] != pair[1] {
+				return fail("task_identity_change_rejected")
+			}
+		}
+		if visited["phone"] && digitsOnly(*phone) != st.Phone {
+			if (st.Stage != "preflight" && st.Stage != "" && st.Stage != "captcha") || st.Body != nil || st.Operations["validate"].Status != "" {
+				return fail("task_phone_change_rejected")
+			}
+			st.Phone = digitsOnly(*phone)
+		}
 	}
-
-	ctx := context.Background()
-	session, err := newSession(SessionOptions{
-		Base:         *base,
-		UserAgent:    *userAgent,
-		Locale:       *locale,
-		Timezone:     *timezone,
-		Proxy:        *proxy,
-		FDClientInfo: *fdInfo,
-		HTTP2:        *http2,
-		SkipLanding:  *skipLanding,
-		CHHints:      *chHints,
-		UseCurl:      *curlMode,
-		Timeout:      *timeout,
-	})
+	opts := SessionOptions{Base: *base, UserAgent: *ua, Locale: *locale, Timezone: *timezone, Proxy: *proxy, FDClientInfo: *fd, HTTP2: *h2, SkipLanding: *skip, CHHints: *ch, UseCurl: *curl, Timeout: *timeout}
+	if st.Session != nil {
+		saved := st.Session.Options
+		pairs := map[string][2]any{"base": {saved.Base, opts.Base}, "proxy": {saved.Proxy, opts.Proxy}, "user-agent": {saved.UserAgent, opts.UserAgent}, "locale": {saved.Locale, opts.Locale}, "tz": {saved.Timezone, opts.Timezone}, "fd-client-info": {saved.FDClientInfo, opts.FDClientInfo}, "http2": {saved.HTTP2, opts.HTTP2}, "skip-landing": {saved.SkipLanding, opts.SkipLanding}, "ch-hints": {saved.CHHints, opts.CHHints}, "curl": {saved.UseCurl, opts.UseCurl}}
+		for name, pair := range pairs {
+			if visited[name] && pair[0] != pair[1] {
+				return fail("session_profile_change_rejected")
+			}
+		}
+		opts = saved
+	} else if opts.Proxy == "" {
+		endpoint := opts.Base
+		if endpoint == "" {
+			endpoint = defaultBase
+		}
+		r, _ := http.NewRequest("GET", endpoint, nil)
+		if p, e := http.ProxyFromEnvironment(r); e != nil {
+			return fail("proxy_configuration_invalid")
+		} else if p != nil {
+			opts.Proxy = p.String()
+		} else {
+			opts.Direct = true
+		}
+	}
+	var session *Session
+	if st.Session != nil && st.Session.Scnt != "" {
+		session, err = restoreSession(st.Session)
+	} else if st.Stage == "" {
+		session, err = newSession(opts)
+	} else {
+		return fail("saved_session_missing")
+	}
 	if err != nil {
-		fatalf("%v", err)
+		return fail("session_configuration_invalid")
 	}
 	defer session.Close()
-
+	if st.Body != nil {
+		account, ok := st.Body["account"].(map[string]any)
+		if !ok || account["name"] != st.Email {
+			return fail("saved_body_binding_invalid")
+		}
+		if _, ok := st.Body["phoneNumberVerification"].(map[string]any); !ok {
+			return fail("saved_phone_binding_invalid")
+		}
+	}
+	if (*stage == "create" || *stage == "all") && st.Phone == "" {
+		return fail("phone_required")
+	}
+	if localDialCode(st.PhoneCC) == "" {
+		return fail("unsupported_phone_country")
+	}
+	w := &workflow{state: st, session: session, path: *statePath, options: opts, emailFile: *emailFile, phoneFile: *phoneFile, wait: *codeWait}
+	w.captchaAnswer = func(ctx context.Context, c *captcha) (string, error) {
+		if err := writeCaptchaImage(*capImage, c.image); err != nil {
+			return "", err
+		}
+		return answerQuestion(ctx, c, *answer, *key, *capWait, *capImage, *answerFile)
+	}
+	err = w.run(ctx, *stage, *code)
+	if *stage == "captcha" && err == nil && st.Captcha != nil {
+		err = writeCaptchaImage(*capImage, st.Captcha.image)
+	}
+	exit := 0
+	reason := ""
+	if err != nil {
+		exit = 1
+		reason = "stage_unconfirmed"
+		if errors.Is(err, errWaiting) {
+			exit = 4
+			reason = "waiting_input"
+		} else if st.Failure != "" {
+			reason = st.Failure
+		}
+	}
 	engine := "go-net-http"
 	if session.UseCurl {
 		engine = "system-curl"
 	}
-	receipt := map[string]any{"stage": *stage, "email": st.Email, "transport": engine,
-		"http2Requested": session.HTTP2, "clientHints": session.CHHints, "skipLanding": session.SkipLanding}
-
-	switch *stage {
-	case "preflight":
-		fail := runBootstrap(ctx, session, st)
-		if fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		free, used, err := session.EmailFree(ctx, st.Email)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		receipt["free"], receipt["used"] = free, used
-		if !free {
-			fatalf("preflight: address is not usable (valid=false or used=true)")
-		}
-
-	case "captcha":
-		fail := runBootstrap(ctx, session, st)
-		if fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		c, err := session.RequestCaptcha(ctx)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		if err := writeCaptchaImage(*captchaPNG, c.image); err != nil {
-			fatalf("captcha: %v", err)
-		}
-		receipt["captchaId"], receipt["imageBytes"] = c.ID, len(c.image)
-		if *captchaPNG != "" {
-			receipt["image"] = *captchaPNG
-		}
-
-	case "create":
-		if st.Phone == "" {
-			fatalf("-phone is required for -stage create")
-		}
-		if fail := runBootstrap(ctx, session, st); fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		if err := session.CheckPassword(ctx, st.Email, st.Password, st.FirstName, st.LastName); err != nil {
-			warnf("password precheck: %v", err)
-		}
-		c, err := session.RequestCaptcha(ctx)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		if err := writeCaptchaImage(*captchaPNG, c.image); err != nil {
-			fatalf("captcha: %v", err)
-		}
-		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, *captchaWait, *captchaPNG, *captchaFile)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		body, err := session.Create(ctx, accountFrom(st), phoneFrom(st), c, answer)
-		if err != nil {
-			emit(err, *asJSON, receipt)
-			os.Exit(1)
-		}
-		st.Created, st.Stage = true, "created"
-		saveState(*statePath, st)
-		receipt["answered"] = true
-		_ = body
-
-	case "email":
-		if *code == "" {
-			if fail := runBootstrap(ctx, session, st); fail != nil {
-				emit(fail, *asJSON, receipt)
-				os.Exit(1)
-			}
-			if _, err := session.SendEmailCode(ctx, st.Email); err != nil {
-				emit(err, *asJSON, receipt)
-				os.Exit(1)
-			}
-			receipt["sent"] = true
-			st.Stage = "email-sent"
-			saveState(*statePath, st)
-			break
-		}
-		if fail := runBootstrap(ctx, session, st); fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		if _, err := session.SubmitEmailCode(ctx, st.Email, digitsOnly(*code)); err != nil {
-			emit(err, *asJSON, receipt)
-			os.Exit(1)
-		}
-		st.EmailDone, st.Stage = true, "email-verified"
-		saveState(*statePath, st)
-		receipt["verified"] = true
-
-	case "phone":
-		if st.Phone == "" {
-			fatalf("-phone is required for -stage phone")
-		}
-		if fail := runBootstrap(ctx, session, st); fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		if *code == "" {
-			if _, err := session.SendPhoneCode(ctx, phoneFrom(st)); err != nil {
-				emit(err, *asJSON, receipt)
-				os.Exit(1)
-			}
-			st.Stage = "phone-sent"
-			saveState(*statePath, st)
-			receipt["sent"] = true
-			break
-		}
-		if _, err := session.SubmitPhoneCode(ctx, phoneFrom(st), digitsOnly(*code)); err != nil {
-			emit(err, *asJSON, receipt)
-			os.Exit(1)
-		}
-		st.PhoneDone, st.Stage = true, "done"
-		saveState(*statePath, st)
-		receipt["verified"] = true
-
-	case "verify":
-		if fail := runBootstrap(ctx, session, st); fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		free, used, err := session.EmailFree(ctx, st.Email)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		receipt["free"], receipt["used"], receipt["accountExists"] = free, used, used
-		if !used {
-			fatalf("verify: address is not taken yet, the create stage did not land")
-		}
-
-	case "all":
-		if fail := runBootstrap(ctx, session, st); fail != nil {
-			emit(fail, *asJSON, receipt)
-			os.Exit(1)
-		}
-		free, used, err := session.EmailFree(ctx, st.Email)
-		if err != nil || !free {
-			fatalf("preflight: free=%v used=%v err=%v", free, used, err)
-		}
-		if st.Phone == "" {
-			fatalf("-phone is required for -stage all")
-		}
-		if err := session.CheckPassword(ctx, st.Email, st.Password, st.FirstName, st.LastName); err != nil {
-			warnf("password precheck: %v", err)
-		}
-		c, err := session.RequestCaptcha(ctx)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		if err := writeCaptchaImage(*captchaPNG, c.image); err != nil {
-			fatalf("captcha: %v", err)
-		}
-		answer, err := answerQuestion(ctx, c, *captchaAns, *captchaKey, *captchaWait, *captchaPNG, *captchaFile)
-		if err != nil {
-			fatalf("%v", err)
-		}
-		if _, err := session.Create(ctx, accountFrom(st), phoneFrom(st), c, answer); err != nil {
-			emit(err, *asJSON, receipt)
-			os.Exit(1)
-		}
-		st.Created, st.Stage = true, "created"
-		saveState(*statePath, st)
-		receipt["created"] = true
-
-	default:
-		fatalf("unknown -stage %q", *stage)
+	receipt := map[string]any{"ok": err == nil, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}
+	receipt["errorCodes"] = st.ErrorCodes
+	if err != nil {
+		receipt["error"] = reason
 	}
-
-	saveState(*statePath, st)
 	if *asJSON {
-		line, _ := json.Marshal(receipt)
-		fmt.Println(string(line))
-		return
+		_ = json.NewEncoder(out).Encode(receipt)
+	} else {
+		fmt.Fprintf(out, "stage=%s state=%s created=%v reason=%s\n", st.Stage, st.Status, st.Created, reason)
 	}
-	fmt.Printf("stage=%s email=%s state=%s\n", *stage, st.Email, *statePath)
-	if st.Created {
-		fmt.Printf("created=%v emailVerified=%v phoneVerified=%v\n", st.Created, st.EmailDone, st.PhoneDone)
-	}
-}
-
-// runBootstrap keeps the five stages from repeating the same three lines.
-func runBootstrap(ctx context.Context, s *Session, st *state) error {
-	if err := s.Bootstrap(ctx, st.Country); err != nil {
-		return err
-	}
-	return nil
+	return exit
 }
 
 func accountFrom(st *state) Account {
@@ -358,22 +279,6 @@ func loadState(path string) (*state, error) {
 		return nil, err
 	}
 	return st, nil
-}
-
-func saveState(path string, st *state) {
-	st.UpdatedAt = time.Now().UTC()
-	raw, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		warnf("state: %v", err)
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		warnf("state: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		warnf("state: %v", err)
-	}
 }
 
 // emit prints a protocol failure as the structured verdict it already is.

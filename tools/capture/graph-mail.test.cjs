@@ -247,6 +247,15 @@ test("pollCode reports a refusal instead of throwing", async () => {
   assert.match(hit.error, /token: invalid_grant/);
 });
 
+test("protocol polling can enforce the exact challenge time", async () => {
+  const file = tokenFile();
+  const hit = await graph.pollCode({
+    file, since: Date.parse("2026-11-13T01:00:30Z"), clockSkewMs: 0,
+    intervalMs: 5, timeoutMs: 60, fetchImpl: stubFetch({ pages: [[graphMail()]] }),
+  });
+  assert.equal(hit.ok, false, "a code from before this challenge must not be reused");
+});
+
 test("pollCode gives up with a reason that names the inbox size", async () => {
   const file = tokenFile();
   const fetchImpl = stubFetch({ pages: [[graphMail({ from: "noreply@github.com", subject: "launch code" })]] });

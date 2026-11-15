@@ -20,14 +20,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/big"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strings"
@@ -83,6 +83,7 @@ type Session struct {
 	HTTP2       bool
 	proxyURL    string
 	curlJar     string
+	direct      bool
 }
 
 // SessionOptions configures the transport and the browser identity it claims.
@@ -98,14 +99,18 @@ type SessionOptions struct {
 	CHHints      bool
 	UseCurl      bool
 	Timeout      time.Duration
+	Direct       bool
 }
 
 func newSession(opts SessionOptions) (*Session, error) {
-	jar, err := cookiejar.New(nil)
+	jar, err := newRecordedJar(nil)
 	if err != nil {
 		return nil, err
 	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: opts.HTTP2}
+	if opts.Direct {
+		transport.Proxy = nil
+	}
 	if strings.TrimSpace(opts.Proxy) != "" {
 		parsed, err := url.Parse(strings.TrimSpace(opts.Proxy))
 		if err != nil {
@@ -157,6 +162,7 @@ func newSession(opts SessionOptions) (*Session, error) {
 		client:       &http.Client{Transport: transport, Jar: jar, Timeout: opts.Timeout},
 		UseCurl:      opts.UseCurl, SkipLanding: opts.SkipLanding, CHHints: opts.CHHints, HTTP2: opts.HTTP2,
 		proxyURL: strings.TrimSpace(opts.Proxy),
+		direct:   opts.Direct,
 	}, nil
 }
 
@@ -290,12 +296,13 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
 	}
 	var verdict struct {
-		HasError         bool              `json:"hasError"`
-		Errors           []json.RawMessage `json:"errors"`
-		ServiceErrors    []json.RawMessage `json:"service_errors"`
-		ValidationErrors []json.RawMessage `json:"validationErrors"`
+		HasError           bool              `json:"hasError"`
+		Errors             []json.RawMessage `json:"errors"`
+		ServiceErrors      []json.RawMessage `json:"service_errors"`
+		ServiceErrorsCamel []json.RawMessage `json:"serviceErrors"`
+		ValidationErrors   []json.RawMessage `json:"validationErrors"`
 	}
-	if json.Unmarshal(raw, &verdict) == nil && (verdict.HasError || len(verdict.Errors)+len(verdict.ServiceErrors)+len(verdict.ValidationErrors) > 0) {
+	if json.Unmarshal(raw, &verdict) == nil && (verdict.HasError || len(verdict.Errors)+len(verdict.ServiceErrors)+len(verdict.ServiceErrorsCamel)+len(verdict.ValidationErrors) > 0) {
 		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
 	}
 	return raw, nil
@@ -559,15 +566,24 @@ func GeneratedPassword(length int) string {
 		digits  = "23456789"
 		special = "!@#$%^&*-_=+?"
 	)
-	rnd := rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(rand.Int())))
+	index := func(n int) int {
+		v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+		if err != nil {
+			panic("secure randomness unavailable")
+		}
+		return int(v.Int64())
+	}
 	out := make([]byte, 0, length)
-	out = append(out, upper[rnd.Intn(len(upper))], lower[rnd.Intn(len(lower))],
-		digits[rnd.Intn(len(digits))], special[rnd.Intn(len(special))])
+	out = append(out, upper[index(len(upper))], lower[index(len(lower))],
+		digits[index(len(digits))], special[index(len(special))])
 	all := upper + lower + digits + special
 	for len(out) < length {
-		out = append(out, all[rnd.Intn(len(all))])
+		out = append(out, all[index(len(all))])
 	}
-	rnd.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	for i := len(out) - 1; i > 0; i-- {
+		j := index(i + 1)
+		out[i], out[j] = out[j], out[i]
+	}
 	return string(out)
 }
 
@@ -601,7 +617,11 @@ func localDialCode(iso2 string) string {
 		return "81"
 	case "CN":
 		return "86"
+	case "ID":
+		return "62"
+	case "VN":
+		return "84"
 	default:
-		return "1"
+		return ""
 	}
 }

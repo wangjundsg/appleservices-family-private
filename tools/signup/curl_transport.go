@@ -67,6 +67,8 @@ func (s *Session) curlRoundTrip(ctx context.Context, method, url string, header 
 	}
 	if s.proxyURL != "" {
 		args = append(args, "--proxy", s.proxyURL)
+	} else if s.direct {
+		args = append(args, "--proxy", "", "--noproxy", "*")
 	}
 	for key, values := range header {
 		for _, value := range values {
