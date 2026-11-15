@@ -30,6 +30,9 @@ COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "D
              "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM"}
 
 
+import protocol_adapter as adapter_registry
+
+
 class PipelineError(Exception):
     def __init__(self, reason, state="unknown"):
         self.reason, self.state = reason, state
@@ -140,6 +143,9 @@ def validate(cfg):
         raise PipelineError("unsupported_captcha_solver", "usage")
     if cfg.get("captcha_solver") == "yes" and not cfg.get("yescaptcha_key"):
         raise PipelineError("captcha_key_required", "usage")
+    method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
+    if method not in {"browser", "protocol"}:
+        raise PipelineError("invalid_registration_method", "usage")
 
 
 def request(url, body=None, headers=None, timeout=25):
@@ -173,6 +179,7 @@ def reserve_code(sms, state_root=None):
 class Job:
     def __init__(self, folder, cfg, status=None, allow_purchase=False):
         self.folder, self.cfg = Path(folder), cfg
+        self.method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
         self.allow_purchase = allow_purchase
         self.status = status or {"job_id": cfg["job_id"], "stage": "create", "status": "queued",
                                  "attempts": {}, "account_created": False, "trust_verified": False}
@@ -255,6 +262,26 @@ class Job:
             return
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
+
+    def protocol_create(self):
+        """Delegate the create stage to the configured adapter.
+
+        Returns True when the job is left waiting for input, in which case the run
+        loop stops and every resource stays where it is.
+        """
+        adapter = adapter_registry.resolve(self.cfg.get("protocol"))
+        outcome = adapter.create(self) or {}
+        state = outcome.get("state")
+        if state == "waiting_input":
+            self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
+                        reason=outcome.get("reason") or "waiting_input", active=False)
+            return True
+        if state == "ready":
+            self.update(stage="login", status="queued", account_created=True,
+                        reason=outcome.get("reason") or "protocol_registration_complete")
+            return False
+        raise PipelineError(outcome.get("reason") or "protocol_adapter_failed",
+                            outcome.get("status") or "needs_review")
 
     def claim_number(self):
         sms = self.cfg["sms"]
@@ -479,6 +506,12 @@ class Job:
             if self.status["status"] == "ready": return
             if self.status["stage"] == "create" and self.cfg["sms"].get("activation") and not self.status.get("number_owned"):
                 self.claim_number()
+            # The browser path buys its number inside create(); a protocol job never
+            # reaches that code, so it buys here — still before the adapter runs and
+            # long before anything is submitted.
+            if (self.method == "protocol" and self.status["stage"] == "create"
+                    and self.cfg["sms"].get("auto_purchase") and not self.status.get("number_owned")):
+                self.claim_number()
             stage = self.status["stage"]
             if resume and stage == "create" and self.status["attempts"].get("create"):
                 self.cleanup_browser()
@@ -492,7 +525,12 @@ class Job:
             while self.status["status"] != "ready":
                 stage = self.status["stage"]
                 self.begin(stage)
-                if stage == "create": self.create_with_replacement()
+                if stage == "create":
+                    if self.method == "protocol":
+                        if self.protocol_create():
+                            return
+                    else:
+                        self.create_with_replacement()
                 elif self.cfg.get("handoff") == "dashboard": self.dashboard_handoff()
                 elif stage in {"login", "terms"}: self.authenticate()
                 elif stage == "gsa": self.gsa()
@@ -516,7 +554,10 @@ class Job:
             self.update(status="unknown", reason="interrupted_or_local_error",
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
         finally:
-            if self.cfg["sms"].get("auto_purchase"):
+            # A waiting job keeps its number: releasing it here would invalidate the
+            # code the operator is about to receive. Unknown outcomes keep it too.
+            withholding = self.status.get("status") in {"waiting_input", "unknown", "needs_review"}
+            if self.cfg["sms"].get("auto_purchase") and not withholding:
                 try: self.settle_number()
                 except Exception: self.update(refund_pending=True)
             self.update(active=False)
@@ -713,6 +754,14 @@ def execute(action, job_id=None, input_file=None, allow_purchase=False):
         else:
             if action != "run": raise PipelineError("job_not_found", "usage")
             validate(cfg)
+            method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
+            if method == "protocol":
+                # Fail before the account reservation, the number purchase and any
+                # browser start: without an adapter there is nothing to run.
+                try:
+                    adapter_registry.resolve(cfg.get("protocol"))
+                except adapter_registry.AdapterMissing as missing:
+                    raise PipelineError(missing.reason, "needs_review")
             for binary in ("login.exe", "appleweb.exe", "trusted-device.exe"):
                 if not (ROOT / "bin" / binary).exists(): raise PipelineError("build_binaries_first", "usage")
             account_key = hashlib.sha256(cfg["email"].lower().encode()).hexdigest()
