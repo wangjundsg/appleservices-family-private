@@ -2,7 +2,30 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## bdaeb51 修复复核（后续状态，以本节为准）
+## 2dca9af 复核与双路径方案决定（最新）
+
+已核对远端 `2dca9af3ee956858ff3f04f07d014ea2b16ac0d1`。其前置提交 `63d4723` 修复了上一节列出的未决 intent 和原始失败原因覆盖问题；本机原补充 overlay 两例全部通过。`TestInsecureRequiresOfflineTarget` 也通过。
+
+**I3 尚未完整关闭：P1，insecure 模式可随 HTTPS 重定向离开 loopback。** `tools/signup/main.go:189` 只校验初始 base；`internal/engine/engine.go:141` 的 RoundTrip 只限制 scheme，CheckRedirect 也只拒绝非 HTTPS。若本地 TLS fixture 返回 Location 指向外部 HTTPS 主机，后续连接仍使用 `InsecureSkipVerify=true`。本轮离线用例保留外部目标 URL/Host，仅把底层拨号映射到本地 TLS fixture，实测外部 Host 的请求到达一次。整个测试没有 DNS 查询外部目标或连接外网。
+
+修复验收：insecure 传输在每一次请求/建连前限制为获准的离线目标，重定向也必须遵守；校验应使用恢复任务之后的实际目标配置。面板不提供该测试开关。补充真正的 TLS fixture、新画像引擎、外部 HTTPS 重定向、初始请求以及恢复会话用例。当前 `TestInsecureRequiresOfflineTarget` 的允许分支使用 HTTP fixture 且未开启新画像引擎，只证明参数准入通过，不能证明关闭证书校验后的传输边界。
+
+```powershell
+go test -overlay C:/Users/HUAWEI/AppData/Local/Temp/apple-review-2dca-210e8f27506b4bbcacd58153dfb985bb/overlay.json ./internal/engine -run '^TestReviewInsecureCannotRedirectOutsideLoopback$' -count=1 -v
+```
+
+该新增用例在本基线失败。代码在同目录 `engine_test.go`，仅用于本机交接。不要将“四道闸全部在建会话前”作为交付结论：RoundTrip/CheckRedirect 属于运行时请求检查，重定向检查必然发生在收到前一响应之后。
+
+I1 方案决定与调整：
+
+- **创建时可手动选择 browser/protocol；创建后方式冻结，续跑不可切换。** 老任务缺字段按 browser。换方式应新建任务，先核实旧任务的未知副作用及资源归属，不能自动换路重试。
+- 分流只替换对应任务的注册执行器，不绕过已有任务管理、邮箱占用、号码管理、退款、成本和取消逻辑。可在统一任务管理下使用两个适配器，不宜仅把 pipeline.py 命令替换为 signup.exe 后直接复用不兼容的回执解析。
+- 状态按 job ID 和注册方式分目录，不以邮箱作为唯一任务路径；目录分开防串用，但同一 Windows 用户权限下并非“互不可见”。凭据权限需要单独核验 ACL。
+- 退出码 4、blockedReason、原始 failure、冷却截止时间和未决操作应正确映射到面板；不能只看退出码。取消涉及子进程、号码和邮箱状态；建号结果未知时不得盲目释放后重建。
+- 协议 ready 仅表示建号阶段完成。交给现有登录、短信验证及激活流程必须有账号绑定、幂等交接和接管后失败的续跑边界，激活失败不能回到注册重建。
+- 测试包含双路径 create/wait/resume/cancel、重启、未知结果、交接重复调用与失败恢复；保留浏览器回归。I3 修复后可继续开发 I1，正式启用仍受 I2/I4 与真实验收条件约束。
+
+## bdaeb51 修复复核（历史记录）
 
 复核提交：`bdaeb51a678630b06e0ab78543279ce9c692ad08`，已核对远端一致。原六个 overlay 用例实跑全部通过，构建、定向 vet、Go 五包、Python 44 项测试也通过。原 R1/R3/R4/R5/R6 的已复现场景已修；R2 的暂停状态场景已修，但“未决 intent 一律零请求”尚未满足。不能以原六例全绿替代完整验收。
 
