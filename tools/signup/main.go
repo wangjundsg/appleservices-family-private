@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/internal/fingerprint"
+	"github.com/Laky-64/appleservices/internal/pacing"
 )
 
 type state struct {
@@ -47,6 +48,8 @@ type state struct {
 	PhoneRequestedAt time.Time            `json:"phoneRequestedAt,omitempty"`
 	Profile          *fingerprint.Profile `json:"profile,omitempty"`
 	ProfileMode      string               `json:"profileMode,omitempty"`
+	Human            *humanConfig         `json:"human,omitempty"`
+	Warmup           map[string]any       `json:"warmup,omitempty"`
 }
 
 func main() { os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
@@ -86,6 +89,10 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	egressCountry := fs.String("egress-country", "", "verified egress country (ISO2); required in new mode")
 	egressSource := fs.String("egress-source", "", "explicit|verified-egress; required in new mode")
 	engineInsecure := fs.Bool("engine-insecure", false, "skip certificate verification (offline tests only)")
+	humanMode := fs.Bool("human", false, "warm up like a browser and pace the stages")
+	pacingMin := fs.Duration("pacing-min", 1500*time.Millisecond, "minimum wait before a request in -human mode")
+	pacingMax := fs.Duration("pacing-max", 9000*time.Millisecond, "maximum wait before a request in -human mode")
+	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
 	asJSON := fs.Bool("json", false, "structured redacted receipt")
 	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
 	emailFile := fs.String("email-code-file", "", "private six-digit email code file")
@@ -248,7 +255,27 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if localDialCode(st.PhoneCC) == "" {
 		return fail("unsupported_phone_country")
 	}
+	if *humanMode || st.Human != nil {
+		human, err := freezeHuman(st, *humanMode, *pacingMin, *pacingMax, *warmupAssets, session)
+		if err != nil {
+			return fail("human_configuration_invalid")
+		}
+		pacer := pacing.New(human.Pacing, nil)
+		if st.Stage == "" || st.Warmup == nil {
+			session.SkipLanding = true
+			steps := session.runWarmup(ctx, pacer, human.Assets)
+			st.Warmup = describeWarmup(steps, session.warmupCookieCount())
+			if err := writeState(*statePath, st); err != nil {
+				return fail("state_write_failed")
+			}
+		}
+		// The pacer is attached below, once the workflow exists.
+		_ = pacer
+	}
 	w := &workflow{state: st, session: session, path: *statePath, options: opts, emailFile: *emailFile, phoneFile: *phoneFile, wait: *codeWait}
+	if st.Human != nil {
+		w.pacer = pacing.New(st.Human.Pacing, nil)
+	}
 	w.captchaAnswer = func(ctx context.Context, c *captcha) (string, error) {
 		st.CaptchaSource = captchaSource(*answer, *key, *answerFile)
 		if err := writeCaptchaImage(*capImage, c.image); err != nil {
@@ -283,6 +310,12 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	receipt["errorCodes"] = st.ErrorCodes
 	receipt["captchaSource"] = st.CaptchaSource
 	receipt["profile"] = profileReceipt(st.Profile, engineInfo)
+	if st.Warmup != nil {
+		receipt["warmup"] = st.Warmup
+	}
+	if st.Human != nil {
+		receipt["pacing"] = map[string]any{"enabled": st.Human.Pacing.Enabled, "minMs": st.Human.Pacing.Min.Milliseconds(), "maxMs": st.Human.Pacing.Max.Milliseconds(), "applied": w.PacerApplied()}
+	}
 	if err != nil {
 		receipt["error"] = reason
 	}

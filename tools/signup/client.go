@@ -71,13 +71,14 @@ type Session struct {
 	widgetKey string
 	client    *http.Client
 
-	scnt         string
-	sessionID    string
-	hcBits       int
-	hcChallenge  string
-	fdClientInfo string
-	profileHints *fingerprint.ClientHints
-	lastRequest  string
+	scnt          string
+	sessionID     string
+	hcBits        int
+	hcChallenge   string
+	fdClientInfo  string
+	profileHints  *fingerprint.ClientHints
+	lastWarmupURL string
+	lastRequest   string
 
 	// Transport switches describe the requested engine, not server acceptance.
 	UseCurl     bool
@@ -359,6 +360,11 @@ func (s *Session) getAbsolute(ctx context.Context, stage, url string) error {
 // page config, whose response headers carry scnt, the session id and the
 // hashcash challenge. Nothing here writes anything on Apple's side.
 func (s *Session) Bootstrap(ctx context.Context, countryISO3 string) error {
+	// A warm-up (or a restored session) may already hold server state; the
+	// browser path must not be walked twice within one task.
+	if s.scnt != "" && s.sessionID != "" {
+		return nil
+	}
 	if countryISO3 == "" {
 		countryISO3 = "USA"
 	}

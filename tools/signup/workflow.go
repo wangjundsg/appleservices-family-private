@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/pacing"
 )
 
 const signupStateVersion = 1
@@ -31,6 +33,15 @@ type workflow struct {
 	captchaAnswer        func(context.Context, *captcha) (string, error)
 	emailFile, phoneFile string
 	wait                 time.Duration
+	pacer                *pacing.Pacer
+}
+
+// PacerApplied reports the waits this run actually performed.
+func (w *workflow) PacerApplied() []string {
+	if w.pacer == nil {
+		return nil
+	}
+	return w.pacer.Applied()
 }
 
 func (w *workflow) save() error {
@@ -112,6 +123,13 @@ func (w *workflow) once(ctx context.Context, name, next string, body any, apply 
 	return nil
 }
 func (w *workflow) request(ctx context.Context, action, method, path, next string, body any, hc bool, decode func([]byte) error) error {
+	// The wait happens before the request is built, never after an effect, so a
+	// crash cannot leave Apple with a half-applied action plus silence.
+	if w.pacer != nil {
+		if _, err := w.pacer.Before(ctx, w.state.Stage, action); err != nil {
+			return err
+		}
+	}
 	return w.once(ctx, action, next, body, func() error {
 		raw, err := w.session.do(ctx, action, method, path, body, hc)
 		if err != nil {
