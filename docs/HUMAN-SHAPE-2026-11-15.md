@@ -64,7 +64,7 @@
 
 ## 5 明确没做的三件事
 
-1. **不复刻 jslog 遥测**。没有真实会话语料，编造事件就是伪造证据；需要时应当先抓一次真实会话的 jslog 结构再决定。
+1. **不复刻 jslog 遥测——已改为「回放真捕获」**（见 §5.1）。没有语料时不发；有语料时逐字节回放，不新增事件。
 2. **不伪造 `fdcBrowserData` / FD**。非 Chrome 画像带 Chrome FD 仍会被直接拒绝。
 3. **不提供 HTTP/2**。引擎仍只协商 `http/1.1`，回执里如实写 `h2Disabled: true`。
 
@@ -109,3 +109,47 @@ go test ./internal/pacing ./internal/fingerprint ./internal/engine ./tools/signu
 ## 8 与风控的关系（口径）
 
 本轮把「画像 + 引擎 + 预热 + 节奏」四件事凑齐了，但**没有任何证据表明它能让 Apple 改变判定**。`-34607001` 仍未解释；下一步只有在真实建号里跑一次「四件套全开」才知道有没有用，且失败也不能反推"协议一定不行"或"一定行"。
+
+---
+
+## 5.1 jslog 遥测回放（2026-11-15 补）
+
+### 抓的是什么
+
+`tools/capture/jslog-harvest.cjs` 打开一次创建页（**只加载，不填表、不提交**），把 widget 发往
+`POST /jslog` 与 `POST /v2/jslogs` 的完整信封抓下来：方法、路径、query、content-type、关键头、请求体。
+
+一次真实抓包（2026-11-15 05:52Z）得到 4 个信封 / 2477 字节，两类结构：
+
+```json
+POST /jslog        {"message":"account","title":"ROUTE CHANGED","type":"INFO",
+                    "messageMap":{"ACTION":"FE_INFO"},"details":"{}"}
+POST /v2/jslogs    [{"eventId":"<uuid>","timestamp":1794721932856,"eventType":"view",
+                     "componentName":"account","action":"view","metadata":{"path":"account"}}]
+```
+
+抓包落在 `.cache/jslog/capture-*.json`（0600，不入库）。
+
+### 回放规则（`-telemetry <capture>`）
+
+- **不新增事件**：只发抓到的信封；数组类（`/v2/jslogs`）保留每个事件的字段与顺序。
+- **重新定时间**：`timestamp` 平移到本次会话，按 250ms 步进；`eventId` 重新生成（新会话本来就会发新 id）。
+- **单对象类**（`/jslog`）原样回放，它本身不带时间戳。
+- **每任务只发一次**：`state.telemetrySent` 记录，续跑不重发；回执只写来源、信封数、事件数、字节数，不写 body。
+- **失败不阻断**：遥测是附加信号，500 只记录在 `telemetry.failures`，不影响注册状态机。
+- 抓包里没有 body 时**直接报错**（`telemetry_capture_invalid`），不会静默跳过。
+
+### 证据
+
+| 项 | 测试 |
+|---|---|
+| 无 body 的抓包被拒 | `TestTelemetryRefusesCaptureWithoutBodies` |
+| 未知 schema 被拒 | `TestTelemetryRejectsUnknownSchema` |
+| 字段不变、id 重生成、时间重定 | `TestTelemetryRebaseKeepsShapeAndRestamps` |
+| 打到抓到的路径、content-type 一致 | `TestTelemetryReplayHitsTheCapturedPaths` |
+| 端点失败不阻断 | `TestTelemetryFailureDoesNotAbort` |
+| 回执不含 body | `TestTelemetrySummaryHasNoBodies` |
+
+### 它仍然不解决的事
+
+遥测只是「不像纯机器人」的一个补丁。Apple 的判定是否看这个，未知；`-34607001` 仍未解释。

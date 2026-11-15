@@ -49,6 +49,8 @@ type state struct {
 	Profile          *fingerprint.Profile `json:"profile,omitempty"`
 	ProfileMode      string               `json:"profileMode,omitempty"`
 	Human            *humanConfig         `json:"human,omitempty"`
+	Telemetry        map[string]any       `json:"telemetry,omitempty"`
+	TelemetrySent    bool                 `json:"telemetrySent,omitempty"`
 	Warmup           map[string]any       `json:"warmup,omitempty"`
 }
 
@@ -93,6 +95,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	pacingMin := fs.Duration("pacing-min", 1500*time.Millisecond, "minimum wait before a request in -human mode")
 	pacingMax := fs.Duration("pacing-max", 9000*time.Millisecond, "maximum wait before a request in -human mode")
 	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
+	telemetryPath := fs.String("telemetry", "", "replay captured jslog telemetry from this capture file")
 	asJSON := fs.Bool("json", false, "structured redacted receipt")
 	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
 	emailFile := fs.String("email-code-file", "", "private six-digit email code file")
@@ -276,6 +279,26 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if st.Human != nil {
 		w.pacer = pacing.New(st.Human.Pacing, nil)
 	}
+	// Telemetry replay: real captured batches, re-stamped, sent once per task.
+	if strings.TrimSpace(*telemetryPath) != "" && !st.TelemetrySent {
+		capture, err := loadTelemetryCapture(*telemetryPath)
+		if err != nil {
+			return fail("telemetry_capture_invalid")
+		}
+		plan, err := planRebase(capture, time.Now())
+		if err != nil {
+			return fail("telemetry_plan_invalid")
+		}
+		var telemetryPacer *pacing.Pacer
+		if st.Human != nil {
+			telemetryPacer = pacing.New(st.Human.Pacing, nil)
+		}
+		st.Telemetry = telemetrySummary(capture, session.sendTelemetry(ctx, plan, telemetryPacer))
+		st.TelemetrySent = true
+		if err := writeState(*statePath, st); err != nil {
+			return fail("state_write_failed")
+		}
+	}
 	w.captchaAnswer = func(ctx context.Context, c *captcha) (string, error) {
 		st.CaptchaSource = captchaSource(*answer, *key, *answerFile)
 		if err := writeCaptchaImage(*capImage, c.image); err != nil {
@@ -312,6 +335,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	receipt["profile"] = profileReceipt(st.Profile, engineInfo)
 	if st.Warmup != nil {
 		receipt["warmup"] = st.Warmup
+	}
+	if st.Telemetry != nil {
+		receipt["telemetry"] = st.Telemetry
 	}
 	if st.Human != nil {
 		receipt["pacing"] = map[string]any{"enabled": st.Human.Pacing.Enabled, "minMs": st.Human.Pacing.Min.Milliseconds(), "maxMs": st.Human.Pacing.Max.Milliseconds(), "applied": w.PacerApplied()}
