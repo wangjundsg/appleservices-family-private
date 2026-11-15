@@ -1,5 +1,33 @@
 # T01–T16 验收证据表（W1/W2 部分，W3–W5 未实现）
 
+## 2026-11-16 中途复核：76454cb（当前）
+
+审查基线 `76454cb1be14873f3bb74440b31bf27b1467c264`。独立快照 Python 105 项通过；上轮 review_policy_batch.py 六组全部通过，带时区冷却、未知 operation、策略层双退款条件及阶段不匹配的拒绝已改善。但 **W1 仍为部分，不能标完成**：已有 review_gate_edges.py 两项均因原始原因被覆盖而失败；本轮应用层五项补充均失败。尚未实现的 W2–W5 继续原计划，不按新缺陷重新开范围。
+
+| 原方案内尚未闭合的边界 | 本轮实测 / 根因 | 收口要求 |
+| --- | --- | --- |
+| **P1 / 退款许可仍可被 probe 绕过**（R02/R03、T08） | settle_number 仍写着 `if verdict.action not in {"refund"} and not needs_probe`。构造已过期、status=failed、注册已尝试、code_received=True/sms_state=otp_received 的已有订单；策略本来 hold，但 probe 返回未确认后，真实 settle_number 仍调用一次假的 setStatus=8。未触达真实供应商。 | 彻底移除 needs_probe 对执行许可的豁免。只读 probe 的结果只能更新证据，再重新计算同一 settlement_decision；没有 refund 决策绝不进入发送取消请求的代码。probe 失败不能产生 not_applied，也不能抹掉 OTP_RECEIVED。force 同样不能越过这个出口。 |
+| **P1 / 挑战并未严格绑定到任务，重发也未更新**（I02、T05） | policy_view 没有 job_id，导致 `_challenge_live` 的“双方都有 job_id 才比对”跳过；真实 run 接受不同任务的 challenge 并 resume=1。只有 id、没有 job/stage/kind 的 challenge 也被纯表接受。protocol_step 只比较 stage/status，适配器返回同阶段的新 verification_id 时仍保留旧 challenge.id/source_id。 | 当前版本必须要求完整绑定字段并逐项相等，缺字段受控核实；旧记录转换不能让这种缺失默认放行。同阶段重发依据已确认的发送操作/verification_id 产生新挑战，且把输入与它绑定；普通等待轮询保持原挑战。父层必须携带自己的冻结 job_id。 |
+| **P2 / Decision 仍被压缩，执行停止与保留停因没有真正落地**（G01/G02、T01/T03/T09） | protocol_action 仍把 stop/hold/busy/block/reconcile 全映射为 review；持久 stop_requested 已阻止 create/resume，却未调用 adapter.cancel（实测 0 次）。run 新增冷却特判后能保留状态/截止，但原 code_rate_limited 改成 server_requires_cooldown；phone_outcome_pending 改成 unresolved_operation。Decision.preserved 仍未被应用。 | 删除这层有损映射，保留完整 Decision，集中 apply。stop 走停止协调，hold 不改原失败事实，reconcile 只做允许的核实，busy 不变成业务失败；可新增 admission_reason 展示“为何挡住本次命令”，不要覆盖 failure/reason 原因。 |
+
+这三项是上一轮“完整应用决策、挑战绑定、不得豁免退款”的未完成部分，不是新增需求。下一批应提交统一收口实现，而不是再添加 cooldown 特判或仅修改单点 guard：
+
+```text
+load_and_validate -> immutable_facts -> Decision
+  read_only / busy / hold / block -> 无外部写，按 Decision 保留事实
+  stop                          -> 停止协调 + 核实（不直接退款）
+  reconcile                     -> 只读核实，结果不明则停
+  create / resume / handoff      -> 持久 intent 后执行指定动作
+
+refund: collect_bound_evidence -> settlement_decision -> 仅 refund 才发送取消
+```
+
+`upgrade_status` 当前也在 policy_view 中调用，且不按 schemaVersion 区分；不能把“函数改名为 upgrade”视为统一 loader 已完成。其版本/迁移约束继续归既定 W1/W5，整体验收前一并收口。
+
+证据：review_gate_edges.py 为 2 失败（均保留原因断言），review_policy_batch.py 为 6 通过，新增 review_decision_application.py 为 5 失败。补充程序随 docs/review-fixtures/registration-2026-11-15 入库，设置 APPLESERVICES_REVIEW_ROOT 后运行；夹具只替换供应商/外部执行器边界，保留真实 Job.run/settle_number。
+
+本机隔离快照：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-7645-7a495dbd8473413e9252775a9e9d3235/source`。本轮只更新文档与离线审查夹具，没有购号、退款、注册、订阅、部署。未重跑未变更的 Go 包；下面的 Go/vet 记录仍为提交方自验。继续 W1/W2 收口 → W3，不要求逐条等待复核许可；发布结论仍由完整矩阵决定。
+
 ## 2026-11-16 中途复核：ad19776
 
 本节更新下方原提交自验结论。整体方案及 W1–W5 顺序不变；以下问题纳入正在实施的 W1/W2 同一批修复，不要求每条修完等待批准，也不把未承诺完成的 W3–W5 重新列为新缺陷。

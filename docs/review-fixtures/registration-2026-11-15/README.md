@@ -53,3 +53,11 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 ```
 
 这些是 W1/W2 同一批验收的补充，不替代总方案 T01–T16，也不要求每条修完单独申请确认。升级最终状态 schema 时同步升级夹具输入，不放宽“错误状态不得执行、退款需完整证据”的断言。
+
+## 76454cb 应用层补充（2026-11-16）
+
+在此提交上，review_policy_batch.py 六组已通过；review_gate_edges.py 两项仍因原始停因被覆盖失败。新增 `review_decision_application.py` 五项验证：probe 不得越过已收码退款拒绝、其他任务挑战拒绝、缺绑定字段拒绝、同阶段新 verification_id 更换挑战、持久停止真正触发停止协调。五项在 76454cb 均失败；退款只记录 mock 请求，不访问供应商。
+
+```powershell
+python docs/review-fixtures/registration-2026-11-15/review_decision_application.py -v
+```
