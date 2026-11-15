@@ -105,3 +105,31 @@ class SupplyTests(unittest.TestCase):
         self.assertEqual(self.call.call_count,1)
 
 if __name__=="__main__":unittest.main()
+
+
+class AcquisitionIdempotencyTest(unittest.TestCase):
+    """One acquisition intent resolves to one order, even after a crash."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.call = Mock(return_value=receipt())
+        self.supply = Supply(Path(self.temp.name), "owner@example.test", p.atomic, p.lock, self.call)
+        env = patch.dict(os.environ, {"SMS_API_KEY": "fixture", "SMS_API_KEY_HERO": "fixture-hero"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.policy = dict(POLICY)
+
+    def test_same_acquisition_does_not_buy_twice(self):
+        first = self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        second = self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        self.assertEqual(self.call.call_count, 1, "a repeated acquisition intent bought a second number")
+        self.assertEqual(first["activation"], second["activation"])
+        self.assertTrue(second.get("recovered"))
+
+    def test_the_account_number_limit_still_applies(self):
+        self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-2"}, allow=True)
+        with self.assertRaisesRegex(SupplyError, "account_number_limit"):
+            self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-3"}, allow=True)
+        self.assertEqual(self.call.call_count, 2, "the limit must stop the third order")

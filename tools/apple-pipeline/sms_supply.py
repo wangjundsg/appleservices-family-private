@@ -45,9 +45,22 @@ class Supply:
         maximum, budget = price(policy.get("max_price")), price(policy.get("max_total"))
         if policy.get("currency") != "USD" or maximum > budget: raise SupplyError("purchase_budget_invalid")
         country_id, dial = COUNTRIES[country]
+        acquisition = policy.get("acquisition_id")
         with self.lock(self.path.with_suffix(".lock")):
             ledger = self.read()
             rows = ledger["spend"]
+            # The same acquisition intent must resolve to the same order. A crash
+            # between "PURCHASED" and the job binding would otherwise buy again.
+            if acquisition:
+                for row in rows:
+                    if row.get("acquisition_id") == acquisition and row["result"] == "PURCHASED":
+                        cfg = self.provider(row["provider"])
+                        return {**cfg, "activation": row["activation_id"], "phone": row["phone"][len(dial):],
+                                "phonecc": country, "expires_at": dt.datetime.fromtimestamp(
+                                    row["expires_at"], dt.timezone.utc).isoformat(),
+                                "supply_operation": row["operation_id"], "provider": row["provider"],
+                                "can_get_another_sms": row.get("can_get_another_sms", False),
+                                "recovered": True}
             # Retain all purchase intents across jobs. Unknown purchase never changes provider.
             if any(row["result"] in {"PURCHASE_PENDING","PURCHASE_UNKNOWN","RECEIPT_INVALID"} for row in rows):
                 raise SupplyError("purchase_requires_readback")
@@ -60,6 +73,7 @@ class Supply:
                 cfg = self.provider(provider)
                 now = time.time()
                 row = {"operation_id":f"sms:{self.account}:{job_id}:{len(rows)+1}", "job_id":job_id,
+                       "acquisition_id": acquisition,
                        "provider":provider,"country":country,"currency":"USD","price":None,
                        "reserved":str(maximum),"result":"PURCHASE_PENDING","requested_at":now,
                        "activation_id":None,"refund_attempts":0}

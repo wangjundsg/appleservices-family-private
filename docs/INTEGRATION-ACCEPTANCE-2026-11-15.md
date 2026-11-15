@@ -69,7 +69,7 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 | 包 | 内容 | 状态 |
 | --- | --- | --- |
 | W1 状态与许可 | 新增 `job_policy.py`：`decide()` 纯函数许可表 + `settlement_decision()`；`Job.protocol_action()` 改为调用它（CLI/维护/退款共用同一答案）；冷却先于执行、未决 operation 先于一切、`unknown/needs_review` 不执行、号码到期不重购、已注册才交接 | **已实现**（G01/G03 关闭；G02/G04 部分） |
-| W2 资源与输入 | `open_challenge()` + `active_challenge()`：挑战拥有独立 `challenge_id`（同阶段重发也是新挑战）；`inputs` 状态机 `reserved → dispatch_intent → accepted/rejected`；结算改由 `settlement_decision()` 决定 | **部分实现**（I02 关闭；I01 状态机已建但未接入全部调用点；R01 未做） |
+| W2 资源与输入 | `open_challenge()` + `active_challenge()`：挑战拥有独立 `challenge_id`；`inputs` 状态机已建；结算由 `settlement_decision()` 决定；**R01 已关闭**：`acquisition_id` 先落盘，同一意图在账本里命中已购订单直接复用（`test_sms_supply.AcquisitionIdempotencyTest`），号码上限仍生效 | **部分实现**（I02/R01 关闭；I01 状态机未接入全部调用点） |
 | W3 协议适配器 | 仍为测试注入的假适配器；薄上下文、子进程树、PID 复用校验 **未做** | **未实现** |
 | W4 面板衔接 | 面板 input/resume/cancel API 未改（本轮未动 `internal/dashboard` 的注册路由） | **未实现** |
 | W5 迁移与发布 | schema 迁移器、ACL、包清单、故障演练 **未做** | **未实现** |
@@ -91,6 +91,26 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 | probe 绕过退款许可 | 过期探测结束后**重新计算** `settlement_decision`，只有 `refund` 才继续 setStatus=8；探测只负责取证 | `test_refund_cooldown_is_persisted_without_secret` 等退款用例 |
 | 挑战绑定不完整（他人任务/缺字段/新 verification_id） | `_challenge_live` 现在**要求 job_id、kind、stage 全部存在且匹配**；`policy_view` 输出 job_id；同阶段出现新 `verification_id` 时重开挑战 | `test_foreign_challenge_is_not_accepted`、`test_challenge_without_binding_is_not_accepted` |
 | Decision 未完整执行 | 持久化 `stop_requested` 现在**调用适配器 cancel**；冷却与未决操作保留原 `reason`，本次拒绝写入 `hold_reason`；冷却截止时间不再被改写 | `test_persisted_stop_calls_the_adapter_cancel`、`test_cooldown_keeps_reason_and_deadline`、`test_pending_operation_keeps_reason` |
+
+## 1.3 复审夹具实跑（HEAD = `be2d8de` + 本轮 R01）
+
+三套夹具在**当前工作树**上全部通过（此前在 `76454cb` 失败的五项、`b311e01` 指出的三项均在其中）：
+
+```
+review_policy_batch.py           Ran 6 tests ... OK   （冷却时区、未知 operation、退款双证据、当前挑战绑定、持久停止、非法截止）
+review_gate_edges.py             Ran 2 tests ... OK   （未来冷却停止真实 resume、结构化未决操作保留原原因）
+review_decision_application.py   Ran 5 tests ... OK   （probe 不越过已收码拒绝、他人挑战拒绝、缺绑定拒绝、同阶段新 verification_id 开新挑战、持久停止真正触发停止协调）
+```
+
+复跑命令（README 同款）：
+
+```powershell
+$env:APPLESERVICES_REVIEW_ROOT = (Get-Location).Path
+$env:PYTHONPATH = "$(Get-Location).Path\tools\apple-pipeline"
+python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
+python docs/review-fixtures/registration-2026-11-15/review_gate_edges.py -v
+python docs/review-fixtures/registration-2026-11-15/review_decision_application.py -v
+```
 
 ## 2. 验收矩阵
 

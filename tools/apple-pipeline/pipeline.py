@@ -282,8 +282,14 @@ class Job:
             self.claim_number()
             return
         if sms.get("auto_purchase"):
-            self.update(reason="number_purchase_pending")
-            try: purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], sms, self.allow_purchase)
+            # Persist the acquisition intent before spending: the same intent must
+            # resolve to the same order after a crash.
+            acquisition = self.status.get("acquisition_id")
+            if not acquisition:
+                acquisition = hashlib.sha256(f"{self.cfg['job_id']}:{time.time_ns()}".encode()).hexdigest()[:32]
+                self.update(acquisition_id=acquisition, reason="number_purchase_pending")
+            policy = {**sms, "acquisition_id": acquisition}
+            try: purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], policy, self.allow_purchase)
             except SupplyError as e: raise PipelineError(str(e), "needs_review") from None
             self.cfg["sms"] = {**sms, **purchased}
             atomic(self.folder / "input.json", self.cfg)
