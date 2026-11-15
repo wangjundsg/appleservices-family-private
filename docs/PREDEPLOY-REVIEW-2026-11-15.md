@@ -2,6 +2,27 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
+## bdaeb51 修复复核（后续状态，以本节为准）
+
+复核提交：`bdaeb51a678630b06e0ab78543279ce9c692ad08`，已核对远端一致。原六个 overlay 用例实跑全部通过，构建、定向 vet、Go 五包、Python 44 项测试也通过。原 R1/R3/R4/R5/R6 的已复现场景已修；R2 的暂停状态场景已修，但“未决 intent 一律零请求”尚未满足。不能以原六例全绿替代完整验收。
+
+新增两项需修复：
+
+1. **P1 / 未决 intent 未纳入提前准入检查。** `tools/signup/admission.go:24` 只检查 `needs_review` 和 `rate_limited`，没有检查 Operations。副作用请求写入 intent 后进程中断，正常遗留状态是 `running + intent`。以该状态续跑并开启预热，本轮仍复现 **3 次 HTTP 请求**，之后才被 `workflow.run` 拦住。应在任何请求和设备写入之前检查全部未完成操作并转人工核实；冷却到期不能越过这个检查。验收应覆盖 running+intent、到期冷却+intent、预热和遥测两类入口，请求计数均为 0。
+2. **P2 / 拒绝续跑会覆盖原始失败原因。** `tools/signup/main.go:226` 将 `st.Failure` 改为准入拒绝原因并落盘。实测 `final_account_binding_unconfirmed` 在一次被拒的续跑后变成 `task_needs_review`。应保留原始失败事实，把“本次为何不执行”与“上次为何失败”分开表达；公开输出仍只使用受控错误码。验收应连续恢复两次，验证原始原因、HTTP 状态和操作信息不丢失且不发请求。
+
+新增复现用例仍在本机临时 overlay，未改业务代码：
+
+```powershell
+go test -overlay C:/Users/HUAWEI/AppData/Local/Temp/apple-review-bda-fd67c8cd6c2843e5854659be88ab6d31/overlay.json ./tools/signup -run '^TestReview(IntentBlocksBeforeWarmup|AdmissionPreservesFailureCause)$' -count=1 -v
+```
+
+两例在 bdaeb51 均失败。`signup_test.go` 位于同目录；修复时应将这两个边界纳入正式测试。
+
+交付口径更正：bdaeb51 只有 8 个 Go 文件变更，并未包含此前报告声称的本文“修复状态”更新；本节补充实际核验结果。I3 准确状态是 **CLI 尚未限制非离线环境使用 engine-insecure**，而不是“面板已经透传该参数”——I1 协议入口尚不存在。
+
+下一步建议：先补上上述两项及 I3 的离线证书开关硬性限制，再推进 I1 独立协议分支。双路径并存，任务方式冻结，不自动跨路径重试，共用后续面板激活；正式开放自动资源前仍需完成 I2，发布前仍需核验 I4。本轮没有核验重建二进制或运行中服务，没有真实注册和扣费。
+
 ## 结论与范围
 
 **暂不批准协议注册作为正式业务入口上线。** 本轮发现并离线复现六处原有测试未覆盖的问题，另有接入和部署配置缺口。
