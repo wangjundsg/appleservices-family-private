@@ -425,6 +425,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if st.Telemetry != nil {
 		receipt["telemetry"] = st.Telemetry
 	}
+	if class := failureClass(st); class != "" {
+		receipt["failureClass"] = class
+	}
 	if device != nil {
 		receipt["device"] = deviceReceipt(device, time.Now(), cookiesLoaded, profileReused)
 	}
@@ -472,6 +475,22 @@ var publicReasons = map[string]bool{
 	"state_write_failed_after_request":  true,
 	"unsupported_stage":                 true,
 	"profile_blocked":                   true,
+}
+
+// failureClass turns the numeric status into a public, de-identified class so a
+// failure can be triaged without guessing: http_429 means back off, transport
+// means the network or the proxy, http_4xx/5xx means the service.
+func failureClass(st *state) string {
+	if st.Failure == "" {
+		return ""
+	}
+	if st.HTTPStatus > 0 {
+		return fmt.Sprintf("http_%d", st.HTTPStatus)
+	}
+	if st.Failure == "preflight_unavailable" || st.Failure == "bootstrap_unconfirmed" {
+		return "transport"
+	}
+	return ""
 }
 
 // publicReason maps an internal error to a stable receipt code.

@@ -158,6 +158,14 @@ func (w *workflow) prepare(ctx context.Context) error {
 	// as if the address had been judged.
 	free, used, err := w.session.EmailFree(ctx, st.Email)
 	if err != nil {
+		// "unavailable" alone cannot tell a 429 from a TLS failure, and the
+		// difference decides whether the operator should wait or diagnose. Keep
+		// the code stable, record the status, never the body.
+		st.Failure = "preflight_unavailable"
+		var protocolErr *ProtocolError
+		if errors.As(err, &protocolErr) {
+			st.HTTPStatus = protocolErr.Status
+		}
 		return errors.New("preflight_unavailable")
 	}
 	if used {

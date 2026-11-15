@@ -115,3 +115,27 @@ func TestMigrationRevalidatesTheWholeProfile(t *testing.T) {
 		t.Fatal("the broken profile was migrated and persisted")
 	}
 }
+
+// "unavailable" must not be the end of the story: the receipt has to say whether
+// the service answered 429/503 or the transport failed at all.
+func TestPreflightFailureCarriesAClass(t *testing.T) {
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{429, "http_429"},
+		{503, "http_503"},
+		{400, "http_400"},
+	}
+	for _, tc := range cases {
+		srv := preflightStatus(t, tc.status)
+		_, receipt := invokeSignup(t, filepath.Join(t.TempDir(), "task.json"), srv.URL, "-stage", "preflight")
+		srv.Close()
+		if got, _ := receipt["failureClass"].(string); got != tc.want {
+			t.Fatalf("HTTP %d failureClass = %q, want %q (%v)", tc.status, got, tc.want, receipt)
+		}
+		if status, _ := receipt["httpStatus"].(float64); int(status) != tc.status {
+			t.Fatalf("HTTP %d httpStatus = %v", tc.status, receipt["httpStatus"])
+		}
+	}
+}
