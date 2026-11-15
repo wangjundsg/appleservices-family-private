@@ -107,34 +107,36 @@ var errRegistrationMethod = errors.New("registration_method_invalid")
 // resolveRegistrationMethod freezes the path on first use and refuses changes.
 // Old tasks (no field) are browser tasks and get the field persisted so a later
 // resume cannot quietly claim protocol.
+// resolveRegistrationMethod is deliberately narrow: this binary IS the protocol
+// executor. It accepts protocol (or nothing), refuses browser outright instead of
+// pretending it can run a browser flow, and refuses any stored value it does not
+// recognise. The browser/protocol choice belongs to the panel task.
 func resolveRegistrationMethod(st *state, requested string) (string, error) {
-	if requested != "" && requested != methodBrowser && requested != methodProtocol {
+	if requested != "" && requested != methodProtocol {
+		return "", errRegistrationMethod
+	}
+	if st.RegistrationMethod != "" && st.RegistrationMethod != methodProtocol {
 		return "", errRegistrationMethod
 	}
 	if st.RegistrationMethod == "" {
-		chosen := requested
-		if chosen == "" {
-			chosen = methodBrowser
-		}
-		if st.RegistrationMethod != chosen {
-			st.RegistrationMethod = chosen
-		}
-		return chosen, nil
+		st.RegistrationMethod = methodProtocol
 	}
-	if requested != "" && requested != st.RegistrationMethod {
-		return st.RegistrationMethod, errMethodChange
-	}
-	return st.RegistrationMethod, nil
+	return methodProtocol, nil
 }
 
 var errMethodChange = errors.New("registration_method_change_rejected")
 
-// methodDir is the private directory of one task's path: <task dir>/<method>.
-// Browser tasks keep their historical directories; nothing is migrated.
-func methodDir(statePath, method string) string {
+// taskPrivateDir is the private directory of one task: <dir>/<stem>. Two tasks
+// that happen to share a parent directory therefore never share device records.
+// The panel may still pass explicit paths; this is only the default.
+func taskPrivateDir(statePath string) string {
 	dir := filepath.Dir(statePath)
+	stem := strings.TrimSuffix(filepath.Base(statePath), filepath.Ext(statePath))
 	if dir == "" || dir == "." {
 		dir = ".cache/signup"
 	}
-	return filepath.Join(dir, method)
+	if stem == "" || stem == "." || stem == string(filepath.Separator) {
+		stem = "task"
+	}
+	return filepath.Join(dir, stem)
 }

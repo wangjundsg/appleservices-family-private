@@ -22,19 +22,20 @@ import (
 // The panel supervises the existing pipeline. Credentials stay in private files;
 // neither subprocess output nor upstream responses are sent to the browser.
 type registerRequest struct {
-	Family          registrationFamily `json:"family"`
-	Automatic       bool               `json:"automatic"`
-	Email           string             `json:"email"`
-	Password        string             `json:"password"`
-	Phone           string             `json:"phone"`
-	PhoneCC         string             `json:"phonecc"`
-	Platform        string             `json:"platform"`
-	Activation      string             `json:"activation"`
-	ExpiresAt       time.Time          `json:"expiresAt"`
-	AcceptTerms     bool               `json:"acceptTerms"`
-	CaptchaProvider string             `json:"captchaProvider"`
-	RetryOf         string             `json:"retryOf,omitempty"`
-	Egress          struct {
+	Family             registrationFamily `json:"family"`
+	Automatic          bool               `json:"automatic"`
+	Email              string             `json:"email"`
+	Password           string             `json:"password"`
+	Phone              string             `json:"phone"`
+	PhoneCC            string             `json:"phonecc"`
+	Platform           string             `json:"platform"`
+	RegistrationMethod string             `json:"registrationMethod,omitempty"`
+	Activation         string             `json:"activation"`
+	ExpiresAt          time.Time          `json:"expiresAt"`
+	AcceptTerms        bool               `json:"acceptTerms"`
+	CaptchaProvider    string             `json:"captchaProvider"`
+	RetryOf            string             `json:"retryOf,omitempty"`
+	Egress             struct {
 		Mode      string `json:"mode"`
 		ProxyPort int    `json:"proxyPort"`
 	} `json:"egress"`
@@ -439,11 +440,32 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if err := writeRegisterJSON(filepath.Join(folder, "panel.json"), meta); err != nil {
 		return "", errors.New("无法保存任务进度")
 	}
-	args := []string{"run", "--input", filepath.Join(folder, "request.json")}
-	if body.Automatic && s.config.AllowPurchase {
-		args = append(args, "--allow-purchase")
+	method, methodErr := registrationMethodFor(folder, body.RegistrationMethod)
+	if methodErr != nil {
+		return "", methodErr
 	}
-	command := s.registerCommand(args...)
+	manifest["registrationMethod"] = method
+	if err := writeRegisterJSON(filepath.Join(folder, "request.json"), manifest); err != nil {
+		return "", errors.New("无法保存私有任务参数")
+	}
+	var program string
+	var programArgs []string
+	if method == methodProtocol {
+		if err := ensureProtocolDir(folder); err != nil {
+			return "", errors.New("无法创建协议任务目录")
+		}
+		program, programArgs = s.registrationProgram(folder, method)
+	} else {
+		args := []string{"run", "--input", filepath.Join(folder, "request.json")}
+		if body.Automatic && s.config.AllowPurchase {
+			args = append(args, "--allow-purchase")
+		}
+		program, programArgs = s.config.Python, append([]string{filepath.Join(s.config.RepoRoot, "tools", "apple-pipeline", "pipeline.py")}, args...)
+	}
+	command := exec.Command(program, programArgs...)
+	command.Dir = s.config.RepoRoot
+	command.Env = append(os.Environ(), "APPLESERVICES_PIPELINE_STATE="+s.registerRoot())
+	configureProcess(command)
 	if err := command.Start(); err != nil {
 		code := -1
 		now := time.Now().UTC()

@@ -230,11 +230,10 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	// A + C: the registration path is chosen once, at creation, and frozen. Old
 	// tasks without the field are browser tasks; a resume that asks for another
 	// path is refused instead of switching mid-flight.
-	method, methodErr := resolveRegistrationMethod(st, *registrationMethod)
+	_, methodErr := resolveRegistrationMethod(st, *registrationMethod)
 	if methodErr != nil {
-		if saveErr := writeState(*statePath, st); saveErr != nil {
-			return fail("state_write_failed")
-		}
+		// A rejected method must not create a task file: an invalid value would
+		// otherwise leave credentials and a generated password on disk.
 		return fail(methodErr.Error())
 	}
 	// Admission runs before warm-up, telemetry or any device write: a task that
@@ -284,8 +283,8 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 			return fail("device_mismatch")
 		}
 	}
-	if !visited["device-dir"] && method == methodProtocol {
-		*deviceDir = filepath.Join(methodDir(*statePath, method), "devices")
+	if !visited["device-dir"] {
+		*deviceDir = filepath.Join(taskPrivateDir(*statePath), "devices")
 	}
 	if strings.TrimSpace(*deviceID) != "" {
 		device, err = loadDevice(*deviceDir, *deviceID, time.Now())
