@@ -19,6 +19,7 @@ def iso(offset=0):
 
 def view(**overrides):
     base = {
+        "job_id": "reg-test",
         "run": {"state": "queued"},
         "status": "queued",
         "operations": {},
@@ -43,8 +44,9 @@ class AdmissionTableTest(unittest.TestCase):
 
     def test_confirmed_waiting_with_a_live_challenge_resumes(self):
         decision = job_policy.decide(
-            view(status="waiting_input", registration_started=True, create_confirmed=True,
-                 challenge={"id": "c1", "kind": "email", "status": "open"}), "run", time.time())
+            view(status="waiting_input", stage="email-sent", registration_started=True, create_confirmed=True,
+                 challenge={"id": "c1", "kind": "email", "stage": "email-sent", "status": "open",
+                            "job_id": "reg-test"}), "run", time.time())
         self.assertEqual(decision.action, "resume")
 
     def test_waiting_without_a_live_challenge_is_reviewed(self):
@@ -65,9 +67,10 @@ class AdmissionTableTest(unittest.TestCase):
 
     def test_pending_operation_blocks(self):
         decision = job_policy.decide(
-            view(status="running", registration_started=True, create_confirmed=True,
+            view(status="running", stage="email-sent", registration_started=True, create_confirmed=True,
                  operations={"phone": {"state": "intent"}},
-                 challenge={"id": "c1", "status": "open"}), "run", time.time())
+                 challenge={"id": "c1", "kind": "email", "stage": "email-sent", "status": "open",
+                            "job_id": "reg-test"}), "run", time.time())
         self.assertEqual(decision.action, "reconcile")
         self.assertEqual(decision.detail["operations"], ["phone"])
 

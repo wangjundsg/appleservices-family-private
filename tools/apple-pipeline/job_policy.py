@@ -180,21 +180,24 @@ STAGE_KIND = {"email-sent": "email", "phone-sent": "phone"}
 
 
 def _challenge_live(job: Mapping[str, Any], challenge: Mapping[str, Any], stage: str = "") -> bool:
-    """A challenge authorises a resume only for its own job, stage and kind."""
-    if not challenge.get("id"):
+    """A challenge authorises a resume only for its own job, stage and kind.
+
+    Every binding field is required. A challenge that does not say which job or
+    which kind it belongs to cannot prove anything, so it authorises nothing.
+    """
+    if not challenge.get("id") or not challenge.get("kind") or not challenge.get("stage"):
         return False
     if challenge.get("status") not in {None, "open", "sent"}:
         return False
     owner = challenge.get("job_id")
-    if owner and job.get("job_id") and owner != job.get("job_id"):
+    job_id = job.get("job_id")
+    if not owner or not job_id or owner != job_id:
+        return False  # another job's challenge, or one with no owner, is not ours
+    if challenge["stage"] != stage:
         return False
-    kind = challenge.get("kind")
     expected = STAGE_KIND.get(stage)
-    if expected and kind and kind != expected:
+    if expected and challenge["kind"] != expected:
         return False  # an email challenge cannot answer the phone stage
-    owned_stage = challenge.get("stage")
-    if owned_stage and stage and owned_stage != stage:
-        return False
     return True
 
 

@@ -832,3 +832,78 @@ class RecoveryGateTest(unittest.TestCase):
             job.protocol_step()
         self.assertEqual(caught.exception.state, "needs_review")
         self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
+
+class DecisionApplicationTest(unittest.TestCase):
+    """A Decision must be applied, not just consulted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={
+            "emailCode": str(self.folder / "email-code.txt"),
+            "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _job(self, **status):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(number_owned=True, number="4155550134", **status)
+        job.settle_number = lambda force=False: None
+        return job
+
+    def test_persisted_stop_calls_the_adapter_cancel(self):
+        job = self._job(stage="email-sent", status="running", stop_requested=True,
+                        registration_started=True, create_confirmed=True,
+                        challenge={"id": "c1", "kind": "email", "stage": "email-sent",
+                                   "status": "open", "job_id": self.cfg["job_id"]})
+        FakeAdapter.reset({"state": "cancelled"})
+        job.run()
+        self.assertEqual(FakeAdapter.calls["cancel"], 1, "a persisted stop did not reach the adapter")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
+
+    def test_cooldown_keeps_reason_and_deadline(self):
+        deadline = pipeline.iso(pipeline.time.time() + 600)
+        job = self._job(stage="create", status="rate_limited", reason="code_rate_limited",
+                        cooldown_until=deadline, registration_started=True)
+        FakeAdapter.reset()
+        job.run()
+        self.assertEqual(job.status["status"], "rate_limited")
+        self.assertEqual(job.status["reason"], "code_rate_limited", "the original reason was overwritten")
+        self.assertEqual(job.status["cooldown_until"], deadline, "the deadline was changed")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
+
+    def test_pending_operation_keeps_reason(self):
+        job = self._job(stage="email-sent", status="running", reason="phone_outcome_pending",
+                        registration_started=True, create_confirmed=True,
+                        operations={"phone": {"state": "intent"}},
+                        challenge={"id": "c1", "kind": "email", "stage": "email-sent",
+                                   "status": "open", "job_id": self.cfg["job_id"]})
+        FakeAdapter.reset()
+        job.run()
+        self.assertEqual(job.status["reason"], "phone_outcome_pending")
+        self.assertEqual(job.status.get("hold_reason"), "unresolved_operation")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
+
+    def test_foreign_challenge_is_not_accepted(self):
+        job = self._job(stage="email-sent", status="waiting_input", registration_started=True,
+                        create_confirmed=True,
+                        challenge={"id": "c1", "kind": "email", "stage": "email-sent",
+                                   "status": "open", "job_id": "another-job"})
+        FakeAdapter.reset()
+        with self.assertRaises(pipeline.PipelineError):
+            job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["resume"] + FakeAdapter.calls["create"], 0)
+
+    def test_challenge_without_binding_is_not_accepted(self):
+        job = self._job(stage="email-sent", status="waiting_input", registration_started=True,
+                        create_confirmed=True,
+                        challenge={"id": "c1", "status": "open"})
+        FakeAdapter.reset()
+        with self.assertRaises(pipeline.PipelineError):
+            job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["resume"] + FakeAdapter.calls["create"], 0)

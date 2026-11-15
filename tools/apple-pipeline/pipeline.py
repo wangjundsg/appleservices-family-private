@@ -200,6 +200,7 @@ class Job:
             "stage": stage,
             "status": "open",
             "sent_at": stamp,
+            "job_id": status.get("job_id"),
             "legacy": True,
         }
         return status
@@ -339,7 +340,9 @@ class Job:
             stage_now = outcome.get("stage") or self.status["stage"]
             kind = self.challenge_kind_for(stage_now)
             current = self.status.get("challenge") or {}
-            if current.get("stage") != stage_now or current.get("status") not in {"open", "sent"}:
+            rotated = bool(outcome.get("verification_id")) and outcome.get("verification_id") != current.get("source_id")
+            if (current.get("stage") != stage_now or current.get("status") not in {"open", "sent"}
+                    or rotated):
                 # Sending a code for a new stage is a new challenge: it gets its own
                 # identity and is bound to this job and stage.
                 challenge = self.open_challenge(kind or stage_now, source_id=outcome.get("verification_id", ""))
@@ -585,6 +588,10 @@ class Job:
             # Protocol admission comes first, before the legacy recovery branch can
             # clean a browser or rewrite the stage on its way past.
             protocol_action = self.protocol_action() if self.method == "protocol" else None
+            if self.method == "protocol" and self.status.get("stop_requested"):
+                # A persisted stop is an instruction, not just a blocked run.
+                self.protocol_cancel(adapter_registry.resolve(self.cfg.get("protocol")))
+                return
             if self.method == "protocol" and (self.folder / "cancel.request").exists():
                 # An explicit stop outranks the review gate: the operator already
                 # decided, and the adapter is the only one who can confirm what the
@@ -654,7 +661,16 @@ class Job:
             previous = self.status.get("cooldown_until")
             cooldown = previous if error.state == "rate_limited" and previous else (
                 iso(time.time() + 3600) if error.state == "rate_limited" else previous)
-            self.update(status=error.state, reason=error.reason, cooldown_until=cooldown)
+            prior = self.status.get("reason")
+            # The hold code explains this refusal; the job keeps the reason that
+            # made it unresolved.
+            extra = {}
+            if error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason:
+                extra["hold_reason"] = error.reason
+                self.update(status=error.state, reason=prior, cooldown_until=cooldown, **extra)
+            else:
+                self.update(status=error.state, reason=error.reason, cooldown_until=cooldown)
+            if False: pass
             if (self.method != "protocol" and self.cfg.get("handoff") != "dashboard" and self.status["stage"] == "create"
                     and error.state == "unknown" and self.cfg["sms"].get("activation")):
                 self.update(stage="login", status="queued", reason="registration_needs_confirmation")
@@ -850,6 +866,7 @@ class Job:
             "run": {"state": self.status.get("status"), "cooldown_until": self.status.get("cooldown_until")},
             "status": self.status.get("status"),
             "stage": self.status.get("stage"),
+            "job_id": self.cfg.get("job_id") or self.status.get("job_id"),
             "reason": self.status.get("reason"),
             "registration_started": self.status.get("registration_started"),
             "create_attempted": self.status.get("create_attempted"),
@@ -1094,6 +1111,24 @@ class Job:
             return
         if self.status["status"] == "cancelled" and not safe_cancel:
             self.update(refund_deferred=True, reason="cancelled_requires_outcome_check")
+            return
+        # Re-evaluate with the probe result: the probe gathers evidence, it does not
+        # grant permission.
+        after_probe = job_policy.settlement_decision(
+            {"registration": {"outcome": "registered" if self.status.get("account_created") else "unknown"},
+             "registration_started": bool(self.status.get("registration_started")),
+             "attempts": self.status.get("attempts") or {}},
+            {"id": sms.get("activation"),
+             "state": "refund_confirmed" if self.status.get("refund_confirmed") else "owned"},
+            {"sms_state": self.status.get("sms_state"),
+             "otp_received": bool(self.status.get("code_received")),
+             "business_release_allowed": bool(
+                 self.status.get("registration_not_applied")
+                 or not (self.status.get("registration_started") or self.status.get("create_attempted")
+                         or (self.status.get("attempts") or {}).get("create"))),
+             "order_matches": self.status.get("order_matches", True)})
+        if after_probe.action != "refund":
+            self.update(refund_deferred=True, settlement_reason=after_probe.reason)
             return
         if self.status.get("refund_attempts", 0) >= 5: return
         if self.status.get("refund_after") and timestamp(self.status["refund_after"]) > time.time(): return

@@ -84,6 +84,14 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 | 邮箱挑战可放行短信阶段 | 挑战必须匹配 **job + 业务阶段 + kind**（`STAGE_KIND`）；旧状态由 `upgrade_status` **显式转换**（标记 legacy），决策时不再凭空补造 | `test_confirmed_challenge_may_resume`、`test_stale_sms_code_is_refused_after_stage_change` |
 | 退款二选一 | `settlement_decision` 要求 **business_release_allowed** 与 **provider sms_state=confirmed_no_otp** 同时成立；缺失任一方 → hold/reconcile；`force`/probe 不再豁免 | `test_business_release_alone_is_not_enough`、`test_provider_confirmation_alone_is_not_enough`、`test_both_facts_together_allow_refund` |
 
+## 1.2 本轮并入的三处（W1/W2，读事实→决策→应用决策）
+
+| 意见 | 修法 | 证据 |
+|---|---|---|
+| probe 绕过退款许可 | 过期探测结束后**重新计算** `settlement_decision`，只有 `refund` 才继续 setStatus=8；探测只负责取证 | `test_refund_cooldown_is_persisted_without_secret` 等退款用例 |
+| 挑战绑定不完整（他人任务/缺字段/新 verification_id） | `_challenge_live` 现在**要求 job_id、kind、stage 全部存在且匹配**；`policy_view` 输出 job_id；同阶段出现新 `verification_id` 时重开挑战 | `test_foreign_challenge_is_not_accepted`、`test_challenge_without_binding_is_not_accepted` |
+| Decision 未完整执行 | 持久化 `stop_requested` 现在**调用适配器 cancel**；冷却与未决操作保留原 `reason`，本次拒绝写入 `hold_reason`；冷却截止时间不再被改写 | `test_persisted_stop_calls_the_adapter_cancel`、`test_cooldown_keeps_reason_and_deadline`、`test_pending_operation_keeps_reason` |
+
 ## 2. 验收矩阵
 
 | 组 | 结论 | 证据 / 缺口 |
