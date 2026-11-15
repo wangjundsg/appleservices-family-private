@@ -2,7 +2,32 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## c399782：面板 A＋C 再复核（最新）
+## 43af8bf：面板修复通过，协议入口仍须停止误分流（最新）
+
+基线 `43af8bf51cd350e6d8c4b5d546960254cec7e1a5`，远端一致。本轮继续使用 git archive 独立快照，不混入工作区其他 dashboard 修改。上一轮三个补充用例全部通过：新建任务不再被错误冻结、非法持久方式拒绝、损坏 manifest 拒绝。signup/dashboard 测试、定向 vet、Python 44 项测试通过。
+
+**仍有 P1：声明 protocol 的任务实际进入浏览器路径。** 面板现在正确把任务交给 pipeline，但 pipeline.py 完全没有读取 registration_method/registrationMethod，create 仍无条件调用浏览器实现。在真实 `execute → Job.run → create` 控制流中，以离线替身截断号码和浏览器外部动作，实测 protocol 任务调用号码入口 1 次、Forge 浏览器入口 1 次。没有真实购号或浏览器服务调用。这是当前可达的错误分流，不只是“适配器尚未实现”。
+
+接入适配器前，pipeline 必须先验证方式与执行器能力；protocol 未实现时明确返回类似 `protocol_executor_unavailable` 的错误，在号码获取、账号资源占用及浏览器启动前停止，不能默认为 browser。面板也不应开放一个会错误执行的协议入口。两个方式字段应使用单一规范字段，或明确验证双字段一致；不能由 Go/Python 分别信任相互矛盾的值。
+
+可以继续 B＋D 的测试适配器工作，但实施约束如下：
+
+1. 假适配器由测试注入，生产缺少真实实现时拒绝执行。不要发布一个固定返回 waiting_input 的生产 stub，把未执行伪装成正常等待。
+2. 复用真实 pipeline 管理逻辑。只有资源客户端和执行器替换为离线替身；计数必须来自真实生命周期调用，而不是三个没有连接实际流程的函数。
+3. **“其余逻辑保持不变”不可行。** 当前 `while status != ready` 会继续迭代，`finally` 对自动购号任务调用 settle_number，恢复 create 阶段又会切换到 login。应明确 waiting_input 的暂停、持久化、资源保留与恢复语义；一轮等待只调用一次适配器，退出主循环，不进入登录，不重发注册。
+4. 对自动购号和已有号码两种配置分别验收：有效租期内等待时取消订单、释放邮箱、切换登录均为 0；重启后仍等待同一挑战，状态与输入文件路径一致；收到输入后从原阶段推进；过期、取消、未知结果按各自策略处理。
+5. “取消释放”不能无条件成立。提交前安全取消、已提交结果未知、已收到短信、号码过期等情况需要分别断言。未知副作用不得通过释放资源后重建来恢复，已收到短信的订单不能假定可退。
+6. 后续接真实 CLI 时，应验证实际 CLI 参数及私密输入映射，而非仅比较命令字符串；交接激活仍需账号绑定、幂等和失败恢复。
+
+本机复现文件：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-43af-a84192a983894cdfad5724b5b0dfe4cb/review_pipeline.py`。同目录 source 为独立提交快照，执行下列命令得到 browser calls=1 的失败断言：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-43af-a84192a983894cdfad5724b5b0dfe4cb/review_pipeline.py
+```
+
+本轮只更新复核文档，不部署、不扣费、不修改业务实现或他人的未提交修改。
+
+## c399782：面板 A＋C 再复核（历史记录）
 
 基线 `c3997826d6d5a636ed0e5e16ed8a20c4b092be63`，远端一致。工作区另有非本任务的 dashboard 未提交修改；本轮将该提交通过 git archive 导出到独立临时目录，测试不混入这些修改。独立快照的定向 vet、Go 五包测试、Python 44 项测试全部通过，signup 可构建。没有部署、请求真实服务或改动那些工作区文件。
 
