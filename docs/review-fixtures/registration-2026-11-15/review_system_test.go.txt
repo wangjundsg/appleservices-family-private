@@ -1,0 +1,22 @@
+package dashboard
+
+import (
+ "path/filepath"
+ "testing"
+)
+
+func TestReviewProtocolWaitingInputReachable(t *testing.T) {
+ s:=registerTestServer(t)
+ folder:=registerFixture(t,s,pipelineReceipt{Stage:"email-sent",Status:"waiting_input",Active:false})
+ if err:=writeRegisterJSON(filepath.Join(folder,"request.json"),map[string]any{"registrationMethod":"protocol","protocol":protocolPaths(folder)});err!=nil{t.Fatal(err)}
+ w:=registerTestCall(s,"POST","/api/register/"+testRegisterID+"/input",`{"code":"012345"}`)
+ if w.Code!=200{t.Fatalf("protocol input rejected: HTTP %d",w.Code)}
+}
+
+func TestReviewProtocolResumeEndpointExists(t *testing.T) {
+ s:=registerTestServer(t)
+ registerFixture(t,s,pipelineReceipt{Stage:"email-sent",Status:"needs_review",Active:false})
+ w:=registerTestCall(s,"POST","/api/register/"+testRegisterID+"/resume",`{}`)
+ // A stopped task should be refused by admission (409), not by a missing route.
+ if w.Code!=409{t.Fatalf("resume route has no admission: HTTP %d",w.Code)}
+}
