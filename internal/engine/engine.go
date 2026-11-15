@@ -144,6 +144,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("engine: refusing %s request to %s; this adapter only speaks https", req.URL.Scheme, req.URL.Host)
 		}
 	}
+	// Verification is disabled per transport, so the host has to be re-checked on
+	// every hop: a loopback fixture that redirects to an external HTTPS origin
+	// would otherwise be reached with InsecureSkipVerify still on. This runs
+	// before dialling, so the external request never leaves the machine.
+	if t.insecure && !isLoopbackHost(req.URL.Hostname()) {
+		return nil, fmt.Errorf("engine: insecure transport refusing non-loopback host %q", req.URL.Hostname())
+	}
 	return t.rt.RoundTrip(req)
 }
 

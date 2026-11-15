@@ -4,8 +4,12 @@ package engine
 // proxy is configured, and plain http is only allowed for loopback fixtures.
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,5 +67,46 @@ func TestLoopbackPlainHTTPIsExplicit(t *testing.T) {
 	}
 	if _, err := (&http.Client{Transport: closed, Timeout: time.Second}).Get(srv.URL); err == nil {
 		t.Fatal("plain http to loopback must require an explicit opt-in")
+	}
+}
+
+// A loopback fixture may redirect outward; that hop must be refused before the
+// connection is made, otherwise the transport would dial an external origin with
+// certificate verification still disabled.
+func TestInsecureDoesNotFollowExternalRedirect(t *testing.T) {
+	var outside atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "https://outside.invalid/final", http.StatusFound)
+			return
+		}
+		if r.Host == "outside.invalid" {
+			outside.Add(1)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	tr, err := New(Options{Profile: profileFor(t, fingerprint.KindChrome), Insecure: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.CloseIdleConnections()
+
+	// Offline routing only: keep URL and Host intact, map the dial to the fixture.
+	dial := tr.rt.DialTLSContext
+	tr.rt.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dial(ctx, network, strings.TrimPrefix(srv.URL, "https://"))
+	}
+	client := &http.Client{Transport: tr, CheckRedirect: CheckRedirect, Timeout: 2 * time.Second}
+	resp, err := client.Get(srv.URL + "/start")
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if got := outside.Load(); got != 0 {
+		t.Fatalf("insecure transport sent %d request(s) to an external origin", got)
+	}
+	if err == nil {
+		t.Fatal("an external redirect must fail while verification is disabled")
 	}
 }
