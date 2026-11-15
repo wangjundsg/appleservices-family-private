@@ -43,3 +43,13 @@ try {
 | TestReviewProtocolResumeEndpointExists | 恢复接口 HTTP 405（应进入准入，待核实任务被受控拒绝） |
 
 购号用例检查资源函数的崩溃恢复，不证明完整 run 在 unknown 后会自动重购；取消用例检查持久终态，不主张现有系统会删除 cancel.request。测试协议输入的 HTTP 200 是当前输入接口兼容约定；若最终契约采用 202，应同时验证持久 inbox 与正确挑战投递，而不只修改状态码断言。
+
+## ad19776 中途复核补充（2026-11-16）
+
+`review_policy_batch.py` 使用相同 APPLESERVICES_REVIEW_ROOT 选择待审源码，新增六组纯策略/真实 run 用例：冷却时间格式与时区、未知 operation、业务与短信双重退款依据、当前挑战绑定、持久停止标记。在 ad19776 六组均失败（含十个子场景失败断言）；已有 review_gate_edges.py 两项中结构化操作通过，冷却状态/截止保留仍失败。
+
+```powershell
+python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
+```
+
+这些是 W1/W2 同一批验收的补充，不替代总方案 T01–T16，也不要求每条修完单独申请确认。升级最终状态 schema 时同步升级夹具输入，不放宽“错误状态不得执行、退款需完整证据”的断言。

@@ -1,4 +1,37 @@
-# T01–T16 验收证据表（W1 已实现，W2 部分，W3–W5 未实现）
+# T01–T16 验收证据表（W1/W2 部分，W3–W5 未实现）
+
+## 2026-11-16 中途复核：ad19776
+
+本节更新下方原提交自验结论。整体方案及 W1–W5 顺序不变；以下问题纳入正在实施的 W1/W2 同一批修复，不要求每条修完等待批准，也不把未承诺完成的 W3–W5 重新列为新缺陷。
+
+独立 git archive 快照中 Python 104 项通过；此前 review_gate_edges.py 的 structured operation 用例通过，冷却真实入口用例仍失败（已阻止适配器，但改为 needs_review 并清空 cooldown_until）。本次新增 review_policy_batch.py 六组测试包含十个失败断言。未重新跑 Go/vet：本提交没有 Go 改动，本次也只改审查文档/夹具；下方 Go 通过记录是提交方自验记录。
+
+**W1 只能记“部分”，G01 与 I02 暂不关闭。** 纯函数被调用不等于 Decision 已被执行路径完整落实；应一起完成 loader → facts → decide → apply，而不是再给调用点补判断。
+
+| 同一实施包内的修正 | 证据与原因 | 完成标准 |
+| --- | --- | --- |
+| W1 / P1：完整应用 Decision，不丢执行状态与事实 | protocol_action 将 hold/block/busy/stop/reconcile 全压成 review；run 抛 needs_review 并把 cooldown_until 清空。policy_view 不传持久 stop_requested，真实 run 在 stop_requested=True 时仍 create=1；schema/进程存活/资源到期 facts 也未完整装配 | 独立 apply_decision 保留 state/reason/deadline；stop/hold/busy 不复用异常分支模拟。真实入口与纯表的事实相同；暂不能提供的事实不能默认许可。维护仍直接写 cancelled，因此“CLI/维护/退款共用答案”目前不成立 |
+| W1 / P1：异常状态必须受控拒绝 | _cooldown 截取前 19 字符并当 UTC，忽略时区；缺失/非法截止时间返回 None/-inf，随后允许 create。_pending_operations 仅识别三种状态，unknown、缺 state 等反而被忽略，新任务判断可能 create | 用带时区解析，非法/缺截止的限流保持阻塞；严格解析 operation schema，未知字段值不能变成“无未决操作”。normalize 在统一 loader 做，表只处理明确合法状态 |
+| W1/W2 / P1：恢复需要真正的当前挑战绑定 | policy_view 从任意 challenge_at 合成 open 挑战，不比较当前 stage；decide 只检查 id/status，不验证 job/phase/kind。真实 phone-sent + email-sent 挑战仍 resume=1。open_challenge/active_challenge 只有定义，没有生产调用点 | I02 保持未完成；发送前持久化挑战，当前任务/阶段/类型/有效期都匹配才许可。旧状态有缺口时核实，不能补造 open。完成 read_input/dispatch/回执绑定后一起验 T05/T06 |
+| W2 / P1：结算必须是两组证据同时满足 | settlement_decision 在 registration=unknown 时仅 confirmed_absent=True 就 refund；未提交且无任何供应商观察也 refund。调用方又把 registration_not_applied 映射为 confirmed_absent，混淆“没建成”和“没收到短信”。旧 needs_probe/force 分支仍可绕过 verdict，旧退款逻辑仍在其后 | 使用明确 business_release_allowed 与 provider_sms_state=confirmed_no_otp，且订单匹配、执行已停止/不再需要号码，两者都满足才允许退款。false/缺字段不能当未收码；不得用 force 或 probe 豁免许可。供应商观察先读取，许可后才能 setStatus=8 |
+
+结算用例是策略函数复现，不能据此断言已发生真实退号；现有外围 guard 可能阻止部分调用，但不能使错误的共享决策契约成立。旧 probe 分支的“探测失败等于账号不存在”也不能作为 not_applied 依据。统一实现时删除或隔离旧推导，不保留两个都能产生副作用的结算路径。
+
+还需调整验收口径：T01 从 PASS（核心）改为部分；T04 现有 test_protocol_adapter 是进程内假适配器阶段测试，不能算“三个独立 CLI 子进程”的验收。后者留到 W3 的真实子进程夹具中；不需要真实服务或购买。
+
+复现：
+
+```powershell
+$env:APPLESERVICES_REVIEW_ROOT = '<ad19776 独立快照根目录>'
+python docs/review-fixtures/registration-2026-11-15/review_gate_edges.py -v
+python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
+```
+
+本机快照：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-ad19-617331924315473482ca33de800329b5/source`。全程离线，没有购号、退号、注册、订阅或部署。下一批继续 W1/W2 收口及后续 W3–W5，最终按统一矩阵交付；本节不新增业务范围。
+
+---
+
+以下为原提交的自验记录；完成状态以本页顶部复核为准。
 
 日期：2026-11-15。基线：`4bbec7d` + 本轮。**本表按方案 §12 要求逐项列出 PASS / FAIL / 未测，不用测试总数代替结论。**
 本轮只做离线实现与验证：没有购号、退款、注册、订阅、部署，也没有真实服务基线。
