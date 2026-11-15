@@ -82,7 +82,12 @@ var scriptSrcPattern = regexp.MustCompile(`src="([^"]+\.js[^"]*)"`)
 
 // runWarmup walks the browser path. maxAssets caps the bundle fetches; zero
 // skips them.
-func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets int) []warmupStep {
+// Apple can only observe its own properties, so "browse other websites" buys
+// nothing. What it CAN see is that this browser's first and only Apple contact
+// was the signup page — which no ordinary customer does. The journey prefix
+// fixes that: homepage -> product -> support -> click through to the account
+// page, with the referer chain a real visit would carry.
+func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets int, journey bool) []warmupStep {
 	var steps []warmupStep
 	previous := "start"
 
@@ -115,7 +120,27 @@ func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets 
 
 	portalBase := strings.Replace(s.base, "//appleid.", "//account.", 1)
 	landing := portalBase + "/account"
-	if _, _, ok := fetch("landing", landing, s.navigationHeaders("none", "")); !ok {
+
+	referer := ""
+	if journey {
+		home, product, support := s.journeyURLs()
+		if _, _, ok := fetch("journey-home", home, s.navigationHeaders("none", "")); ok {
+			referer = referenceURL(s.lastWarmupURL)
+		}
+		if _, _, ok := fetch("journey-product", product, s.navigationHeaders("same-site", referer)); ok {
+			referer = referenceURL(s.lastWarmupURL)
+		}
+		if _, _, ok := fetch("journey-support", support, s.navigationHeaders("cross-site", referer)); ok {
+			// A customer who came from Apple's own pages arrives at the account
+			// page by clicking, so the landing carries that referer.
+			referer = referenceURL(s.lastWarmupURL)
+		}
+	}
+	landingHeaders := s.navigationHeaders("cross-site", referer)
+	if referer == "" {
+		landingHeaders = s.navigationHeaders("none", "")
+	}
+	if _, _, ok := fetch("landing", landing, landingHeaders); !ok {
 		warnf("warmup: portal document did not load; continuing")
 	}
 
@@ -144,6 +169,23 @@ func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets 
 	}
 
 	return steps
+}
+
+// journeyURLs keeps the real Apple properties in production and the same shape
+// on the test host, so offline tests never reach the public internet.
+func (s *Session) journeyURLs() (home, product, support string) {
+	if s.base == defaultBase {
+		return "https://www.apple.com/", "https://www.apple.com/shop/buy-iphone", "https://support.apple.com/"
+	}
+	return s.base + "/www/", s.base + "/www/shop/buy-iphone", s.base + "/support/"
+}
+
+// referenceURL strips the query so the referer stays a plausible page URL.
+func referenceURL(raw string) string {
+	if idx := strings.Index(raw, "?"); idx >= 0 {
+		return raw[:idx]
+	}
+	return raw
 }
 
 // warmupCookieCount proves the chain left state behind.

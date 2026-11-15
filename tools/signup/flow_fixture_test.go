@@ -90,6 +90,14 @@ func (f *flowFixture) handler() http.Handler {
 			return
 		}
 
+		// Journey pages: apple.com / support, same shape as production.
+		if strings.HasPrefix(r.URL.Path, "/www/") || strings.HasPrefix(r.URL.Path, "/support/") || r.URL.Path == "/support" {
+			http.SetCookie(w, &http.Cookie{Name: "journey", Value: "1", Path: "/"})
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<html>apple</html>")
+			return
+		}
+
 		// Documents and bundles a browser loads without any XHR headers.
 		if strings.HasPrefix(r.URL.Path, "/widget/") || strings.HasPrefix(r.URL.Path, "/static/") {
 			w.Header().Set("Content-Type", "text/html")

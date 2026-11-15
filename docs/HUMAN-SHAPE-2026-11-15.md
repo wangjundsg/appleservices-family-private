@@ -40,6 +40,24 @@
 
 ---
 
+## 2.1 旅程前缀：为什么不是"多逛几个网站"
+
+Apple 只能观察**自己域名的流量**，所以去逛 Google/知乎对它的判断没有任何帮助。真正异常的是另一件事：**这台浏览器的第一个、也是唯一的 Apple 接触点就是注册页**——普通顾客不会这样。
+
+`-journey`（默认开）在预热前加三步，并且让落地页带上**点击来源**：
+
+```text
+GET www.apple.com/                        （首次导航，site=none）
+GET www.apple.com/shop/buy-iphone         （同站，referer=上一步）
+GET support.apple.com/                    （跨站，referer=上一步）
+GET account.apple.com/account             （referer=support.apple.com，模拟点击进入）
+→ 之后才是配置 / widget / 静态资源
+```
+
+实测（2026-11-15 16:48）：设备历史里出现 `/`、`/shop/buy-iphone`、`/`，设备 cookie 里新增了 **www.apple.com** 域的 cookie。
+
+离线测试：`TestWarmupStartsWithAnAppleJourney`（顺序 + referer + 关闭时回退）。
+
 ## 3 节奏（`internal/pacing`）
 
 - 每个请求**发之前**等待，绝不在有副作用的请求之后补睡——崩溃不会留下"做了一半 + 安静"的状态。

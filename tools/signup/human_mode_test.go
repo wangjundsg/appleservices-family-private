@@ -28,6 +28,10 @@ func (f *warmupFixture) handler(t *testing.T) http.Handler {
 		f.mu.Unlock()
 
 		switch {
+		case strings.HasPrefix(r.URL.Path, "/www/") || strings.HasPrefix(r.URL.Path, "/support/"):
+			http.SetCookie(w, &http.Cookie{Name: "journey", Value: "1", Path: "/"})
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>apple</html>"))
 		case r.URL.Path == "/account" && r.URL.RawQuery == "":
 			http.SetCookie(w, &http.Cookie{Name: "landing", Value: "1", Path: "/"})
 			w.Header().Set("Content-Type", "text/html")
@@ -70,7 +74,7 @@ func TestWarmupFollowsTheBrowserPath(t *testing.T) {
 			return nil
 		})
 
-	steps := session.runWarmup(context.Background(), pacer, 3)
+	steps := session.runWarmup(context.Background(), pacer, 3, false)
 	if len(steps) < 3 {
 		t.Fatalf("warm-up took %d steps: %+v", len(steps), steps)
 	}
@@ -158,6 +162,9 @@ func TestHumanModeFreezesPacingAndWarmup(t *testing.T) {
 	comb := &strictSignup{calls: map[string]int{}}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasPrefix(r.URL.Path, "/www/") || strings.HasPrefix(r.URL.Path, "/support/"):
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>apple</html>"))
 		case r.URL.Path == "/account" && r.URL.RawQuery == "" && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte("<html>portal</html>"))
@@ -218,5 +225,57 @@ func TestHumanModeFreezesPacingAndWarmup(t *testing.T) {
 	}
 	if again.Warmup["fetched"] != firstWarmup {
 		t.Fatalf("warm-up was repeated on resume: %v != %v", again.Warmup["fetched"], firstWarmup)
+	}
+}
+
+// The warmed browser must arrive at the account page the way a customer does:
+// from Apple's own pages, with a click-through referer — not as a cold direct
+// hit on the signup URL.
+func TestWarmupStartsWithAnAppleJourney(t *testing.T) {
+	assets := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer assets.Close()
+	fixture := &warmupFixture{asset: assets}
+	server := httptest.NewServer(fixture.handler(t))
+	defer server.Close()
+
+	session, err := newSession(SessionOptions{Base: server.URL, Locale: "en-US", Timezone: "America/New_York", Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("newSession: %v", err)
+	}
+	session.widgetKey = "test-widget"
+
+	steps := session.runWarmup(context.Background(), nil, 0, true)
+	if len(steps) < 4 {
+		t.Fatalf("journey warm-up took %d steps: %+v", len(steps), steps)
+	}
+	want := []string{"journey-home", "journey-product", "journey-support", "landing"}
+	for i, name := range want {
+		if steps[i].Step != name {
+			t.Fatalf("step %d = %s, want %s (%+v)", i, steps[i].Step, name, steps)
+		}
+	}
+
+	fixture.mu.Lock()
+	var landing *http.Request
+	for _, r := range fixture.requests {
+		if r.URL.Path == "/account" && r.URL.RawQuery == "" {
+			landing = r
+			break
+		}
+	}
+	fixture.mu.Unlock()
+	if landing == nil {
+		t.Fatal("landing was never fetched")
+	}
+	if got := landing.Header.Get("Referer"); !strings.HasSuffix(strings.TrimSuffix(got, "/"), "/support") {
+		t.Fatalf("landing referer = %q, want the support page", got)
+	}
+
+	// Without the journey the first step is the landing itself.
+	session2, _ := newSession(SessionOptions{Base: server.URL, Locale: "en-US", Timezone: "America/New_York", Timeout: 10 * time.Second})
+	session2.widgetKey = "test-widget"
+	plain := session2.runWarmup(context.Background(), nil, 0, false)
+	if len(plain) == 0 || plain[0].Step != "landing" {
+		t.Fatalf("journey disabled but first step = %+v", plain)
 	}
 }

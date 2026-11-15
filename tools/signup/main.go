@@ -95,6 +95,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	pacingMin := fs.Duration("pacing-min", 1500*time.Millisecond, "minimum wait before a request in -human mode")
 	pacingMax := fs.Duration("pacing-max", 9000*time.Millisecond, "maximum wait before a request in -human mode")
 	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
+	journey := fs.Bool("journey", true, "visit apple.com/support before the account page, with a click-through referer")
 	telemetryPath := fs.String("telemetry", "", "replay captured jslog telemetry from this capture file")
 	deviceID := fs.String("device", "", "persistent device profile id: reuse cookies and fingerprint across tasks")
 	migrateProfile := fs.Bool("migrate-profile", false, "rewrite a legacy preset alias (HelloChrome_Auto …) to its pinned preset when the version matches")
@@ -301,13 +302,13 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return fail("unsupported_phone_country")
 	}
 	if *humanMode || st.Human != nil {
-		human, err := freezeHuman(st, *humanMode, *pacingMin, *pacingMax, *warmupAssets, session)
+		human, err := freezeHuman(st, *humanMode, *pacingMin, *pacingMax, *warmupAssets, *journey, session)
 		if err != nil {
 			return fail("human_configuration_invalid")
 		}
 		pacer := pacing.New(human.Pacing, nil)
 		if st.Stage == "" || st.Warmup == nil {
-			steps := session.runWarmup(ctx, pacer, human.Assets)
+			steps := session.runWarmup(ctx, pacer, human.Assets, *journey)
 			st.Warmup = describeWarmup(steps, session.warmupCookieCount())
 			// Only skip the bootstrap walk when the warm-up actually established a
 			// usable session. A warm-up that came back with cookies but no session

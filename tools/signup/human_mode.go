@@ -13,14 +13,15 @@ import (
 // humanConfig is stored in the task state. Changing it after the first request
 // would change the rhythm of a session Apple already saw, so it is frozen.
 type humanConfig struct {
-	Pacing pacing.Config `json:"pacing"`
-	Assets int           `json:"assets"`
+	Pacing  pacing.Config `json:"pacing"`
+	Assets  int           `json:"assets"`
+	Journey bool          `json:"journey"`
 }
 
 // freezeHuman returns the task's human settings: the stored ones when the task
 // already has them, otherwise a fresh configuration derived from the task
 // identity (so the seed is stable for this task and not derived from the clock).
-func freezeHuman(st *state, enabled bool, min, max time.Duration, assets int, session *Session) (*humanConfig, error) {
+func freezeHuman(st *state, enabled bool, min, max time.Duration, assets int, journey bool, session *Session) (*humanConfig, error) {
 	if st.Human != nil {
 		return st.Human, nil
 	}
