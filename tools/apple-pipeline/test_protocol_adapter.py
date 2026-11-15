@@ -23,11 +23,13 @@ class FakeAdapter:
 
     calls = {"create": 0, "resume": 0, "cancel": 0}
     next_outcome = {"state": "waiting_input", "stage": "email-sent"}
+    last_inputs = None
 
     @classmethod
     def reset(cls, outcome=None):
         cls.calls = {"create": 0, "resume": 0, "cancel": 0}
         cls.next_outcome = outcome or {"state": "waiting_input", "stage": "email-sent"}
+        cls.last_inputs = None
 
     def create(self, job):
         FakeAdapter.calls["create"] += 1
@@ -35,11 +37,15 @@ class FakeAdapter:
 
     def resume(self, job, inputs=None):
         FakeAdapter.calls["resume"] += 1
+        FakeAdapter.last_inputs = dict(inputs or {})
         return dict(FakeAdapter.next_outcome)
 
     def cancel(self, job):
         FakeAdapter.calls["cancel"] += 1
-        return {"state": "cancelled"}
+        outcome = dict(FakeAdapter.next_outcome)
+        if outcome.get("state") != "cancelled":
+            outcome = {"state": "cancelled"}
+        return outcome
 
 
 def make_config(folder: Path, **overrides):
@@ -374,7 +380,9 @@ class BoundInputTest(unittest.TestCase):
         self.cfg = make_config(self.folder, protocol={"emailCode": str(self.code),
                                                       "phoneCode": str(self.folder / "phone-code.txt")})
         self.job = pipeline.Job(self.folder, self.cfg)
-        self.job.status.update(challenge_at=pipeline.iso())
+        # The challenge started before the code arrived, otherwise every code would
+        # be "older than the challenge" by a few milliseconds.
+        self.job.status.update(challenge_at=pipeline.iso(pipeline.time.time() - 30))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -399,3 +407,94 @@ class BoundInputTest(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError) as caught:
             self.job.read_input("email")
         self.assertEqual(caught.exception.reason, "input_outside_task")
+
+class InputClosureTest(unittest.TestCase):
+    """A resume carries the code that answers the current challenge."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        self.code = self.folder / "email-code.txt"
+        self.code.write_text("012345", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={"emailCode": str(self.code),
+                                                      "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def test_resume_receives_the_code(self):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", challenge_at=pipeline.iso(pipeline.time.time() - 30))
+        FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(FakeAdapter.last_inputs, {"email": "012345"})
+        self.assertEqual(job.status["stage"], "phone-sent")
+        # The consumed code cannot answer the next challenge.
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.read_input("email")
+        self.assertEqual(caught.exception.reason, "input_already_consumed")
+
+    def test_no_code_keeps_waiting(self):
+        self.code.unlink()
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", challenge_at=pipeline.iso())
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(FakeAdapter.last_inputs, {})
+        self.assertEqual(job.status["status"], "waiting_input")
+
+    def test_ready_clears_the_challenge(self):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", challenge_at=pipeline.iso())
+        FakeAdapter.reset({"state": "ready", "reason": "protocol_registration_complete"})
+        job.dashboard_handoff = lambda: None
+        job.protocol_step(waiting=True)
+        self.assertIsNone(job.status.get("challenge_at"))
+
+
+class CancelClosureTest(unittest.TestCase):
+    """cancel is a request; a refund needs a confirmed outcome."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder)
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _job_with_cancel(self):
+        (self.folder / "cancel.request").write_text("1", encoding="utf-8")
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", challenge_at=pipeline.iso())
+        settled = {"count": 0}
+        job.settle_number = lambda force=False: settled.__setitem__("count", settled["count"] + 1)
+        return job, settled
+
+    def test_unconfirmed_cancel_defer_the_refund(self):
+        job, settled = self._job_with_cancel()
+        FakeAdapter.reset({"state": "cancelled"})  # no outcome_confirmed
+        self.assertTrue(job.protocol_step(waiting=True))
+        self.assertEqual(job.status["status"], "needs_review")
+        self.assertEqual(job.status["reason"], "cancel_outcome_unconfirmed")
+        self.assertTrue(job.status["refund_deferred"])
+        self.assertEqual(settled["count"], 0)
+
+    def test_confirmed_cancel_allows_the_refund(self):
+        job, settled = self._job_with_cancel()
+        FakeAdapter.reset({"state": "cancelled", "outcome_confirmed": True})
+        self.assertTrue(job.protocol_step(waiting=True))
+        self.assertEqual(job.status["status"], "cancelled")
+        self.assertFalse(job.status["refund_deferred"])
+        self.assertEqual(FakeAdapter.calls["cancel"], 1)

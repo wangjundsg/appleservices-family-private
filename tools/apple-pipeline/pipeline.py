@@ -285,7 +285,10 @@ class Job:
         adapter = adapter_registry.resolve(self.cfg.get("protocol"))
         if waiting is None:
             waiting = self.status.get("status") == "waiting_input"
-        outcome = (adapter.resume(self) if waiting else adapter.create(self)) or {}
+        if (self.folder / "cancel.request").exists():
+            return self.protocol_cancel(adapter)
+        inputs = self.collect_inputs() if waiting else {}
+        outcome = (adapter.resume(self, inputs) if waiting else adapter.create(self)) or {}
         state = outcome.get("state")
         if state == "waiting_input":
             # The challenge this wait belongs to is recorded once; a code file older
@@ -296,7 +299,9 @@ class Job:
                         reason=outcome.get("reason") or "waiting_input", active=False)
             return True
         if state == "ready":
-            self.update(stage="login", status="queued", account_created=True,
+            # A new challenge gets a new timestamp; the old one must not admit an
+            # already-delivered code.
+            self.update(stage="login", status="queued", account_created=True, challenge_at=None,
                         reason=outcome.get("reason") or "protocol_registration_complete")
             return False
         raise PipelineError(outcome.get("reason") or "protocol_adapter_failed",
@@ -716,6 +721,41 @@ class Job:
         if self.panel_call("family-verify").get("ok") is not True:
             raise PipelineError("family_readback_required","needs_review")
         self.update(family_complete=True,family_role=role,reason="family_completed")
+
+    def collect_inputs(self):
+        """Gather whichever codes are ready for the current challenge.
+
+        A code that is not there yet is not an error: the job simply keeps waiting.
+        A stale or already-consumed code stops the job instead of being retried.
+        """
+        inputs = {}
+        for kind in ("email", "phone"):
+            try:
+                code = self.read_input(kind)
+            except PipelineError as error:
+                if error.reason in {"input_not_ready", "input_path_missing", "input_empty"}:
+                    continue
+                if error.reason in {"input_predates_challenge"}:
+                    continue  # an old file is not an answer to this challenge
+                raise
+            inputs[kind] = code
+        return inputs
+
+    def protocol_cancel(self, adapter):
+        """Cancel is a request, not a refund.
+
+        The adapter may only report that execution stopped. Unless the outcome is
+        confirmed, the number stays with the job and a human decides.
+        """
+        result = adapter.cancel(self) or {}
+        confirmed = result.get("state") == "cancelled" and result.get("outcome_confirmed") is True
+        if confirmed:
+            self.update(status="cancelled", stage=self.status["stage"], reason="cancelled_confirmed",
+                        refund_deferred=False)
+        else:
+            self.update(status="needs_review", stage=self.status["stage"], reason="cancel_outcome_unconfirmed",
+                        refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
+        return True
 
     def read_input(self, kind):
         """Read one verification code, bound to this task and this challenge.
