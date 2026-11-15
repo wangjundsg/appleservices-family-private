@@ -604,7 +604,8 @@ class RecoveryAdmissionTest(unittest.TestCase):
         job = pipeline.Job(self.folder, self.cfg)
         job.status.update(stage=stage, status=status, number_owned=True, number="4155550134",
                           account_created=account_created, challenge_at=pipeline.iso(pipeline.time.time() - 30),
-                          challenge_stage=stage)
+                          challenge_stage=stage, registration_started=True,
+                          reason="registration_outcome_unconfirmed")
         handoffs = {"count": 0}
 
         def handoff():
@@ -618,13 +619,22 @@ class RecoveryAdmissionTest(unittest.TestCase):
         return job, handoffs
 
     def test_unconfirmed_statuses_stay_with_the_adapter(self):
-        for status in ("running", "unknown", "needs_review"):
+        # running is an interrupted submission: it resumes. unknown and
+        # needs_review are unresolved outcomes: they stop for a human without
+        # calling the adapter at all.
+        for status, expected in (("running", "resume"), ("unknown", "review"), ("needs_review", "review")):
             with self.subTest(status):
+                FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
                 job, handoffs = self._resume(status)
                 self.assertEqual(handoffs["count"], 0, f"{status} jumped to the login handoff")
-                self.assertGreaterEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 1,
-                                        f"{status} never reached the adapter")
                 self.assertFalse(job.status.get("account_created"))
+                calls = FakeAdapter.calls["create"] + FakeAdapter.calls["resume"]
+                if expected == "review":
+                    self.assertEqual(calls, 0, f"{status} reached the adapter")
+                    self.assertEqual(job.status.get("reason"), "registration_outcome_unconfirmed" if status == "needs_review" else job.status.get("reason"))
+                else:
+                    self.assertEqual(FakeAdapter.calls["resume"], 1, "an interrupted job did not resume")
+                    self.assertEqual(FakeAdapter.calls["create"], 0, "an interrupted job created again")
 
     def test_proven_account_goes_to_handover(self):
         job, handoffs = self._resume("running", stage="email-sent", account_created=True)
@@ -661,3 +671,74 @@ class ResumeWithoutAdapterTest(unittest.TestCase):
             pipeline.Job.number = original
         self.assertEqual(caught.exception.reason, "protocol_adapter_missing")
         self.assertEqual(purchases, [], "a number was bought before the adapter check")
+
+class ExecutionPermissionTest(unittest.TestCase):
+    """Stage ownership is not execution permission."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={
+            "emailCode": str(self.folder / "email-code.txt"),
+            "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _job(self, **status):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(number_owned=True, number="4155550134", **status)
+        job.settle_number = lambda force=False: None
+        job.dashboard_handoff = lambda: (_ for _ in ()).throw(AssertionError("handoff ran"))
+        return job
+
+    def test_interrupted_running_resumes_instead_of_creating(self):
+        job = self._job(stage="email-sent", status="running", registration_started=True,
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["create"], 0, "an interrupted job started a second registration")
+        self.assertEqual(FakeAdapter.calls["resume"], 1)
+
+    def test_unknown_and_needs_review_stop_without_calling_the_adapter(self):
+        for status in ("unknown", "needs_review"):
+            with self.subTest(status):
+                FakeAdapter.reset()
+                job = self._job(stage="email-sent", status=status, registration_started=True,
+                                reason="registration_outcome_unconfirmed")
+                with self.assertRaises(pipeline.PipelineError) as caught:
+                    job.protocol_step()
+                self.assertEqual(caught.exception.state, "needs_review")
+                self.assertEqual(caught.exception.reason, "registration_outcome_unconfirmed")
+                self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0,
+                                 f"{status} reached the adapter")
+                self.assertEqual(job.status.get("reason"), "registration_outcome_unconfirmed",
+                                 "the original reason was overwritten")
+
+    def test_unresolved_intent_resumes(self):
+        job = self._job(stage="email-sent", status="running", attempts={"create": 1},
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["create"], 0)
+        self.assertEqual(FakeAdapter.calls["resume"], 1)
+
+    def test_fresh_job_creates(self):
+        job = self._job(stage="create", status="queued")
+        job.number = lambda: job.status.update(number_owned=True, number="4155550134")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["create"], 1)
+        self.assertEqual(FakeAdapter.calls["resume"], 0)
+
+    def test_confirmed_waiting_resumes(self):
+        job = self._job(stage="email-sent", status="waiting_input", registration_started=True,
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["resume"], 1)
+        self.assertEqual(FakeAdapter.calls["create"], 0)

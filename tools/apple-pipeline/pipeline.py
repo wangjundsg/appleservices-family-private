@@ -266,7 +266,7 @@ class Job:
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
 
-    def protocol_step(self, waiting=None):
+    def protocol_step(self, waiting=None, action=None):
         """One delegation to the adapter: create the first time, resume afterwards.
 
         Returns True when the job must stay waiting — the caller then leaves the
@@ -278,6 +278,14 @@ class Job:
             self.update(status="needs_review", stage=self.status["stage"], reason="number_expired",
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
             raise PipelineError("number_expired", "needs_review")
+        # Decide what this job may do before touching anything. A job whose
+        # outcome is unknown is not a job that may start over.
+        if action is None:
+            action = self.protocol_action()
+        if action == "review":
+            # Keep the reason that made this job unresolved; do not rewrite it as
+            # a waiting state and do not call the adapter at all.
+            raise PipelineError(self.status.get("reason") or "registration_outcome_unconfirmed", "needs_review")
         # Resolve first: an absent adapter must stop the job before the number is
         # bought, on a resume exactly as on a fresh run.
         adapter = adapter_registry.resolve(self.cfg.get("protocol"))
@@ -289,8 +297,12 @@ class Job:
             waiting = self.status.get("status") == "waiting_input"
         if (self.folder / "cancel.request").exists():
             return self.protocol_cancel(adapter)
-        inputs = self.collect_inputs() if waiting else {}
-        outcome = (adapter.resume(self, inputs) if waiting else adapter.create(self)) or {}
+        inputs = self.collect_inputs() if action == "resume" else {}
+        if action == "create":
+            self.update(registration_started=True, create_attempted=True)
+            outcome = adapter.create(self) or {}
+        else:
+            outcome = adapter.resume(self, inputs) or {}
         state = outcome.get("state")
         if state == "waiting_input":
             # A new stage means a new challenge: rebind the timestamp so the code
@@ -555,6 +567,11 @@ class Job:
                 # read first; otherwise a resumed job looks like a fresh create and
                 # falls through to the login handoff.
                 was_waiting = self.status.get("status") == "waiting_input"
+                # Decide before anything rewrites the status: the decision must see
+                # the persisted business state, not the stage bookkeeping.
+                action = self.protocol_action() if self.method == "protocol" else None
+                if action == "review":
+                    raise PipelineError(self.status.get("reason") or "registration_outcome_unconfirmed", "needs_review")
                 if self.method == "protocol" and (self.folder / "cancel.request").exists():
                     adapter = adapter_registry.resolve(self.cfg.get("protocol"))
                     if self.protocol_cancel(adapter):
@@ -570,7 +587,7 @@ class Job:
                     # the persisted status says: running, unknown and needs_review
                     # all mean "registration outcome not confirmed", never "go to
                     # login". Only account_created hands the job to the next stage.
-                    if self.protocol_step(waiting=was_waiting):
+                    if self.protocol_step(waiting=was_waiting, action=action):
                         return
                 elif stage == "create": self.create_with_replacement()
                 elif self.cfg.get("handoff") == "dashboard": self.dashboard_handoff()
@@ -765,6 +782,29 @@ class Job:
                                 "input_predates_challenge", "input_malformed"}:
                 return {}  # keep waiting; nothing was consumed
             raise
+
+    def protocol_action(self):
+        """What this job is allowed to do, decided from evidence only.
+
+        create  — nothing has been submitted yet
+        resume  — a submission exists and the outcome is still open
+        review  — the outcome is unknown or already flagged; a human decides
+        """
+        status = self.status.get("status")
+        attempts = self.status.get("attempts") or {}
+        intent = bool(self.status.get("registration_started") or self.status.get("create_attempted")
+                      or attempts.get("create"))
+        if status in {"unknown", "needs_review"}:
+            return "review"
+        if status == "waiting_input":
+            # Waiting on a challenge is itself the confirmation that a submission
+            # already happened; the input binding decides whether the answer fits.
+            return "resume"
+        if intent:
+            # Interrupted mid-registration: continue from the recorded operation,
+            # never by starting a second registration.
+            return "resume"
+        return "create"
 
     def protocol_cancel(self, adapter):
         """Cancel is a request, not a refund.
