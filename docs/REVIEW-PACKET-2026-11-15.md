@@ -119,6 +119,28 @@ go test ./internal/fingerprint ./internal/engine ./internal/pacing ./tools/signu
 
 ---
 
+## 4.5 跨进程续跑验收（本轮补）
+
+`TestHumanDeviceTelemetryAcrossProcesses`：把 **画像引擎 + 预热 + 节奏 + 遥测 + 设备** 五件同时打开，用三个**独立 CLI 子进程**跑完 create → 邮箱码 → 短信码 → finalize。
+
+服务端是 TLS mock（`httptest.NewTLSServer` + `-engine-insecure`），断言：
+
+| 断言 | 说明 |
+|---|---|
+| 进程 1 退出码 4 | 停在等邮箱码，而非失败 |
+| `warmup.fetched ≥ 3` | 预热真的走了落地页/配置/widget |
+| `telemetry.sent == 2` 且全程 `/jslog`+`/v2/jslogs` 合计 **2** 次 | 遥测只发一次，续跑不重放 |
+| `pacing.enabled == true` | 节奏随任务生效 |
+| `device.visits` 1 → 2 → 3 | 每次进程都记一次访问 |
+| 进程 2/3 `device.cookiesLoaded == 0` | 续跑不吃设备 cookie（以任务快照为准） |
+| 三次进程 `profile.id` 完全一致 | 画像不漂移 |
+| `POST /account` 合计 **1** 次、`POST /account/validate` **1** 次 | finalize / validate 不重放 |
+| 进程 3 `accountExists == true` | 终态可读回 |
+
+```powershell
+go test ./tools/signup -run TestHumanDeviceTelemetryAcrossProcesses -count=1 -v
+```
+
 ## 5 养护与建号（操作面）
 
 ```powershell
