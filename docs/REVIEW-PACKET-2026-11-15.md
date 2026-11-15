@@ -31,6 +31,12 @@
 
 二进制：`bin/signup.exe` 已重新构建（`go build -o .\bin\signup.exe .\tools\signup`），`go version -m` 的 `vcs.revision` 与本轮提交一致。
 
+第三轮附带修复（养护链路自查发现）：
+
+- **回执补上真实原因**：失败时把底层错误写进 `failure`（≤160 字符），`reason` 不再只有 `stage_unconfirmed`这一个是非题。
+- **预热后不再无条件跳过 Bootstrap**：只有在预热真的拿到 `scnt + sessionID` 时才跳过；否则清空并让 Bootstrap 走自己的最小头引导（旧 cookie + 旧 scnt 会让引导 404）。
+- **养护脚本的 `ok` 判定**：改为看 `receipt.ok`，并把 `mailbox_not_confirmed_available`（邮箱已被占用）视为养护成功——访问已发生，与"这个地址还能不能建号"是两件事。
+
 第三轮口径更正：
 
 - 之前说「visits.jsonl 4 条、下一次 15:45」不准确：通过养护脚本只跑过 2 次（14:57 visits=4、15:46 visits=5），更早的访问是直接 CLI 调用、不写脚本日志；定时器在 15:45 确实触发了（本条提醒即来自 `schedule-c6ba89d5…`），但**定时器的持续性仍未验证**，下一轮会贴时间戳。

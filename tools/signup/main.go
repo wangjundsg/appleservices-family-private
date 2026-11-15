@@ -307,9 +307,16 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		}
 		pacer := pacing.New(human.Pacing, nil)
 		if st.Stage == "" || st.Warmup == nil {
-			session.SkipLanding = true
 			steps := session.runWarmup(ctx, pacer, human.Assets)
 			st.Warmup = describeWarmup(steps, session.warmupCookieCount())
+			// Only skip the bootstrap walk when the warm-up actually established a
+			// usable session. A warm-up that came back with cookies but no session
+			// id must still let Bootstrap do its own (minimal-header) walk.
+			if session.scnt != "" && session.sessionID != "" {
+				session.SkipLanding = true
+			} else {
+				session.scnt, session.sessionID = "", ""
+			}
 			if err := writeState(*statePath, st); err != nil {
 				return fail("state_write_failed")
 			}
@@ -382,6 +389,15 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return answerQuestion(ctx, c, *answer, *key, *capWait, *capImage, *answerFile)
 	}
 	err = w.run(ctx, *stage, *code)
+	if err != nil && st.Failure == "" {
+		// Surface the underlying reason in the receipt: "stage_unconfirmed" alone
+		// hides whether the bootstrap, the session or the request failed.
+		message := err.Error()
+		if len(message) > 160 {
+			message = message[:160]
+		}
+		st.Failure = message
+	}
 	if *stage == "captcha" && err == nil && st.Captcha != nil {
 		err = writeCaptchaImage(*capImage, st.Captcha.image)
 	}
