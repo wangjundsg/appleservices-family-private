@@ -2,7 +2,35 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## e672f41：正常等待路径通过，异常恢复尚有两个 P1（最新）
+## e937712：归属修正通过，但未决任务被重新 create（最新）
+
+基线 `e9377126d7cc7a2cda65f674f1a877eaad0911c0`，远端一致。独立提交快照中 Python 76 项、定向 vet、Go 五包全部通过，前期等待/输入/取消/维护补充用例也通过。缺适配器恢复时不再购号；未建号任务不再误交接登录。恢复复核夹具补上明确的 create 返回字典后，原两组断言通过；这次明确计数 create 调用后发现下面的问题。
+
+**剩余 P1：unknown/needs_review/running 被当成允许重新创建。** `Job.run` 只用 waiting_input 决定 was_waiting，随后只要 account_created 不真就调用 protocol_step；第 293 行对 waiting=False 调用 adapter.create。用真实 execute("resume") 恢复已进入 email-sent、registration_started=True 的任务，分别保存 running、unknown、needs_review，三种情况均调用 create 1 次，原 registration_unconfirmed 原因随后变成 waiting_input。该调用具备重放外部副作用的风险；本轮仅记录假的 create 调用，没有执行真实建号。新增仓库测试要求这三种状态“都到过适配器”，没有约束执行动作，固化了过宽的准入规则。
+
+应分别定义阶段归属和执行许可，不能以 account_created=False 推导“可执行 create”：
+
+| 持久任务事实 | 允许的下一步 |
+| --- | --- |
+| 真正的新任务，尚无提交意图 | 完成准入与资源检查后调用 create |
+| 已保存当前挑战的 waiting_input | 同一任务、原会话调用 resume |
+| unknown / needs_review / 未完成 intent | 保留原原因，停止有副作用动作；仅明确的只读核实或人工决议可以解除 |
+| running 中断 | 检查原操作与执行器状态，按上面的等待/未决规则恢复，不能默认为新建 |
+| 已有与任务账号绑定的建号完成证据 | 幂等交接现有激活流程 |
+
+修复应在任何 begin、原因覆盖、资源操作及适配器执行之前完成准入；未决任务的 create、resume、购号、交接均为 0，原因不丢失。若增加只读 reconcile 接口，须与 create/resume 明确分离并证明不会重放。现有 signup 自身的 intent 防重放不能代替父任务的准入规则。
+
+下一步仍先关闭这一项，再接真实适配器。真实适配器可以很薄，但不能只把 exit 4 与其余退出码二分：exit 0 还需验证回执 schema、账号/状态绑定与完成证据；exit 4 需验证 waiting_input 与阶段一致；其他退出、缺回执、超时保留原状态及错误分类，不能自动换任务或重建。固定任务私密路径、跨进程恢复和取消边界也属于适配器最低契约。
+
+本机复现目录 `C:/Users/HUAWEI/AppData/Local/Temp/apple-review-e937-bbf20161c78947fd820c1da0721ad446/`，source 为独立快照：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-e937-bbf20161c78947fd820c1da0721ad446/review_admission.py
+```
+
+新增用例的 running/unknown/needs_review 三个子用例均失败；同目录 review_recovery.py、review_closure.py、review_pipeline.py、review_maintenance.py 均通过。未部署、未访问真实注册或供应商服务，未修改业务实现或其他未提交文件。
+
+## e672f41：正常等待路径通过，异常恢复尚有两个 P1（历史记录）
 
 基线 `e672f4121f423704155afa14307b2c215569f4ee`，远端一致。使用独立 git archive 快照，不混入工作区其他 dashboard 未提交修改。Python 原有 73 项测试通过；上一轮六个闭环行为已验证修复，另有此前四个边界用例和一个维护扫描用例通过。非法输入按本轮约定改为允许 `resume({})` 继续等待，因此对应复核断言调整为“适配器未收到非法值、输入未消费、仍为 waiting_input”，而非要求 resume 调用次数为零。
 
