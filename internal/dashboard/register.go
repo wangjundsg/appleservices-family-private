@@ -413,9 +413,20 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if body.Platform == "hero" {
 		api = "https://hero-sms.com/stubs/handler_api.php"
 	}
+	method, methodErr := registrationMethodFor(folder, body.RegistrationMethod)
+	if methodErr != nil {
+		return "", methodErr
+	}
+	if method == methodProtocol {
+		if err := ensureProtocolDir(folder); err != nil {
+			return "", errors.New("无法创建协议任务目录")
+		}
+	}
 	manifest := map[string]any{"job_id": id, "email": body.Email, "password": body.Password, "accept_terms": true,
-		"family":  body.Family,
-		"handoff": "dashboard", "panel_bridge": map[string]string{"url": s.URL() + "/api/register/" + id + "/handoff", "token": s.token},
+		"registration_method": method,
+		"registrationMethod":  method,
+		"family":              body.Family,
+		"handoff":             "dashboard", "panel_bridge": map[string]string{"url": s.URL() + "/api/register/" + id + "/handoff", "token": s.token},
 		"email_code_file": filepath.Join(folder, "email-code.txt"), "captcha_solver": "yes", "yescaptcha_key": os.Getenv("YESCAPTCHA_KEY"),
 		"egress_mode": body.Egress.Mode, "roxy": roxy,
 		"sms": map[string]any{"api": api, "key": key, "activation": body.Activation, "phone": body.Phone, "phonecc": body.PhoneCC, "expires_at": body.ExpiresAt.Format(time.RFC3339)}}
@@ -426,6 +437,11 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	}
 	if body.Family.Role == "organizer" || body.Family.Role == "member" {
 		manifest["account_country"] = body.Family.Region
+	}
+	if method == methodProtocol {
+		// The pipeline owns purchasing, refunds and cleanup; it hands these paths
+		// to the protocol adapter so the adapter never guesses a directory.
+		manifest["protocol"] = protocolPaths(folder)
 	}
 	if body.RetryOf != "" {
 		manifest["retry_of"] = body.RetryOf
@@ -440,27 +456,9 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if err := writeRegisterJSON(filepath.Join(folder, "panel.json"), meta); err != nil {
 		return "", errors.New("无法保存任务进度")
 	}
-	method, methodErr := registrationMethodFor(folder, body.RegistrationMethod)
-	if methodErr != nil {
-		return "", methodErr
-	}
-	manifest["registrationMethod"] = method
-	if err := writeRegisterJSON(filepath.Join(folder, "request.json"), manifest); err != nil {
-		return "", errors.New("无法保存私有任务参数")
-	}
-	var program string
-	var programArgs []string
-	if method == methodProtocol {
-		if err := ensureProtocolDir(folder); err != nil {
-			return "", errors.New("无法创建协议任务目录")
-		}
-		program, programArgs = s.registrationProgram(folder, method)
-	} else {
-		args := []string{"run", "--input", filepath.Join(folder, "request.json")}
-		if body.Automatic && s.config.AllowPurchase {
-			args = append(args, "--allow-purchase")
-		}
-		program, programArgs = s.config.Python, append([]string{filepath.Join(s.config.RepoRoot, "tools", "apple-pipeline", "pipeline.py")}, args...)
+	program, programArgs := s.registrationProgram(folder, method)
+	if body.Automatic && s.config.AllowPurchase {
+		programArgs = append(programArgs, "--allow-purchase")
 	}
 	command := exec.Command(program, programArgs...)
 	command.Dir = s.config.RepoRoot

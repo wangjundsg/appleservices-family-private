@@ -32,18 +32,30 @@ func normalizeRegistrationMethod(requested string) (string, error) {
 	}
 }
 
-// frozenRegistrationMethod reads the value already stored for a job, if any.
-func frozenRegistrationMethod(jobDir string) (string, bool) {
+// frozenRegistrationMethod reads the value already stored for a job. A manifest
+// that exists but cannot be read is an error, not a new task: silently starting
+// over would create a second registration for the same job folder.
+func frozenRegistrationMethod(jobDir string) (string, error) {
+	file := filepath.Join(jobDir, "request.json")
 	var stored struct {
 		RegistrationMethod string `json:"registrationMethod"`
 	}
-	if readRegisterJSON(filepath.Join(jobDir, "request.json"), &stored) != nil {
-		return "", false
+	if _, statErr := os.Stat(file); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", nil // no job yet
+		}
+		return "", statErr
+	}
+	if err := readRegisterJSON(file, &stored); err != nil {
+		return "", errors.New("任务清单不可读，拒绝按新任务处理")
 	}
 	if stored.RegistrationMethod == "" {
-		return methodBrowser, true
+		return methodBrowser, nil
 	}
-	return stored.RegistrationMethod, true
+	if _, err := normalizeRegistrationMethod(stored.RegistrationMethod); err != nil {
+		return "", err
+	}
+	return stored.RegistrationMethod, nil
 }
 
 // registrationMethodFor decides the method for a new job or a resumed one.
@@ -53,7 +65,11 @@ func registrationMethodFor(jobDir, requested string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if stored, ok := frozenRegistrationMethod(jobDir); ok {
+	stored, err := frozenRegistrationMethod(jobDir)
+	if err != nil {
+		return "", err
+	}
+	if stored != "" {
 		if requested != "" && requested != stored {
 			return "", errors.New("任务已冻结为 " + stored + "，不能切换到 " + requested)
 		}
@@ -68,26 +84,26 @@ func protocolStatePath(jobDir string) string {
 	return filepath.Join(jobDir, "protocol", "state.json")
 }
 
-// registrationProgram returns the executable and arguments for a job. Browser
-// jobs keep the pipeline; protocol jobs call signup.exe with explicit paths.
+// registrationProgram returns the executable and arguments for a job. The panel
+// ALWAYS drives the pipeline: the pipeline owns purchasing, refunds, cleanup and
+// cancellation, so a protocol job must not bypass it by calling signup.exe
+// directly. The method travels in the manifest and the pipeline picks the
+// adapter.
 func (s *Server) registrationProgram(jobDir, method string) (string, []string) {
-	if method == methodProtocol {
-		binary := filepath.Join(s.config.RepoRoot, "bin", "signup.exe")
-		// Every private path is named explicitly: nothing is inferable from the
-		// current directory, and two jobs never share a file.
-		args := []string{
-			"-registration-method", methodProtocol,
-			"-state", protocolStatePath(jobDir),
-			"-device-dir", filepath.Join(jobDir, "protocol", "devices"),
-			"-cap-image", filepath.Join(jobDir, "protocol", "captcha.png"),
-			"-email-code-file", filepath.Join(jobDir, "protocol", "email-code.txt"),
-			"-phone-code-file", filepath.Join(jobDir, "protocol", "phone-code.txt"),
-			"-json",
-		}
-		return binary, args
-	}
 	return s.config.Python, append([]string{filepath.Join(s.config.RepoRoot, "tools", "apple-pipeline", "pipeline.py")},
 		"run", "--input", filepath.Join(jobDir, "request.json"))
+}
+
+// protocolPaths are the private paths a protocol adapter is given explicitly.
+func protocolPaths(jobDir string) map[string]string {
+	base := filepath.Join(jobDir, "protocol")
+	return map[string]string{
+		"state":     filepath.Join(base, "state.json"),
+		"deviceDir": filepath.Join(base, "devices"),
+		"captcha":   filepath.Join(base, "captcha.png"),
+		"emailCode": filepath.Join(base, "email-code.txt"),
+		"phoneCode": filepath.Join(base, "phone-code.txt"),
+	}
 }
 
 // ensureProtocolDir creates the private directory before the executor starts.

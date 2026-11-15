@@ -48,38 +48,25 @@ func TestRegistrationMethodFreezesAtCreation(t *testing.T) {
 	}
 }
 
-// Protocol jobs get an explicit private state path and never touch the pipeline.
-func TestProtocolJobGetsItsOwnExecutor(t *testing.T) {
+// Protocol jobs still go through the pipeline: it owns purchasing, refunds,
+// cleanup and cancellation, and hands the adapter its explicit private paths.
+func TestProtocolJobRunsThroughThePipeline(t *testing.T) {
 	srv := &Server{config: Config{RepoRoot: `C:\repo`, Python: "python"}}
 	job := filepath.Join(t.TempDir(), "reg-1")
 
 	program, args := srv.registrationProgram(job, methodProtocol)
-	if !strings.HasSuffix(program, "signup.exe") {
-		t.Fatalf("protocol job runs %q", program)
+	if !strings.Contains(program, "python") || !strings.Contains(strings.Join(args, " "), "pipeline.py") {
+		t.Fatalf("protocol job bypassed the pipeline: %s %v", program, args)
 	}
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-registration-method protocol") {
-		t.Fatalf("protocol flag missing: %v", args)
-	}
-	want := filepath.Join(job, "protocol", "state.json")
-	if !strings.Contains(joined, want) {
-		t.Fatalf("explicit state path missing: %v (want %s)", args, want)
-	}
-	for _, arg := range args {
-		if strings.Contains(arg, "pipeline.py") {
-			t.Fatalf("protocol job fell back to the pipeline: %v", args)
+	paths := protocolPaths(job)
+	for _, key := range []string{"state", "deviceDir", "captcha", "emailCode", "phoneCode"} {
+		if !strings.HasPrefix(paths[key], filepath.Join(job, "protocol")) {
+			t.Fatalf("%s escapes the job directory: %s", key, paths[key])
 		}
 	}
-	// Every private artefact lives under the job's protocol directory.
-	for _, name := range []string{"devices", "captcha.png", "email-code.txt", "phone-code.txt"} {
-		if !strings.Contains(joined, filepath.Join(job, "protocol", name)) {
-			t.Fatalf("%s is not under the job's private directory: %v", name, args)
-		}
-	}
-
 	browserProgram, browserArgs := srv.registrationProgram(job, methodBrowser)
-	if !strings.Contains(browserProgram, "python") || !strings.Contains(strings.Join(browserArgs, " "), "pipeline.py") {
-		t.Fatalf("browser job no longer uses the pipeline: %s %v", browserProgram, browserArgs)
+	if program != browserProgram || strings.Join(args, " ") != strings.Join(browserArgs, " ") {
+		t.Fatalf("both paths must use the same management entry: %s %v", browserProgram, browserArgs)
 	}
 }
 
@@ -91,5 +78,30 @@ func TestProtocolDirIsPrivate(t *testing.T) {
 	info, err := os.Stat(filepath.Join(job, "protocol"))
 	if err != nil || !info.IsDir() {
 		t.Fatalf("protocol dir: %v", err)
+	}
+}
+
+// A manifest that exists but cannot be parsed must not be treated as a new task.
+func TestBrokenManifestIsNotANewTask(t *testing.T) {
+	job := t.TempDir()
+	if err := os.WriteFile(filepath.Join(job, "request.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registrationMethodFor(job, ""); err == nil {
+		t.Fatal("a broken manifest was accepted as a new task")
+	}
+	if _, err := registrationMethodFor(job, methodProtocol); err == nil {
+		t.Fatal("a broken manifest accepted a new path")
+	}
+}
+
+// A stored value this panel cannot run is refused, not echoed back.
+func TestStoredInvalidMethodIsRefused(t *testing.T) {
+	job := t.TempDir()
+	if err := writeRegisterJSON(filepath.Join(job, "request.json"), map[string]any{"registrationMethod": "carrier-pigeon"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registrationMethodFor(job, ""); err == nil {
+		t.Fatal("a stored invalid method was accepted")
 	}
 }
