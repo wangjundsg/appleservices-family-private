@@ -30,6 +30,7 @@ COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "D
              "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM"}
 
 
+import job_policy
 import protocol_adapter as adapter_registry
 
 
@@ -797,7 +798,41 @@ class Job:
                 return {}  # keep waiting; nothing was consumed
             raise
 
+    def policy_view(self):
+        """The facts the decision table needs, and nothing else."""
+        challenge = self.status.get("challenge") or {}
+        if not challenge.get("id") and self.status.get("challenge_at"):
+            challenge = {"id": self.status.get("challenge_at"),
+                         "kind": (self.status.get("challenge_stage") or "") .replace("-sent", ""),
+                         "status": "open"}
+        return {
+            "run": {"state": self.status.get("status"), "cooldown_until": self.status.get("cooldown_until")},
+            "status": self.status.get("status"),
+            "reason": self.status.get("reason"),
+            "registration_started": self.status.get("registration_started"),
+            "create_attempted": self.status.get("create_attempted"),
+            "attempts": self.status.get("attempts") or {},
+            "create_confirmed": self.status.get("create_confirmed"),
+            "operations": self.status.get("operations"),
+            "challenge": challenge,
+            "account_created": self.status.get("account_created"),
+        }
+
     def protocol_action(self):
+        """Delegates to the shared decision table (job_policy.decide).
+
+        create — nothing was submitted
+        resume — a submission is confirmed and a live challenge is bound
+        review — anything unresolved, expired, cooling down or stopped
+        done   — registration is proven and the job belongs to activation
+        """
+        decision = job_policy.decide(
+            self.policy_view(), "run", time.time(),
+            {"needs_purchase": bool(self.cfg["sms"].get("auto_purchase") and not self.status.get("number_owned"))})
+        return {"create": "create", "acquire_then_create": "create",
+                "resume": "resume", "handoff": "done"}.get(decision.action, "review")
+
+    def protocol_action_legacy(self):
         """What this job is allowed to do, decided from evidence only.
 
         create  — nothing has been submitted yet
@@ -845,6 +880,60 @@ class Job:
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
         return True
 
+    def open_challenge(self, kind, source_id=""):
+        """Start a challenge with an identity of its own.
+
+        Re-sending a code for the same stage must still be a new challenge, so the
+        identity cannot be the stage name plus a timestamp.
+        """
+        challenge = {
+            "id": hashlib.sha256(f"{self.cfg['job_id']}:{kind}:{time.time_ns()}".encode()).hexdigest()[:32],
+            "kind": kind,
+            "sent_at": iso(),
+            "status": "open",
+            "source_id": source_id,
+        }
+        self.update(challenge=challenge, challenge_at=challenge["sent_at"], challenge_stage=self.status.get("stage"))
+        return challenge
+
+    def active_challenge(self, kind):
+        challenge = self.status.get("challenge") or {}
+        if challenge.get("kind") != kind or challenge.get("status") not in {"open", "sent"}:
+            return None
+        return challenge
+
+    def input_state(self, input_id):
+        return ((self.status.get("inputs") or {}).get(input_id) or {}).get("state")
+
+    def reserve_input(self, input_id, kind):
+        """available -> reserved -> dispatch_intent -> accepted.
+
+        reserved without a dispatch intent is reclaimable after a crash; anything
+        past dispatch_intent must be verified instead of being re-sent.
+        """
+        inputs = dict(self.status.get("inputs") or {})
+        record = inputs.get(input_id) or {"kind": kind}
+        if record.get("state") in {"dispatch_intent", "accepted"}:
+            return record
+        record.update(state="reserved", run_id=self.status.get("active_run_id"), reserved_at=iso())
+        inputs[input_id] = record
+        self.update(inputs=inputs)
+        return record
+
+    def dispatch_input(self, input_id):
+        inputs = dict(self.status.get("inputs") or {})
+        record = inputs.get(input_id) or {}
+        record.update(state="dispatch_intent", dispatch_at=iso())
+        inputs[input_id] = record
+        self.update(inputs=inputs)
+
+    def accept_input(self, input_id, accepted):
+        inputs = dict(self.status.get("inputs") or {})
+        record = inputs.get(input_id) or {}
+        record.update(state="accepted" if accepted else "rejected", settled_at=iso())
+        inputs[input_id] = record
+        self.update(inputs=inputs)
+
     def read_input(self, kind):
         """Read one verification code, bound to this task and this challenge.
 
@@ -887,11 +976,33 @@ class Job:
 
     def settle_number(self, force=False):
         sms = self.cfg["sms"]
+        # At expiry the only honest next step is a read-only probe; the policy is
+        # applied afterwards, with the probe result in hand.
+        needs_probe = (not sms.get("auto_purchase") and self.status.get("number_owned")
+                       and not self.status.get("account_created") and not self.status.get("expiry_checked")
+                       and timestamp(sms.get("expires_at") or 0) <= time.time())
+        # One policy decides whether this order may be released. force is kept only
+        # for an explicit reviewer resolution and is recorded, never inferred.
+        verdict = job_policy.settlement_decision(
+            {"registration": {"outcome": "registered" if self.status.get("account_created") else "unknown"},
+             "registration_started": bool(self.status.get("registration_started")),
+             "attempts": self.status.get("attempts") or {},
+             "run": {"state": self.status.get("status")}},
+            {"id": sms.get("activation"), "state": "refund_confirmed" if self.status.get("refund_confirmed") else "owned",
+             "cost": (self.status.get("spend") or {}).get("cost")},
+            {"otp_received": bool(self.status.get("code_received")),
+             "confirmed_absent": bool(self.status.get("registration_not_applied")),
+             "evidence": self.status.get("failure")})
+        if verdict.action not in {"refund"} and not force and not needs_probe:
+            if self.status.get("number_owned") and not self.status.get("account_created"):
+                self.update(refund_deferred=True, settlement_reason=verdict.reason)
+            return
+        if force:
+            self.update(settlement_forced=True, settlement_reason="reviewer_resolution")
         # One guard for every caller (run's finally, the exception path and the
         # maintenance sweep): an unresolved job keeps its number. Only an explicit
         # confirmed cancellation may pass force=True.
-        if not force and (self.status.get("status") in {"needs_review", "waiting_input", "unknown"}
-                          or self.status.get("refund_deferred")):
+        if not force and self.status.get("status") in {"needs_review", "waiting_input", "unknown"}:
             if self.status.get("number_owned") and not self.status.get("account_created"):
                 self.update(refund_deferred=True)
             return
