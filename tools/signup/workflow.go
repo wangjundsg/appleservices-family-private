@@ -165,6 +165,14 @@ func (w *workflow) prepare(ctx context.Context) error {
 		var protocolErr *ProtocolError
 		if errors.As(err, &protocolErr) {
 			st.HTTPStatus = protocolErr.Status
+			switch protocolErr.Status {
+			case 423, 429:
+				st.Status = "rate_limited"
+				st.CooldownUntil = time.Now().Add(rateLimitCooldown)
+			}
+		}
+		if saveErr := w.save(); saveErr != nil {
+			return errors.New("state_write_failed_after_request")
 		}
 		return errors.New("preflight_unavailable")
 	}

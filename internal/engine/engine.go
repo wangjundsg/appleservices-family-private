@@ -86,16 +86,21 @@ type Options struct {
 	// Insecure disables certificate verification. It exists for the offline
 	// tests only; a production receipt records it as false.
 	Insecure bool
+	// AllowLoopbackHTTP permits plain http to 127.0.0.1/::1/localhost only. It is
+	// for offline fixtures; every other plain-http request is refused so the
+	// configured proxy cannot be bypassed.
+	AllowLoopbackHTTP bool
 }
 
 // Transport is an http.RoundTripper that talks through the profile's hello.
 type Transport struct {
-	kind     fingerprint.Kind
-	hello    string
-	proxy    string
-	timeout  time.Duration
-	insecure bool
-	rt       *http.Transport
+	kind          fingerprint.Kind
+	hello         string
+	proxy         string
+	timeout       time.Duration
+	insecure      bool
+	allowLoopback bool
+	rt            *http.Transport
 }
 
 // New builds the transport and validates that the profile's hello is reachable.
@@ -112,11 +117,12 @@ func New(opts Options) (*Transport, error) {
 		opts.Timeout = 45 * time.Second
 	}
 	t := &Transport{
-		kind:     opts.Profile.Kind,
-		hello:    hello,
-		proxy:    strings.TrimSpace(opts.ProxyURL),
-		timeout:  opts.Timeout,
-		insecure: opts.Insecure,
+		kind:          opts.Profile.Kind,
+		hello:         hello,
+		proxy:         strings.TrimSpace(opts.ProxyURL),
+		timeout:       opts.Timeout,
+		insecure:      opts.Insecure,
+		allowLoopback: opts.AllowLoopbackHTTP,
 	}
 	t.rt = &http.Transport{
 		DialTLSContext:      t.dialTLS,
@@ -129,9 +135,28 @@ func New(opts Options) (*Transport, error) {
 	return t, nil
 }
 
-// RoundTrip satisfies http.RoundTripper.
+// RoundTrip satisfies http.RoundTripper. It refuses anything that would leave the
+// configured path: the adapter only dials TLS through its own hello, so a plain
+// HTTP request would go around the proxy entirely.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != "https" {
+		if !(t.allowLoopback && isLoopbackHost(req.URL.Hostname())) {
+			return nil, fmt.Errorf("engine: refusing %s request to %s; this adapter only speaks https", req.URL.Scheme, req.URL.Host)
+		}
+	}
 	return t.rt.RoundTrip(req)
+}
+
+// CheckRedirect is installed on the http.Client by the caller: a redirect must
+// not downgrade a proxied request into a direct plaintext one.
+func CheckRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("engine: refusing redirect to %s: %s", req.URL.Scheme, req.URL)
+	}
+	if len(via) >= 10 {
+		return errors.New("engine: stopped after 10 redirects")
+	}
+	return nil
 }
 
 // CloseIdleConnections releases pooled sockets.
@@ -202,6 +227,15 @@ func (t *Transport) dialTLS(ctx context.Context, network, addr string) (net.Conn
 		return nil, fmt.Errorf("engine: server negotiated ALPN %q, but this adapter speaks http/1.1 only", got)
 	}
 	return conn, nil
+}
+
+// isLoopbackHost reports whether a host is the local machine.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // dial connects directly or through the configured proxy.

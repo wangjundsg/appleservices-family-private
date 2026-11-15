@@ -60,14 +60,22 @@ func withLock(path string, fn func() error) error {
 	var handle *os.File
 	var err error
 	deadline := time.Now().Add(5 * time.Second)
+	triedReclaim := false
 	for {
 		handle, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			break
 		}
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
-			_ = os.Remove(lockPath) // stale lock from a crashed run
-			continue
+		// A stale-looking lock is only reclaimed once, and only if the delete
+		// actually succeeds. On Windows a live holder keeps the handle open, the
+		// remove fails, and the old code looped here forever.
+		if !triedReclaim {
+			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
+				triedReclaim = true
+				if removeErr := os.Remove(lockPath); removeErr == nil {
+					continue
+				}
+			}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("device: %s is locked by another run", lockPath)

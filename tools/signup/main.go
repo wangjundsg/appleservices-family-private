@@ -51,6 +51,8 @@ type state struct {
 	Human            *humanConfig         `json:"human,omitempty"`
 	Telemetry        map[string]any       `json:"telemetry,omitempty"`
 	TelemetrySent    bool                 `json:"telemetrySent,omitempty"`
+	DeviceID         string               `json:"deviceId,omitempty"`
+	CooldownUntil    time.Time            `json:"cooldownUntil,omitempty"`
 	Warmup           map[string]any       `json:"warmup,omitempty"`
 }
 
@@ -215,12 +217,48 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return fail("session_configuration_invalid")
 	}
 	defer session.Close()
+	// Admission runs before warm-up, telemetry or any device write: a task that
+	// is already paused must not send one more request while we decide. The
+	// receipt still carries the task's own state, so a caller can tell "paused"
+	// from "broken" without reading the log.
+	if admitErr := admitTask(st, time.Now()); admitErr != nil {
+		reason := reasonOfAdmission(admitErr)
+		st.Failure = reason
+		if saveErr := writeState(*statePath, st); saveErr != nil {
+			return fail("state_write_failed")
+		}
+		receipt := map[string]any{
+			"ok": false, "stage": st.Stage, "state": st.Status, "reason": reason,
+			"accountExists": st.Created && st.Status == "ready", "created": st.Created,
+			"emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone,
+			"transport": "", "httpStatus": st.HTTPStatus,
+			"errorCodes": st.ErrorCodes, "captchaSource": st.CaptchaSource,
+			"profile": profileReceipt(st.Profile, map[string]any{}),
+		}
+		if *asJSON {
+			line, _ := json.Marshal(receipt)
+			fmt.Fprintln(out, string(line))
+		} else {
+			fmt.Fprintln(diagnostic, reason)
+		}
+		return 2
+	}
 	// Device state: a browser that has been used. Loaded before the profile so a
 	// known device keeps its fingerprint, and before warm-up so the visit starts
 	// with cookies behind it.
 	var device *deviceState
 	var cookiesLoaded int
 	var profileReused bool
+	// A task is bound to the device it was created with. Switching -device on a
+	// resume would let one task rewrite another browser's history.
+	if st.DeviceID != "" {
+		if strings.TrimSpace(*deviceID) == "" {
+			*deviceID = st.DeviceID
+		} else if *deviceID != st.DeviceID {
+			fmt.Fprintf(diagnostic, "device_mismatch: task is bound to %s, got %s\n", st.DeviceID, *deviceID)
+			return fail("device_mismatch")
+		}
+	}
 	if strings.TrimSpace(*deviceID) != "" {
 		device, err = loadDevice(*deviceDir, *deviceID, time.Now())
 		if err != nil {
@@ -236,6 +274,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		// Device cookies only seed a *fresh* task. On resume the task snapshot is
 		// newer than the device file, and mixing them would pair a fresh scnt with
 		// stale cookies.
+		if st.DeviceID == "" {
+			st.DeviceID = *deviceID
+		}
 		if deviceSeedsTask(st) {
 			cookiesLoaded, err = device.warmSession(session)
 			if err != nil {
@@ -247,10 +288,10 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	// profile engine without anyone having to remember a flag. Existing tasks
 	// (and runs that give no egress inputs) stay on the legacy path.
 	effectiveMode := *profileMode
-	// A task that was created under the profile engine keeps it. Without this a
-	// resume that omits -profile-mode silently fell back to the legacy path and
-	// the receipt still claimed the engine was applied.
-	if st.ProfileMode != "" && !visited["profile-mode"] {
+	// The stored mode always wins. A resume that passes -profile-mode legacy on a
+	// new-mode task would otherwise downgrade a submitted task; the missing-profile
+	// check below must be able to see it.
+	if st.ProfileMode != "" {
 		effectiveMode = st.ProfileMode
 	}
 	// A saved profile is authoritative: never run a profiled task as legacy.
@@ -339,6 +380,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		// Read-modify-write under one lock: a warming run and a registration run
 		// can overlap, and two separate load+save pairs would drop one visit.
 		updated, err := updateDevice(*deviceDir, *deviceID, time.Now(), func(d *deviceState) error {
+			if d.Profile != nil && st.Profile != nil && d.Profile.ID != st.Profile.ID {
+				return fmt.Errorf("device_mismatch: device %s belongs to profile %s", d.ID, d.Profile.ID)
+			}
 			d.noteVisit(paths, time.Now())
 			d.noteTask(st.Email)
 			d.captureCookies(session)
@@ -390,8 +434,15 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return answerQuestion(ctx, c, *answer, *key, *capWait, *capImage, *answerFile)
 	}
 	err = w.run(ctx, *stage, *code)
-	if err != nil && st.Failure == "" {
-		st.Failure = publicReason(err)
+	if err != nil {
+		if st.Failure == "" {
+			st.Failure = publicReason(err)
+		}
+		// Failure facts belong on disk: a restart must be able to answer "why did
+		// this stop" without a log, and must honour the same pause.
+		if saveErr := writeState(*statePath, st); saveErr != nil {
+			return fail("state_write_failed")
+		}
 	}
 	if *stage == "captcha" && err == nil && st.Captcha != nil {
 		err = writeCaptchaImage(*capImage, st.Captcha.image)
@@ -475,6 +526,10 @@ var publicReasons = map[string]bool{
 	"state_write_failed_after_request":  true,
 	"unsupported_stage":                 true,
 	"profile_blocked":                   true,
+	"task_needs_review":                 true,
+	"server_requires_cooldown":          true,
+	"task_blocked":                      true,
+	"device_mismatch":                   true,
 }
 
 // failureClass turns the numeric status into a public, de-identified class so a

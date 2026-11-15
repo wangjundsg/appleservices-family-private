@@ -16,7 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -105,7 +107,7 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 		if want := strings.TrimSpace(cfg.Kind); want != "" && want != "auto" && fingerprint.Kind(want) != profile.Kind && !(fingerprint.Kind(want) == fingerprint.KindSafari && (profile.Kind == fingerprint.KindMacSafari || profile.Kind == fingerprint.KindIOSSafari)) {
 			return nil, nil, fmt.Errorf("%w: saved profile is %s, requested %s", ErrProfileBlocked, profile.Kind, want)
 		}
-		transport, err := engine.New(engine.Options{Profile: profile, ProxyURL: proxy, Timeout: timeout, Insecure: cfg.Insecure})
+		transport, err := engine.New(engine.Options{Profile: profile, ProxyURL: proxy, Timeout: timeout, Insecure: cfg.Insecure, AllowLoopbackHTTP: loopbackBase(session.base)})
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: %v", ErrProfileBlocked, err)
 		}
@@ -152,7 +154,7 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 	if err != nil {
 		return nil, nil, err
 	}
-	transport, err := engine.New(engine.Options{Profile: profile, ProxyURL: proxy, Timeout: timeout, Insecure: cfg.Insecure})
+	transport, err := engine.New(engine.Options{Profile: profile, ProxyURL: proxy, Timeout: timeout, Insecure: cfg.Insecure, AllowLoopbackHTTP: loopbackBase(session.base)})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -162,6 +164,21 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 	st.Profile = &profile
 	st.ProfileMode = profileModeNew
 	return &profile, transport.Describe(), nil
+}
+
+// loopbackBase reports whether the session talks to an offline fixture. Only then
+// may the engine accept plain http.
+func loopbackBase(base string) bool {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // applyToSession makes the session claim the profile: identity headers, client
@@ -196,6 +213,7 @@ func applyToSession(session *Session, profile fingerprint.Profile, transport htt
 		session.client = &http.Client{}
 	}
 	session.client.Transport = transport
+	session.client.CheckRedirect = engine.CheckRedirect
 	session.engineApplied = true
 	return nil
 }
