@@ -2,7 +2,28 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## 43af8bf：面板修复通过，协议入口仍须停止误分流（最新）
+## da2bc04：协议适配器边界复核（最新，暂不接真实执行器）
+
+基线 `da2bc042895d9c02163372e3a574dec5e0f73c94`，远端一致。独立 git archive 快照中 Python 原有 52 项测试通过；本轮新增四个真实控制流边界用例均失败。没有混入工作区其他未提交修改，没有访问真实资源服务。
+
+1. **P1 / 自动购号调用错误。** `Job.run` 对无订单的 auto_purchase 任务直接调用 claim_number，但该方法只登记已有订单，立即读取 sms["activation"]；真正购买在 number → Supply.purchase 中。实测真实 claim_number 配合假的 Supply 客户端时，purchase 调用 0 次，任务落为 unknown/interrupted_or_local_error，适配器未运行。原测试把 claim_number 替换成计数 lambda，掩盖了此错误。修复应复用现有受预算控制的订单获取路径，再领取已确认的订单；未知购买结果不能重新买。
+2. **P1 / 等码恢复误交接登录。** protocol_create 将父任务 stage 改为 email-sent；恢复 Job.run 时 stage 不再是 create，handoff=dashboard 分支直接执行 dashboard_handoff。实测恢复后登录交接调用 1 次，adapter.resume 为 0。父任务的 create 阶段和协议子阶段应分别保存，恢复应路由到原适配器 resume；若暂不恢复，必须明确停住，不能转登录。即使适配器保留 stage=create，现有 create 恢复分支仍会清浏览器并转登录，需要一并按注册方式修正。
+3. **P1 / 未确认结果仍会结算号码。** 新 guard 只改 finally，但 except PipelineError 分支仍无条件 settle_number。适配器抛 needs_review 后，实测 settle 调用 1 次。自动号码的 Supply.settle 对未收码订单可能发送取消请求，因此仅跳过 finally 不足以保护未知结果。应集中判定结算准入，覆盖异常、finally、取消、维护 sweep 等全部入口；不是简单删除正常终态清理。
+4. **P2 / 双字段冲突被静默取舍。** registration_method=protocol 与 registrationMethod=browser 同时存在时 validate 仍通过；Python 用前者，面板读取后者。应只存一个规范字段，或兼容读取时验证两者一致；新建和恢复均需相同规则。
+
+交付说明与测试范围也需修正：所谓“跨进程重启”用例只是重新构造 Job 并读取 result.json，没有实际调用恢复流程；“释放邮箱”计数绑定的是 cleanup_browser，不是真实邮箱生命周期；缺适配器的异常映射测试在测试体里重写 try/except，而非调用 execute。应替换为入口级验收。适配器解析还支持 cfg.protocol.adapter，因此并非只能通过环境变量注入；配置来源边界应如实定义。
+
+下一步顺序：修复以上控制流 → 用测试适配器验证输入、有效期和取消的资源边界 → 再接真实 signup 子进程。等待到期应停止自动发码/恢复并转核实，再按已确认短信/账号/订单状态收尾；不要无限等待过期号码或自动重买。取消需区分提交前、已提交未知和已收短信，不能统一释放。适配器可用性应在新建和恢复两种入口、资源动作前都检查。
+
+本机复现目录为 `C:/Users/HUAWEI/AppData/Local/Temp/apple-review-da2-02f3d18a134c400eae7eaea2efa5af53/`，source 为提交快照：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-da2-02f3d18a134c400eae7eaea2efa5af53/review_pipeline.py
+```
+
+用例保留真实 Job.run、claim_number 和状态写入，替换适配器与资源/交接外部边界。四个失败分别对应上列四项，不能因既有测试全绿将这批边界标成已通过。
+
+## 43af8bf：面板修复通过，协议入口仍须停止误分流（历史记录）
 
 基线 `43af8bf51cd350e6d8c4b5d546960254cec7e1a5`，远端一致。本轮继续使用 git archive 独立快照，不混入工作区其他 dashboard 修改。上一轮三个补充用例全部通过：新建任务不再被错误冻结、非法持久方式拒绝、损坏 manifest 拒绝。signup/dashboard 测试、定向 vet、Python 44 项测试通过。
 
