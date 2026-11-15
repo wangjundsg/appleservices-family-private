@@ -2,7 +2,23 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## 0f37a8a：恢复与维护扫描仍有两个 P1（最新）
+## e672f41：正常等待路径通过，异常恢复尚有两个 P1（最新）
+
+基线 `e672f4121f423704155afa14307b2c215569f4ee`，远端一致。使用独立 git archive 快照，不混入工作区其他 dashboard 未提交修改。Python 原有 73 项测试通过；上一轮六个闭环行为已验证修复，另有此前四个边界用例和一个维护扫描用例通过。非法输入按本轮约定改为允许 `resume({})` 继续等待，因此对应复核断言调整为“适配器未收到非法值、输入未消费、仍为 waiting_input”，而非要求 resume 调用次数为零。
+
+**P1 / 未完成或需复核的协议任务恢复后仍进入登录。** 在真实 execute("resume") 入口，保存 stage=email-sent、account_created=False，分别设 status=running（例如等待恢复中断）、unknown、needs_review，三种情况下 dashboard_handoff 均调用 1 次。原因是 `Job.run` 仍用 stage=create 或当前 status=waiting_input 判断协议注册归属；状态一旦变化，email-sent 就被当成可交接阶段。第 541 行旧 create 恢复分支也仍会清理浏览器、切到 login，没有限定 browser。修复不能只增加一个 waiting 分支：应持久化父业务阶段/协议子阶段的明确归属；协议建号未有绑定的完成证据时，任何展示状态都不能进入激活交接。unknown/needs_review 先停止核实，running 的中断恢复由原操作记录决定，不盲目 create。保留浏览器已有行为，按方式分流恢复规则。
+
+**P1 / 已有任务缺适配器时先购买再报错。** 新建任务的适配器检查在 execute 的新建分支中，已有 input.json 恢复会跳过。protocol_step 又先执行 self.number()，再 resolve。以 create/queued 的已有任务、尚无订单、允许购买的测试配置恢复，适配器明确缺失时，假的 Supply.purchase 仍被调用 1 次。真实场景可由首次写入任务后中断、恢复时适配器配置丢失触发。应在新建与恢复共同的准入阶段确认方式一致性、任务可执行状态、适配器可用性，然后才允许账号资源占用、购买、领取或执行；缺失/加载失败统一返回受控的需复核原因，不能先产生订单。
+
+新增两组用例（第一组含三种状态）均失败。所有副作用边界均为离线替身，未发生真实登录、购号或退号。复现目录：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-e672-d1c06d7102d242d1b7759a04c7814283/`，source 为该提交快照：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-e672-d1c06d7102d242d1b7759a04c7814283/review_recovery.py
+```
+
+同目录 review_closure.py、review_pipeline.py、review_maintenance.py 均通过，分别包含 6、4、1 个用例。下一步先关闭以上恢复入口缺口，再谈真实适配器开发验收；本轮不部署、不修改业务实现，也不核验养护定时任务。
+
+## 0f37a8a：恢复与维护扫描仍有两个 P1（历史记录）
 
 基线 `0f37a8a42125e197247607c470d2fe1e64712df6`，远端一致。独立提交快照的 Python 56 项测试通过。上一轮四个补充用例原样重跑：购号路径、异常分支不结算、字段冲突三项通过；等码恢复仍失败。没有修改业务实现或混入其他未提交工作区改动。
 
