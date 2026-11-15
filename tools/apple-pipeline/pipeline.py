@@ -291,10 +291,13 @@ class Job:
         outcome = (adapter.resume(self, inputs) if waiting else adapter.create(self)) or {}
         state = outcome.get("state")
         if state == "waiting_input":
-            # The challenge this wait belongs to is recorded once; a code file older
-            # than it is a stale answer, not an answer to this challenge.
-            if not self.status.get("challenge_at"):
-                self.update(challenge_at=iso())
+            # A new stage means a new challenge: rebind the timestamp so the code
+            # from the previous stage cannot answer this one.
+            stage_now = outcome.get("stage") or self.status["stage"]
+            if self.status.get("challenge_stage") != stage_now:
+                self.update(challenge_at=iso(), challenge_stage=stage_now)
+            elif not self.status.get("challenge_at"):
+                self.update(challenge_at=iso(), challenge_stage=stage_now)
             self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
                         reason=outcome.get("reason") or "waiting_input", active=False)
             return True
@@ -302,6 +305,7 @@ class Job:
             # A new challenge gets a new timestamp; the old one must not admit an
             # already-delivered code.
             self.update(stage="login", status="queued", account_created=True, challenge_at=None,
+                        challenge_stage=None,
                         reason=outcome.get("reason") or "protocol_registration_complete")
             return False
         raise PipelineError(outcome.get("reason") or "protocol_adapter_failed",
@@ -549,7 +553,16 @@ class Job:
                 # read first; otherwise a resumed job looks like a fresh create and
                 # falls through to the login handoff.
                 was_waiting = self.status.get("status") == "waiting_input"
-                self.begin(stage)
+                if self.method == "protocol" and (self.folder / "cancel.request").exists():
+                    adapter = adapter_registry.resolve(self.cfg.get("protocol"))
+                    if self.protocol_cancel(adapter):
+                        return
+                # Waiting polls must not spend the stage budget: begin() counts one
+                # attempt per call, and a job can wait many times for one code.
+                if was_waiting or (self.method == "protocol" and stage == "create" and self.status.get("challenge_kind")):
+                    self.update(stage=stage, status="running", reason="polling")
+                else:
+                    self.begin(stage)
                 if self.method == "protocol" and (stage == "create" or was_waiting):
                     # The adapter owns the create stage and any resume of a waiting
                     # job; once it reports ready the loop continues to the next
@@ -722,24 +735,33 @@ class Job:
             raise PipelineError("family_readback_required","needs_review")
         self.update(family_complete=True,family_role=role,reason="family_completed")
 
-    def collect_inputs(self):
-        """Gather whichever codes are ready for the current challenge.
+    CODE_PATTERN = re.compile(r"^\d{6}$")
 
-        A code that is not there yet is not an error: the job simply keeps waiting.
-        A stale or already-consumed code stops the job instead of being retried.
+    def challenge_kind_for(self, stage):
+        """Which code the current stage is waiting for, if any."""
+        if stage == "email-sent":
+            return "email"
+        if stage == "phone-sent":
+            return "phone"
+        return ""
+
+    def collect_inputs(self):
+        """Read only the code the current stage is waiting for.
+
+        Reading both files would consume the SMS code during the email challenge,
+        and re-reading the email file during the phone challenge would look like a
+        replay. One challenge, one input.
         """
-        inputs = {}
-        for kind in ("email", "phone"):
-            try:
-                code = self.read_input(kind)
-            except PipelineError as error:
-                if error.reason in {"input_not_ready", "input_path_missing", "input_empty"}:
-                    continue
-                if error.reason in {"input_predates_challenge"}:
-                    continue  # an old file is not an answer to this challenge
-                raise
-            inputs[kind] = code
-        return inputs
+        kind = self.challenge_kind_for(self.status.get("stage", ""))
+        if not kind:
+            return {}
+        try:
+            return {kind: self.read_input(kind)}
+        except PipelineError as error:
+            if error.reason in {"input_not_ready", "input_path_missing", "input_empty",
+                                "input_predates_challenge", "input_malformed"}:
+                return {}  # keep waiting; nothing was consumed
+            raise
 
     def protocol_cancel(self, adapter):
         """Cancel is a request, not a refund.
@@ -781,6 +803,10 @@ class Job:
         code = path.read_text(encoding="utf-8").strip()
         if not code:
             raise PipelineError("input_empty", "waiting_input")
+        if not self.CODE_PATTERN.match(code):
+            # Shape is checked before consumption: "not-a-code" must stay readable
+            # for the next attempt instead of burning the input.
+            raise PipelineError("input_malformed", "waiting_input")
         digest = hashlib.sha256((kind + ":" + code).encode()).hexdigest()
         consumed = self.status.get("consumed_inputs") or {}
         if digest in consumed:

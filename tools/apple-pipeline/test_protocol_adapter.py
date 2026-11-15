@@ -433,10 +433,9 @@ class InputClosureTest(unittest.TestCase):
         job.protocol_step(waiting=True)
         self.assertEqual(FakeAdapter.last_inputs, {"email": "012345"})
         self.assertEqual(job.status["stage"], "phone-sent")
-        # The consumed code cannot answer the next challenge.
-        with self.assertRaises(pipeline.PipelineError) as caught:
-            job.read_input("email")
-        self.assertEqual(caught.exception.reason, "input_already_consumed")
+        # The phone stage must not re-read the email file: that would look like a
+        # replay and stop a perfectly normal chain.
+        self.assertEqual(job.collect_inputs(), {}, "the email code was read again")
 
     def test_no_code_keeps_waiting(self):
         self.code.unlink()
@@ -498,3 +497,88 @@ class CancelClosureTest(unittest.TestCase):
         self.assertEqual(job.status["status"], "cancelled")
         self.assertFalse(job.status["refund_deferred"])
         self.assertEqual(FakeAdapter.calls["cancel"], 1)
+
+class RealDispatchTest(unittest.TestCase):
+    """The findings only reproduce through run(), not through protocol_step()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={
+            "emailCode": str(self.folder / "email-code.txt"),
+            "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _job(self, **status):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(number_owned=True, number="4155550134", **status)
+        job.settle_number = lambda force=False: None
+        return job
+
+    def test_run_routes_cancel_through_the_adapter(self):
+        (self.folder / "cancel.request").write_text("1", encoding="utf-8")
+        job = self._job(stage="email-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30))
+        FakeAdapter.reset({"state": "cancelled"})
+        job.run()
+        self.assertEqual(FakeAdapter.calls["cancel"], 1, "run() never reached the adapter cancel")
+        self.assertEqual(job.status["status"], "needs_review")
+        self.assertTrue(job.status["refund_deferred"])
+
+    def test_waiting_polls_do_not_burn_the_stage_budget(self):
+        job = self._job(stage="email-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                        challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        for _ in range(3):
+            job.run()
+        self.assertLessEqual(job.status["attempts"].get("email-sent", 0), 1,
+                             "waiting polls consumed the stage budget")
+
+    def test_email_stage_does_not_consume_the_sms_code(self):
+        (self.folder / "email-code.txt").write_text("012345", encoding="utf-8")
+        (self.folder / "phone-code.txt").write_text("065432", encoding="utf-8")
+        old = pipeline.time.time() - 600
+        os.utime(self.folder / "phone-code.txt", (old, old))
+        job = self._job(stage="email-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                        challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(FakeAdapter.last_inputs, {"email": "012345"},
+                         "the SMS code was consumed during the email challenge")
+
+    def test_stale_sms_code_is_refused_after_stage_change(self):
+        (self.folder / "phone-code.txt").write_text("065432", encoding="utf-8")
+        old = pipeline.time.time() - 600
+        os.utime(self.folder / "phone-code.txt", (old, old))
+        job = self._job(stage="phone-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(), challenge_stage="phone-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(FakeAdapter.last_inputs, {}, "a stale SMS code was accepted")
+
+    def test_new_stage_rebinds_the_challenge(self):
+        job = self._job(stage="email-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(pipeline.time.time() - 300),
+                        challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(job.status["challenge_stage"], "phone-sent")
+        self.assertGreater(pipeline.timestamp(job.status["challenge_at"]), pipeline.time.time() - 60)
+
+    def test_malformed_code_is_not_consumed(self):
+        (self.folder / "email-code.txt").write_text("not-a-code", encoding="utf-8")
+        job = self._job(stage="email-sent", status="waiting_input",
+                        challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                        challenge_stage="email-sent")
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step(waiting=True)
+        self.assertEqual(FakeAdapter.last_inputs, {})
+        self.assertFalse(job.status.get("consumed_inputs"), "a malformed code was marked consumed")
