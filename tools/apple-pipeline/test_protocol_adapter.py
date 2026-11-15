@@ -215,7 +215,9 @@ class ProtocolResumeTest(unittest.TestCase):
         cfg = make_config(self.folder)
         job = pipeline.Job(self.folder, cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", account_created=False)
+                          number="4155550134", account_created=False, create_confirmed=True,
+                          operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         handoffs = {"count": 0}
 
         def handoff():
@@ -292,7 +294,8 @@ class WaitingResumeWithRealBeginTest(unittest.TestCase):
         cfg = make_config(self.folder)
         job = pipeline.Job(self.folder, cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", challenge_at=pipeline.iso())
+                          number="4155550134", create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         handoffs = {"count": 0}
 
         def handoff():
@@ -382,7 +385,7 @@ class BoundInputTest(unittest.TestCase):
         self.job = pipeline.Job(self.folder, self.cfg)
         # The challenge started before the code arrived, otherwise every code would
         # be "older than the challenge" by a few milliseconds.
-        self.job.status.update(challenge_at=pipeline.iso(pipeline.time.time() - 30))
+        self.job.status.update(create_confirmed=True, operations={"create": "succeeded"}, challenge_at=pipeline.iso(pipeline.time.time() - 30))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -428,7 +431,8 @@ class InputClosureTest(unittest.TestCase):
     def test_resume_receives_the_code(self):
         job = pipeline.Job(self.folder, self.cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", challenge_at=pipeline.iso(pipeline.time.time() - 30))
+                          number="4155550134", create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
         job.protocol_step(waiting=True)
         self.assertEqual(FakeAdapter.last_inputs, {"email": "012345"})
@@ -441,7 +445,8 @@ class InputClosureTest(unittest.TestCase):
         self.code.unlink()
         job = pipeline.Job(self.folder, self.cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", challenge_at=pipeline.iso())
+                          number="4155550134", create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
         job.protocol_step(waiting=True)
         self.assertEqual(FakeAdapter.last_inputs, {})
@@ -450,7 +455,8 @@ class InputClosureTest(unittest.TestCase):
     def test_ready_clears_the_challenge(self):
         job = pipeline.Job(self.folder, self.cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", challenge_at=pipeline.iso())
+                          number="4155550134", create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         FakeAdapter.reset({"state": "ready", "reason": "protocol_registration_complete"})
         job.dashboard_handoff = lambda: None
         job.protocol_step(waiting=True)
@@ -476,7 +482,8 @@ class CancelClosureTest(unittest.TestCase):
         (self.folder / "cancel.request").write_text("1", encoding="utf-8")
         job = pipeline.Job(self.folder, self.cfg)
         job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
-                          number="4155550134", challenge_at=pipeline.iso())
+                          number="4155550134", create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         settled = {"count": 0}
         job.settle_number = lambda force=False: settled.__setitem__("count", settled["count"] + 1)
         return job, settled
@@ -517,14 +524,18 @@ class RealDispatchTest(unittest.TestCase):
 
     def _job(self, **status):
         job = pipeline.Job(self.folder, self.cfg)
-        job.status.update(number_owned=True, number="4155550134", **status)
+        base = {"number_owned": True, "number": "4155550134", "create_confirmed": True,
+                "operations": {"create": "succeeded"},
+                "challenge_at": pipeline.iso(pipeline.time.time() - 30)}
+        base.update(status)
+        job.status.update(**base)
         job.settle_number = lambda force=False: None
         return job
 
     def test_run_routes_cancel_through_the_adapter(self):
         (self.folder / "cancel.request").write_text("1", encoding="utf-8")
         job = self._job(stage="email-sent", status="waiting_input",
-                        challenge_at=pipeline.iso(pipeline.time.time() - 30))
+                        create_confirmed=True, operations={"create": "succeeded"}, challenge_at=pipeline.iso(pipeline.time.time() - 30))
         FakeAdapter.reset({"state": "cancelled"})
         job.run()
         self.assertEqual(FakeAdapter.calls["cancel"], 1, "run() never reached the adapter cancel")
@@ -622,7 +633,7 @@ class RecoveryAdmissionTest(unittest.TestCase):
         # running is an interrupted submission: it resumes. unknown and
         # needs_review are unresolved outcomes: they stop for a human without
         # calling the adapter at all.
-        for status, expected in (("running", "resume"), ("unknown", "review"), ("needs_review", "review")):
+        for status, expected in (("running", "review"), ("unknown", "review"), ("needs_review", "review")):
             with self.subTest(status):
                 FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
                 job, handoffs = self._resume(status)
@@ -696,13 +707,15 @@ class ExecutionPermissionTest(unittest.TestCase):
         job.dashboard_handoff = lambda: (_ for _ in ()).throw(AssertionError("handoff ran"))
         return job
 
-    def test_interrupted_running_resumes_instead_of_creating(self):
+    def test_interrupted_running_without_evidence_goes_to_review(self):
+        # Intent alone does not prove the request landed: no create/resume.
         job = self._job(stage="email-sent", status="running", registration_started=True,
                         challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
-        job.protocol_step()
-        self.assertEqual(FakeAdapter.calls["create"], 0, "an interrupted job started a second registration")
-        self.assertEqual(FakeAdapter.calls["resume"], 1)
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.protocol_step()
+        self.assertEqual(caught.exception.state, "needs_review")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
 
     def test_unknown_and_needs_review_stop_without_calling_the_adapter(self):
         for status in ("unknown", "needs_review"):
@@ -719,13 +732,14 @@ class ExecutionPermissionTest(unittest.TestCase):
                 self.assertEqual(job.status.get("reason"), "registration_outcome_unconfirmed",
                                  "the original reason was overwritten")
 
-    def test_unresolved_intent_resumes(self):
+    def test_unresolved_intent_without_evidence_goes_to_review(self):
         job = self._job(stage="email-sent", status="running", attempts={"create": 1},
                         challenge_at=pipeline.iso(pipeline.time.time() - 30), challenge_stage="email-sent")
         FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
-        job.protocol_step()
-        self.assertEqual(FakeAdapter.calls["create"], 0)
-        self.assertEqual(FakeAdapter.calls["resume"], 1)
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.protocol_step()
+        self.assertEqual(caught.exception.state, "needs_review")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)
 
     def test_fresh_job_creates(self):
         job = self._job(stage="create", status="queued")
@@ -742,3 +756,79 @@ class ExecutionPermissionTest(unittest.TestCase):
         job.protocol_step()
         self.assertEqual(FakeAdapter.calls["resume"], 1)
         self.assertEqual(FakeAdapter.calls["create"], 0)
+
+class RecoveryGateTest(unittest.TestCase):
+    """The legacy recovery branch must not run for a protocol job, and intent
+    alone is not permission to resume."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={
+            "emailCode": str(self.folder / "email-code.txt"),
+            "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def test_legacy_recovery_branch_does_not_run_for_protocol(self):
+        for status in ("unknown", "needs_review"):
+            with self.subTest(status):
+                FakeAdapter.reset()
+                job = pipeline.Job(self.folder, self.cfg)
+                job.status.update(stage="create", status=status, attempts={"create": 1},
+                                  number_owned=True, number="4155550134",
+                                  registration_started=True, reason="registration_outcome_unverified")
+                cleaned = {"count": 0}
+                job.cleanup_browser = lambda: cleaned.__setitem__("count", cleaned["count"] + 1)
+                job.settle_number = lambda force=False: None
+                job.run(resume=True)
+                self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0,
+                                 f"{status} reached the adapter through the recovery flow")
+                self.assertEqual(cleaned["count"], 0, "the legacy branch cleaned a browser for a protocol job")
+                self.assertEqual(job.status.get("reason"), "registration_outcome_unverified",
+                                 "the original reason was overwritten")
+
+    def test_intent_without_evidence_goes_to_review(self):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="running", attempts={"create": 1},
+                          number_owned=True, number="4155550134", registration_started=True,
+                          reason="interrupted_or_local_error")
+        job.settle_number = lambda force=False: None
+        FakeAdapter.reset()
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.protocol_step()
+        self.assertEqual(caught.exception.state, "needs_review")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0,
+                         "an unfinished registration was resumed on intent alone")
+
+    def test_confirmed_challenge_may_resume(self):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="running", attempts={"create": 1},
+                          number_owned=True, number="4155550134", registration_started=True,
+                          create_confirmed=True, operations={"create": "succeeded"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                          challenge_stage="email-sent")
+        job.settle_number = lambda force=False: None
+        FakeAdapter.reset({"state": "waiting_input", "stage": "email-sent"})
+        job.protocol_step()
+        self.assertEqual(FakeAdapter.calls["resume"], 1)
+        self.assertEqual(FakeAdapter.calls["create"], 0)
+
+    def test_pending_operation_blocks_even_with_evidence(self):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage="email-sent", status="running", number_owned=True,
+                          number="4155550134", registration_started=True, create_confirmed=True,
+                          operations={"create": "succeeded", "phone": "intent"},
+                          challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                          challenge_stage="email-sent", reason="phone_outcome_pending")
+        job.settle_number = lambda force=False: None
+        FakeAdapter.reset()
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.protocol_step()
+        self.assertEqual(caught.exception.state, "needs_review")
+        self.assertEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 0)

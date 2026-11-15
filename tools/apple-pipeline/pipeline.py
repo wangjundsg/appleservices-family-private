@@ -313,7 +313,9 @@ class Job:
             elif not self.status.get("challenge_at"):
                 self.update(challenge_at=iso(), challenge_stage=stage_now)
             self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
-                        reason=outcome.get("reason") or "waiting_input", active=False)
+                        reason=outcome.get("reason") or "waiting_input", active=False,
+                        create_confirmed=True, operations={**(self.status.get("operations") or {}),
+                                                           "create": "succeeded"})
             return True
         if state == "ready":
             # A new challenge gets a new timestamp; the old one must not admit an
@@ -546,13 +548,25 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            # Protocol admission comes first, before the legacy recovery branch can
+            # clean a browser or rewrite the stage on its way past.
+            protocol_action = self.protocol_action() if self.method == "protocol" else None
+            if self.method == "protocol" and (self.folder / "cancel.request").exists():
+                # An explicit stop outranks the review gate: the operator already
+                # decided, and the adapter is the only one who can confirm what the
+                # request actually did.
+                self.protocol_cancel(adapter_registry.resolve(self.cfg.get("protocol")))
+                return
+            if protocol_action == "review":
+                raise PipelineError(self.status.get("reason") or "registration_outcome_unverified", "needs_review")
             # Browser jobs claim the activation here; protocol jobs do it inside
             # protocol_step so the purchase and the claim stay together.
             if (self.method != "protocol" and self.status["stage"] == "create"
                     and self.cfg["sms"].get("activation") and not self.status.get("number_owned")):
                 self.claim_number()
             stage = self.status["stage"]
-            if resume and stage == "create" and self.status["attempts"].get("create"):
+            if (self.method != "protocol" and resume and stage == "create"
+                    and self.status["attempts"].get("create")):
                 self.cleanup_browser()
                 if self.status["status"] not in {"failed", "usage"}:
                     if not self.cfg["sms"].get("activation"):
@@ -790,21 +804,30 @@ class Job:
         resume  — a submission exists and the outcome is still open
         review  — the outcome is unknown or already flagged; a human decides
         """
+        if self.status.get("account_created"):
+            return "done"  # registration is proven; the job belongs to the next stage
         status = self.status.get("status")
         attempts = self.status.get("attempts") or {}
         intent = bool(self.status.get("registration_started") or self.status.get("create_attempted")
-                      or attempts.get("create"))
+                      or attempts.get("create") or status == "waiting_input")
         if status in {"unknown", "needs_review"}:
             return "review"
-        if status == "waiting_input":
-            # Waiting on a challenge is itself the confirmation that a submission
-            # already happened; the input binding decides whether the answer fits.
+        pending = [key for key, value in (self.status.get("operations") or {}).items()
+                   if value not in {"succeeded", ""}]
+        if pending:
+            return "review"
+        if not intent:
+            return "create"
+        # Intent proves a request was *started*, not that it landed. Resuming needs
+        # completion evidence plus a live challenge; without both, a human checks.
+        # A persisted waiting state was written by the adapter, so it is itself
+        # evidence that a submission happened; an interrupted "running" needs the
+        # explicit create_confirmed marker.
+        confirmed = bool(self.status.get("create_confirmed") or status == "waiting_input")
+        challenge = self.status.get("challenge_at") and self.status.get("challenge_stage") == self.status.get("stage")
+        if confirmed and challenge:
             return "resume"
-        if intent:
-            # Interrupted mid-registration: continue from the recorded operation,
-            # never by starting a second registration.
-            return "resume"
-        return "create"
+        return "review"
 
     def protocol_cancel(self, adapter):
         """Cancel is a request, not a refund.
