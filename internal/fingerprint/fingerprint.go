@@ -458,6 +458,12 @@ func Validate(p Profile, engine Capability) error {
 		if !engine.Supports(p.Engine.Name) {
 			return fmt.Errorf("profile: engine %s cannot emulate %s", engine.Name, p.Engine.Name)
 		}
+		// Selection filters by exact preset version; a restored profile has to be
+		// held to the same rule, or an old档案 (Safari 15.3 riding the 16.0 preset)
+		// would be waved through on resume.
+		if want, ok := engine.HelloVersions[p.Engine.Name]; ok && want != p.BrowserVersion {
+			return fmt.Errorf("profile: hello %s poses as %s but the profile claims %s", p.Engine.Name, want, p.BrowserVersion)
+		}
 	}
 	if signatureOf(p) != p.Signature {
 		return errors.New("profile: signature mismatch (content was modified)")
@@ -472,6 +478,58 @@ func (p Profile) MajorHint() int {
 		return p.Major
 	}
 	return 0
+}
+
+// LegacyAliases are the unversioned preset names earlier builds wrote into
+// profiles. They are not accepted on restore: an alias follows the library
+// upgrade, so a profile minted as "Auto" no longer means anything specific.
+var LegacyAliases = map[string]string{
+	"HelloChrome_Auto":  "chrome",
+	"HelloFirefox_Auto": "firefox",
+	"HelloSafari_Auto":  "mac_safari",
+	"HelloIOS_Auto":     "ios_safari",
+}
+
+// MigrateLegacyProfile rewrites an alias to the pinned preset for the profile's
+// exact version. It only succeeds when a preset with that version exists, and
+// the caller must persist the result: nothing here is silent.
+func MigrateLegacyProfile(p Profile, engine Capability) (Profile, error) {
+	kind, ok := LegacyAliases[p.Engine.Name]
+	if !ok {
+		return Profile{}, fmt.Errorf("profile: %s is not a legacy alias", p.Engine.Name)
+	}
+	if kind != string(p.Kind) {
+		return Profile{}, fmt.Errorf("profile: alias %s belongs to %s, profile is %s", p.Engine.Name, kind, p.Kind)
+	}
+	for hello, version := range engine.HelloVersions {
+		if version != p.BrowserVersion {
+			continue
+		}
+		if !engine.Supports(hello) {
+			continue
+		}
+		// Only pair with a preset of the same family.
+		if len(hello) >= len("Hello") && containsKind(hello, kind) {
+			p.Engine = EngineHello{Name: hello, Minimum: p.Engine.Minimum}
+			p.Signature = signatureOf(p)
+			return p, nil
+		}
+	}
+	return Profile{}, fmt.Errorf("profile: no pinned preset for %s %s; refusing to re-roll the fingerprint", p.Kind, p.BrowserVersion)
+}
+
+func containsKind(hello, kind string) bool {
+	switch kind {
+	case "chrome":
+		return strings.Contains(hello, "Chrome")
+	case "firefox":
+		return strings.Contains(hello, "Firefox")
+	case "mac_safari":
+		return strings.Contains(hello, "Safari")
+	case "ios_safari":
+		return strings.Contains(hello, "IOS")
+	}
+	return false
 }
 
 // Signature is the exported form, used by the task state to detect tampering.

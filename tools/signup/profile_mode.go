@@ -36,6 +36,10 @@ type profileConfig struct {
 	EgressCountry string
 	EgressSource  string
 	Insecure      bool
+	// MigrateLegacy rewrites an unversioned preset alias (HelloChrome_Auto …) to
+	// the pinned preset for the profile's exact version. Off by default: a
+	// migration must be an explicit act, never a side effect of running.
+	MigrateLegacy bool
 }
 
 // ErrProfileBlocked means the task must stop and be reviewed by a human; it is
@@ -71,6 +75,7 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 	}
 
 	cap := engine.Capabilities()
+	migratedNote := ""
 
 	// Frozen profile: verify, never re-select.
 	if st.Profile != nil {
@@ -79,7 +84,17 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 			return nil, nil, fmt.Errorf("%w: saved profile signature mismatch", ErrProfileBlocked)
 		}
 		if err := fingerprint.Validate(profile, cap); err != nil {
-			return nil, nil, fmt.Errorf("%w: saved profile is invalid: %v", ErrProfileBlocked, err)
+			if _, legacy := fingerprint.LegacyAliases[profile.Engine.Name]; legacy && cfg.MigrateLegacy {
+				migrated, migrateErr := fingerprint.MigrateLegacyProfile(profile, cap)
+				if migrateErr != nil {
+					return nil, nil, fmt.Errorf("%w: %v", ErrProfileBlocked, migrateErr)
+				}
+				profile = migrated
+				st.Profile = &profile
+				migratedNote = migrated.Engine.Name
+			} else {
+				return nil, nil, fmt.Errorf("%w: saved profile is invalid: %v", ErrProfileBlocked, err)
+			}
 		}
 		if want := strings.TrimSpace(cfg.Kind); want != "" && want != "auto" && fingerprint.Kind(want) != profile.Kind && !(fingerprint.Kind(want) == fingerprint.KindSafari && (profile.Kind == fingerprint.KindMacSafari || profile.Kind == fingerprint.KindIOSSafari)) {
 			return nil, nil, fmt.Errorf("%w: saved profile is %s, requested %s", ErrProfileBlocked, profile.Kind, want)
@@ -92,7 +107,12 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 			return nil, nil, err
 		}
 		st.ProfileMode = profileModeNew
-		return &profile, transport.Describe(), nil
+		describe := transport.Describe()
+		if migratedNote != "" {
+			describe["migratedFrom"] = "HelloAlias"
+			describe["migratedTo"] = migratedNote
+		}
+		return &profile, describe, nil
 	}
 
 	// No profile yet: a task with intent must not mint one.

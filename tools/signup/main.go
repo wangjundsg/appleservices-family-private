@@ -97,6 +97,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
 	telemetryPath := fs.String("telemetry", "", "replay captured jslog telemetry from this capture file")
 	deviceID := fs.String("device", "", "persistent device profile id: reuse cookies and fingerprint across tasks")
+	migrateProfile := fs.Bool("migrate-profile", false, "rewrite a legacy preset alias (HelloChrome_Auto …) to its pinned preset when the version matches")
 	deviceDir := fs.String("device-dir", ".cache/devices", "directory for device records")
 	asJSON := fs.Bool("json", false, "structured redacted receipt")
 	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
@@ -265,6 +266,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		EgressCountry: *egressCountry,
 		EgressSource:  *egressSource,
 		Insecure:      *engineInsecure,
+		MigrateLegacy: *migrateProfile,
 	}, opts.Proxy, opts.Timeout)
 	if profileErr != nil {
 		fmt.Fprintln(diagnostic, profileErr)

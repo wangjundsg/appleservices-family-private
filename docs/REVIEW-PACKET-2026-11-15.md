@@ -22,6 +22,20 @@
 - 「画像、节奏、设备三处都有版本和签名」不成立。实际是：**画像**有 schema+内容签名；**设备**有 schema 版本，本轮补了设备级锁（`withLock`，30s 陈旧锁可回收）；**节奏**只有配置字段，没有版本与签名。
 - 「Edge 普通窗口通过、Chrome 无痕失败」这条对照**同时改变了浏览器与配置状态**，只能作为线索，不足以断言浏览器历史是决定性因素；而且进入邮箱验证页也不等于建号成功。原文已按此降级。
 
+## 0.00 第三轮复审修复（针对 `83d211e` 的 2 条）
+
+| # | 意见 | 处理 | 证据 |
+|---|---|---|---|
+| 1 | P2 精确版本校验只在新建时生效，恢复旧档案仍被放行 | `fingerprint.Validate` 加入 `HelloVersions` 比对：hello 声称的版本必须等于 `profile.BrowserVersion`。旧档案 `Safari 15.3 + HelloSafari_16_0` 现在续跑即 `profile_blocked` | `TestRestoredProfileIsRevalidatedForVersion`；复审者用例 `TestReviewExistingSafariProfileRechecked` 通过（`hello HelloSafari_16_0 poses as 16.0 but the profile claims 15.3`） |
+| 2 | 旧预设别名（`HelloChrome_Auto` …）兼容处理不明确 | 明确为**默认拒绝**：`HelloChrome_Auto` 等别名不在能力表内 → `profile_blocked`。需要迁移时必须显式 `-migrate-profile`，且只在**存在同版本钉死预设**时才成功，否则拒绝（**不静默重抽**）；迁移结果写进任务状态并带 `migratedFrom/migratedTo` 回执 | `TestLegacyAliasIsNotAcceptedSilently`、`TestLegacyAliasMigratesOnlyOnRequest`、`TestLegacyAliasMigrationRefusesVersionMismatch`；复审者用例 `TestReviewLegacyDeviceHello` 通过 |
+
+二进制：`bin/signup.exe` 已重新构建（`go build -o .\bin\signup.exe .\tools\signup`），`go version -m` 的 `vcs.revision` 与本轮提交一致。
+
+第三轮口径更正：
+
+- 之前说「visits.jsonl 4 条、下一次 15:45」不准确：通过养护脚本只跑过 2 次（14:57 visits=4、15:46 visits=5），更早的访问是直接 CLI 调用、不写脚本日志；定时器在 15:45 确实触发了（本条提醒即来自 `schedule-c6ba89d5…`），但**定时器的持续性仍未验证**，下一轮会贴时间戳。
+- 设备档案里的旧画像（chrome 133 + `HelloChrome_Auto`）在新版下默认阻断；本轮已用 `-migrate-profile` 显式迁移。
+
 ## 0.0 第二轮复审修复（针对 `b41c911` 的 3 条 + 夹具与文档意见）
 
 | # | 意见 | 处理 | 证据 |
