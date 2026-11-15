@@ -44,23 +44,28 @@
 
 > 定位：**实验性请求序列**。它只证明"这些请求发生过、状态被保存"，不证明 Apple 会因此放过我们。默认开启只是为了让实验默认覆盖到，不代表它是必需的养护步骤。
 
-## 2.1.1 为什么不是"多逛几个网站"
+## 2.1.1 它能做什么、不能做什么
 
-Apple 只能观察**自己域名的流量**，所以去逛 Google/知乎对它的判断没有任何帮助。真正异常的是另一件事：**这台浏览器的第一个、也是唯一的 Apple 接触点就是注册页**——普通顾客不会这样。
+Apple 能观察到的只有它自己域名上的请求与状态。把 Apple 站点之间的一次访问做成「首页 → 产品页 → 支持页 → 账户页」的顺序，只是**让请求序列多一种形状**；没有任何证据表明这个形状会改变 Apple 的判定，也没有证据表明不做它就一定失败。
 
-`-journey`（默认开）在预热前加三步，并且让落地页带上**点击来源**：
+`-journey`（默认开）在预热前加三步，并让后续页面带上一段 referer 链：
 
 ```text
 GET www.apple.com/                        （首次导航，site=none）
-GET www.apple.com/shop/buy-iphone         （同站，referer=上一步）
-GET support.apple.com/                    （跨站，referer=上一步）
-GET account.apple.com/account             （referer=support.apple.com，模拟点击进入）
+GET www.apple.com/shop/buy-iphone         （同协议同主机同端口 → same-origin）
+GET support.apple.com/                    （跨子域、同 apple.com → same-site）
+GET account.apple.com/account             （referer=support.apple.com；仍 same-site）
 → 之后才是配置 / widget / 静态资源
 ```
 
-实测（2026-11-15 16:48）：设备历史里出现 `/`、`/shop/buy-iphone`、`/`，设备 cookie 里新增了 **www.apple.com** 域的 cookie。
+两点限度写在这里，避免再被当成结论：
 
-离线测试：`TestWarmupStartsWithAnAppleJourney`（顺序 + referer + 关闭时回退）。
+- **referer 只是形状**：真实浏览器还受来源页 `Referrer-Policy` 约束（可能裁掉路径、只留 origin、甚至不发）。我们只能近似，不能复刻一次点击。
+- **`Sec-Fetch-Site` 按 fetch-metadata 语义**：同源是 `same-origin`，同站不同源是 `same-site`；只有首个导航是 `none`。
+
+实测（2026-11-15 16:48）：设备历史里出现 `/`、`/shop/buy-iphone`、`/`，设备 cookie 里新增了 **www.apple.com** 域的 cookie。这只证明请求发生、状态被保存。
+
+离线测试：`TestWarmupStartsWithAnAppleJourney`（顺序与回退）、`TestJourneyUsesSameSiteMarkers`（逐条核对 `same-origin` / `same-site`）、`TestJourneyIsFrozenWithTheTask`（随任务冻结）。
 
 ## 3 节奏（`internal/pacing`）
 

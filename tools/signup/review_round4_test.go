@@ -182,8 +182,8 @@ func TestJourneyUsesSameSiteMarkers(t *testing.T) {
 	defer fixture.mu.Unlock()
 	want := map[string]string{
 		"/www/":                "none",
-		"/www/shop/buy-iphone": "same-site",
-		"/support/":            "same-site",
+		"/www/shop/buy-iphone": "same-origin", // same scheme + host + port
+		"/support/":            "same-site",   // different subdomain, same apple.com
 	}
 	for path, site := range want {
 		var seen string

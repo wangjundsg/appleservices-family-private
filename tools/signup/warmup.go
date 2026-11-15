@@ -129,7 +129,8 @@ func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets 
 		if _, _, ok := fetch("journey-home", home, s.navigationHeaders("none", "")); ok {
 			referer = referenceURL(s.lastWarmupURL)
 		}
-		if _, _, ok := fetch("journey-product", product, s.navigationHeaders("same-site", referer)); ok {
+		// Same scheme, host and port as the homepage: same-origin, not same-site.
+		if _, _, ok := fetch("journey-product", product, s.navigationHeaders("same-origin", referer)); ok {
 			referer = referenceURL(s.lastWarmupURL)
 		}
 		if _, _, ok := fetch("journey-support", support, s.navigationHeaders("same-site", referer)); ok {
