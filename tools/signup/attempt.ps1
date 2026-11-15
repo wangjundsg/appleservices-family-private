@@ -15,12 +15,14 @@ param(
   [ValidateSet('hero', 'grizzly')][string]$Provider = 'grizzly',
   [int]$SmsCountry = 12,
   [string]$PhoneCC = 'US',
-  [double]$MaxPrice = 0.06,
+  [Nullable[decimal]]$MaxPrice = $null,
+  [switch]$AllowPurchase,
+  [string]$Proxy = $env:APPLESERVICES_SIGNUP_PROXY,
   [string]$ExitPort = '10001',
   [string]$ExitCountry = 'us',
   [string]$Locale = 'en-US',
   [string]$Tz = 'America/New_York',
-  [string]$CaptchaKey = '9f06f7c57b4d8fb2c8dd8e7731ad7a0a60d1b675147936',
+  [string]$CaptchaKey = $env:YESCAPTCHA_KEY,
   [int]$EmailWaitSeconds = 150,
   [int]$SmsWaitSeconds = 180,
   [string]$OutDir = '.cache/attempts',
@@ -28,16 +30,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# These gates precede filesystem writes, process launches and all provider calls.
+if (-not $AllowPurchase) { throw 'Purchase disabled. This runner is experimental; review the audit before using -AllowPurchase.' }
+if ($null -eq $MaxPrice -or $MaxPrice -le 0) { throw 'No agreed default price; explicitly supply a positive -MaxPrice.' }
+if ([string]::IsNullOrWhiteSpace($Proxy)) { throw 'Explicit -Proxy or APPLESERVICES_SIGNUP_PROXY is required.' }
+if ([string]::IsNullOrWhiteSpace($CaptchaKey)) { throw 'YESCAPTCHA_KEY is required.' }
+$selectedKey = if ($Provider -eq 'hero') { $env:SMS_API_KEY_HERO } else { $env:SMS_API_KEY }
+if ([string]::IsNullOrWhiteSpace($selectedKey)) { throw 'The selected SMS provider environment key is missing.' }
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $providers = @{
-  hero    = @{ api = 'https://hero-sms.com/stubs/handler_api.php'; key = '8171b57bf42dd4d468d6A12221ff129c' }
-  grizzly = @{ api = 'https://api.grizzlysms.com/stubs/handler_api.php'; key = '077656c37c8a02b8a02376f72a2a876b' }
+  hero    = @{ api = 'https://hero-sms.com/stubs/handler_api.php'; key = $env:SMS_API_KEY_HERO }
+  grizzly = @{ api = 'https://api.grizzlysms.com/stubs/handler_api.php'; key = $env:SMS_API_KEY }
 }
 $sms = $providers[$Provider]
-$proxy = "socks5h://3ddce6da3add2226e7d2__cr.$ExitCountry;sessttl.30:2805d82cb2a633dc@gw.dataimpulse.com:$ExitPort"
+$proxy = $Proxy
 
 $started = Get-Date
 $receipt = [ordered]@{
@@ -98,11 +107,13 @@ function Refund {
 function Run-Signup {
   param([string[]]$Arguments)
   $output = & $Binary @Arguments 2>&1 | Out-String
+  $processExit = $LASTEXITCODE
   $json = $null
   foreach ($line in ($output -split "`r?`n")) {
     if ($line.Trim().StartsWith('{')) { try { $json = $line | ConvertFrom-Json } catch { } }
   }
-  return @{ raw = $output.Trim(); json = $json }
+  if ($processExit -ne 0) { $json = [pscustomobject]@{ error = ('signup process failed (exit ' + $processExit + ')') } }
+  return @{ raw = $output.Trim(); json = $json; exitCode = $processExit }
 }
 
 # ---- 1) buy -----------------------------------------------------------------

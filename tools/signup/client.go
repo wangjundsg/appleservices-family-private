@@ -13,9 +13,8 @@
 //	X-Apple-HC               SHA1 proof of work, see hashcash.go
 //	captcha id + token       single use, from POST /captcha
 //
-// What it turned out NOT to need (measured, see docs/PURE-PROTOCOL-REGISTRAR.md):
-// X-Apple-I-FD-Client-Info / fdcBrowserData, jslog/jslogs telemetry, the
-// landing-page cookie chain, and X-Apple-Api-Key.
+// Preflight/captcha responses do not establish which inputs are required for
+// registration. See docs/PROTOCOL-SIGNUP-AUDIT-2026-11-15.md for evidence limits.
 package main
 
 import (
@@ -30,6 +29,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -76,8 +76,7 @@ type Session struct {
 	fdClientInfo string
 	lastRequest  string
 
-	// Transport switches. UseCurl is the escape hatch when Apple's edge blocks
-	// Go's TLS fingerprint (see curl_transport.go).
+	// Transport switches describe the requested engine, not server acceptance.
 	UseCurl     bool
 	SkipLanding bool
 	CHHints     bool
@@ -106,7 +105,7 @@ func newSession(opts SessionOptions) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: opts.HTTP2}
 	if strings.TrimSpace(opts.Proxy) != "" {
 		parsed, err := url.Parse(strings.TrimSpace(opts.Proxy))
 		if err != nil {
@@ -114,9 +113,7 @@ func newSession(opts SessionOptions) (*Session, error) {
 		}
 		transport.Proxy = http.ProxyURL(parsed)
 	}
-	// Apple's edge answers HTTP/2 from Go's TLS stack with a 404 error page
-	// (www.apple.com/errors/us_error.html) while the same headers over HTTP/1.1
-	// return 200. HTTP/1.1 unless the caller asks for h2 with -http2.
+	// Keep protocol selection explicit; a 404 alone does not identify its cause.
 	if !opts.HTTP2 {
 		transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
 		transport.ForceAttemptHTTP2 = false
@@ -137,6 +134,18 @@ func newSession(opts SessionOptions) (*Session, error) {
 	if opts.Timezone == "" {
 		opts.Timezone = "America/New_York"
 	}
+	if opts.FDClientInfo != "" {
+		var fd struct {
+			UserAgent string `json:"U"`
+			Locale    string `json:"L"`
+		}
+		if json.Unmarshal([]byte(opts.FDClientInfo), &fd) != nil || fd.UserAgent != opts.UserAgent || fd.Locale != opts.Locale {
+			return nil, errors.New("FD profile must be valid JSON with U/L matching the configured User-Agent and locale")
+		}
+	}
+	if opts.CHHints && (len(chromeMajor.FindStringSubmatch(opts.UserAgent)) != 2 || !strings.Contains(opts.UserAgent, "Windows NT") || strings.Contains(opts.UserAgent, "Mobile")) {
+		return nil, errors.New("client hints only support the configured Windows desktop Chrome profile; disable -ch-hints for other clients")
+	}
 	return &Session{
 		base:         strings.TrimSuffix(opts.Base, "/"),
 		portal:       portalURLFor(strings.TrimSuffix(opts.Base, "/")),
@@ -146,8 +155,12 @@ func newSession(opts SessionOptions) (*Session, error) {
 		widgetKey:    widgetKeyFallback,
 		fdClientInfo: opts.FDClientInfo,
 		client:       &http.Client{Transport: transport, Jar: jar, Timeout: opts.Timeout},
+		UseCurl:      opts.UseCurl, SkipLanding: opts.SkipLanding, CHHints: opts.CHHints, HTTP2: opts.HTTP2,
+		proxyURL: strings.TrimSpace(opts.Proxy),
 	}, nil
 }
+
+var chromeMajor = regexp.MustCompile(`Chrome/(\d+)\.`)
 
 // portalURLFor keeps the real portal for the real host and follows the test
 // server otherwise, so the offline suite exercises the same code path.
@@ -171,11 +184,11 @@ func (s *Session) headers(contentType string, hashcash bool, now time.Time) (htt
 	h.Set("X-Apple-I-Request-Context", "account")
 	h.Set("X-Apple-I-Timezone", s.timezone)
 	if s.CHHints {
-		// A Chrome UA without these is an inconsistent client: the captured
-		// browser sends them on every call (UA says 141, hint says 157; copied
-		// verbatim). Apple's edge rejects the mismatch against a non-browser TLS
-		// fingerprint, so the switch exists.
-		h.Set("Sec-Ch-Ua", `"Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"`)
+		version := chromeMajor.FindStringSubmatch(s.userAgent)
+		if len(version) != 2 {
+			return nil, errors.New("client hints require a Chrome version in User-Agent")
+		}
+		h.Set("Sec-Ch-Ua", fmt.Sprintf(`"Not-A.Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"`, version[1], version[1]))
 		h.Set("Sec-Ch-Ua-Mobile", "?0")
 		h.Set("Sec-Ch-Ua-Platform", `"Windows"`)
 		h.Set("Sec-Fetch-Dest", "empty")
@@ -226,8 +239,7 @@ func (s *Session) absorb(header http.Header) {
 	}
 }
 
-// send is the single transport switch: curl when the edge blocks Go's TLS
-// fingerprint, net/http otherwise.
+// send selects exactly one transport; it never retries through another engine.
 func (s *Session) send(ctx context.Context, method, url string, header http.Header, body []byte) (int, http.Header, []byte, error) {
 	if s.UseCurl {
 		return s.curlRoundTrip(ctx, method, url, header, body)
@@ -275,6 +287,15 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 	}
 	s.absorb(respHeader)
 	if status < 200 || status > 299 {
+		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
+	}
+	var verdict struct {
+		HasError         bool              `json:"hasError"`
+		Errors           []json.RawMessage `json:"errors"`
+		ServiceErrors    []json.RawMessage `json:"service_errors"`
+		ValidationErrors []json.RawMessage `json:"validationErrors"`
+	}
+	if json.Unmarshal(raw, &verdict) == nil && (verdict.HasError || len(verdict.Errors)+len(verdict.ServiceErrors)+len(verdict.ValidationErrors) > 0) {
 		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
 	}
 	return raw, nil
@@ -478,28 +499,17 @@ func createBody(a Account, p Phone, c *captcha, answer string) map[string]any {
 	}
 }
 
-// Create submits the form. A 200 here means Apple accepted the account and is
-// about to mail/sms the first verification code; it is the only call that
-// writes anything.
+// Create validates the submitted form. Acceptance does not prove that email,
+// phone verification or final account creation succeeded.
 func (s *Session) Create(ctx context.Context, a Account, p Phone, c *captcha, answer string) ([]byte, error) {
 	return s.do(ctx, "create", http.MethodPost, "/account/validate", createBody(a, p, c, answer), true)
 }
 
-// SendEmailCode triggers the "we mailed you a code" step. The widget uses
-// /account/verification and the contactEmail variant for the alternate-address
-// branch; the first one that answers 2xx wins.
+// SendEmailCode uses the primary email flow. Rejections must not trigger a
+// second send on the unrelated contactEmail branch.
 func (s *Session) SendEmailCode(ctx context.Context, email string) ([]byte, error) {
 	body := map[string]any{"name": email}
-	raw, err := s.do(ctx, "email-send", http.MethodPost, "/account/verification", body, false)
-	if err == nil {
-		return raw, nil
-	}
-	if pe, ok := err.(*ProtocolError); ok && pe.Status >= 400 && pe.Status < 500 {
-		if alt, altErr := s.do(ctx, "email-send", http.MethodPost, "/account/verification/contactEmail", body, false); altErr == nil {
-			return alt, nil
-		}
-	}
-	return nil, err
+	return s.do(ctx, "email-send", http.MethodPost, "/account/verification", body, false)
 }
 
 // SubmitEmailCode answers that step.
@@ -508,16 +518,7 @@ func (s *Session) SubmitEmailCode(ctx context.Context, email, code string) ([]by
 		"name":             email,
 		"verificationInfo": map[string]string{"id": "", "answer": code},
 	}
-	raw, err := s.do(ctx, "email-submit", http.MethodPut, "/account/verification", body, false)
-	if err == nil {
-		return raw, nil
-	}
-	if pe, ok := err.(*ProtocolError); ok && pe.Status >= 400 && pe.Status < 500 {
-		if alt, altErr := s.do(ctx, "email-submit", http.MethodPut, "/account/verification/contactEmail", body, false); altErr == nil {
-			return alt, nil
-		}
-	}
-	return nil, err
+	return s.do(ctx, "email-submit", http.MethodPut, "/account/verification", body, false)
 }
 
 // phoneVerification is the shared wrapper both phone steps submit.

@@ -1,5 +1,7 @@
 # 纯协议 Apple Account 注册机（无浏览器）
 
+> **2026-11-15 审查更正：以下为历史实验记录，不能作为“全链路通过”或“已排除指纹/协议问题”的证明。传输配置未生效、跨进程会话丢失及测试模型偏差见 [复核报告](PROTOCOL-SIGNUP-AUDIT-2026-11-15.md)。本轮没有确认 Apple 拒绝的根因。**
+
 日期：2026-11-15。范围：`appleservices-family-private`。实现：`tools/signup/`。
 替代对象：`tools/capture/create-account.cjs`（Roxy 指纹浏览器 + Playwright 驱动建号）。
 
@@ -237,7 +239,7 @@ go vet ./tools/signup/
 
 ## 8 首次真实建号尝试（2026-11-15 02:12–02:27）
 
-资源：hero-sms 美国号 `+1 475 996 1174`（activation `1121900853`，$0.13，20 分钟窗口）、邮箱 `meganbuchanan8225@outlook.com`（Graph 可读）。
+资源：hero-sms 美国号 `<redacted-phone>`（activation `<redacted-activation>`，$0.13，20 分钟窗口）、邮箱 `<redacted-mailbox>`（Graph 可读）。
 
 ### 8.1 结果：卡在验证码字符，其余全通
 
@@ -289,7 +291,7 @@ go vet ./tools/signup/
 
 ### 9.1 验证码：YesCaptcha 一次过
 
-key 从操作者本机会话缓存里找到（`aff22261...47585`，余额 992）。`-captcha-key` 直连后：
+key 从操作者本机会话缓存里找到（`<redacted-key>`，余额 992）。`-captcha-key` 直连后：
 
 ```
 POST /account/validate → 不再回 captchaAnswer.Invalid
@@ -307,7 +309,7 @@ POST /account/validate → 不再回 captchaAnswer.Invalid
 | 维度 | 本次取值 |
 |---|---|
 | 出口 | 本机家宽，**CN** |
-| 号码 | hero-sms `+1 774 446 0507`（**US**） |
+| 号码 | hero-sms `<redacted-phone>`（**US**） |
 | 指纹/locale | 无浏览器指纹；`en-US` / `America/New_York` |
 
 三者不同国 → `-34607001`。这不是协议错，是风控判定；`tools/signup` 的请求到此已被完整接受（前一步的 captcha 校验已通过，说明 hashcash/scnt/session/body 全部合规）。
@@ -330,7 +332,7 @@ GET /account?countryCode=USA → HTTP 404
 
 ### 9.5 止损
 
-两个号（`1121900853`、`1122191580`）全部 `setStatus=8` → `ACCESS_CANCEL`，余额 `3.3641 → 3.4941`，**$0 净支出**。
+两个号（`<redacted-activation>`、`<redacted-activation>`）全部 `setStatus=8` → `ACCESS_CANCEL`，余额 `3.3641 → 3.4941`，**$0 净支出**。
 
 ### 9.6 下一轮要什么
 

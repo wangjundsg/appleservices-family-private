@@ -1,41 +1,48 @@
-// curl transport: the escape hatch for Apple's edge.
-//
-// Measured 2026-11-15: `GET /account?countryCode=USA` answers 200 to curl and
-// 404 (www.apple.com/errors/us_error.html) to Go's crypto/tls client, from the
-// same exit IP, with the same headers and both HTTP versions. That is a TLS
-// fingerprint block, not an IP or header rule. Instead of dragging uTLS into the
-// module, the client can hand the wire to curl, which speaks OpenSSL and passes.
-//
-// Enabled with -curl. Cookies still live in the session's cookie jar: they are
-// serialized into a Netscape cookie file per call and read back afterwards, so
-// scnt/session chaining behaves exactly like the pure-Go path.
+// Optional system curl transport. Its TLS backend/capabilities depend on the
+// installed executable (inspect curl --version); this is not Chrome emulation.
+// Cookies use a separate curl jar, not the Go jar or a resumable session.
 package main
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // cookieFile returns the on-disk jar curl reads and writes.
 func (s *Session) cookieFile() string {
 	if s.curlJar == "" {
-		dir := filepath.Join(os.TempDir(), "signup-curl")
-		_ = os.MkdirAll(dir, 0o700)
-		s.curlJar = filepath.Join(dir, fmt.Sprintf("jar-%d.txt", os.Getpid()))
+		file, err := os.CreateTemp("", "signup-curl-jar-*.txt")
+		if err != nil {
+			return ""
+		}
+		s.curlJar = file.Name()
+		_ = file.Close()
 	}
 	return s.curlJar
+}
+
+func (s *Session) Close() {
+	s.client.CloseIdleConnections()
+	if s.curlJar != "" {
+		_ = os.Remove(s.curlJar)
+		s.curlJar = ""
+	}
 }
 
 // curlRoundTrip performs one request through curl.exe and normalizes the reply
 // into the same shape net/http would hand back.
 func (s *Session) curlRoundTrip(ctx context.Context, method, url string, header http.Header, body []byte) (int, http.Header, []byte, error) {
+	jar := s.cookieFile()
+	if jar == "" {
+		return 0, nil, nil, fmt.Errorf("curl: cannot create private cookie jar")
+	}
 	dir, err := os.MkdirTemp("", "signup-curl-call")
 	if err != nil {
 		return 0, nil, nil, err
@@ -45,13 +52,18 @@ func (s *Session) curlRoundTrip(ctx context.Context, method, url string, header 
 	bodyPath := filepath.Join(dir, "body.bin")
 
 	args := []string{
-		"-sS", "--max-time", "45",
+		"-sS", "--max-time", strconv.FormatFloat(s.client.Timeout.Seconds(), 'f', 3, 64),
 		"-X", method,
 		"-D", headerPath,
 		"-o", bodyPath,
 		"-A", s.userAgent,
-		"-b", s.cookieFile(),
-		"-c", s.cookieFile(),
+		"-b", jar,
+		"-c", jar,
+	}
+	if s.HTTP2 {
+		args = append(args, "--http2")
+	} else {
+		args = append(args, "--http1.1")
 	}
 	if s.proxyURL != "" {
 		args = append(args, "--proxy", s.proxyURL)
@@ -107,9 +119,13 @@ func parseCurlHeaders(raw string) (int, http.Header, error) {
 	if len(lines) == 0 {
 		return 0, nil, fmt.Errorf("curl: empty header block")
 	}
-	var status int
-	if _, err := fmt.Sscanf(strings.TrimSpace(lines[0]), "HTTP/%*s %d", &status); err != nil {
+	fields := strings.Fields(lines[0])
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "HTTP/") {
 		return 0, nil, fmt.Errorf("curl: unparsable status line %q", lines[0])
+	}
+	status, err := strconv.Atoi(fields[1])
+	if err != nil || status < 100 || status > 599 {
+		return 0, nil, fmt.Errorf("curl: invalid HTTP status")
 	}
 	header := http.Header{}
 	for _, line := range lines[1:] {
@@ -123,6 +139,3 @@ func parseCurlHeaders(raw string) (int, http.Header, error) {
 	}
 	return status, header, nil
 }
-
-// drain keeps io imported for the shared signature without changing the caller.
-var _ = io.Discard

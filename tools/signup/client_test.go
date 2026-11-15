@@ -13,10 +13,9 @@ import (
 	"time"
 )
 
-// fakeApple is the smallest server that behaves like the account widget's API:
-// it rotates scnt on every response, demands a valid hashcash stamp on the two
-// protected paths, and tracks the created account so the preflight can answer
-// used=true afterwards.
+// fakeApple tests the locally assumed contract, not Apple's actual acceptance.
+// It does not establish cross-process session continuity or the final creation
+// protocol. Production acceptance requires an independent successful trace.
 type fakeApple struct {
 	mu          sync.Mutex
 	counter     int
@@ -283,7 +282,7 @@ func TestPreflightIsReadOnlyAndUsesRotatingScnt(t *testing.T) {
 	}
 }
 
-func TestFullCreateFlowOverPlainHTTP(t *testing.T) {
+func TestClientCallsAgainstAssumedMockContract(t *testing.T) {
 	fake := newFakeApple()
 	server := httptest.NewServer(fake.handler(t))
 	defer server.Close()

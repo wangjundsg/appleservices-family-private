@@ -69,8 +69,8 @@ func main() {
 		captchaWait = flag.Duration("captcha-wait", 180*time.Second, "how long to wait for -captcha-answer-file")
 		chHints     = flag.Bool("ch-hints", true, "send Sec-Ch-Ua/Sec-Fetch-* like Chrome (some edges flag the mismatch)")
 		skipLanding = flag.Bool("skip-landing", false, "skip the portal landing page (no cookies)")
-		curlMode    = flag.Bool("curl", false, "send the wire through curl.exe (needed when Apple's edge 404s Go's TLS)")
-		http2       = flag.Bool("http2", false, "use HTTP/2 (Apple's edge 404s Go's h2 fingerprint)")
+		curlMode    = flag.Bool("curl", false, "send through installed curl.exe; no automatic fallback or browser emulation")
+		http2       = flag.Bool("http2", false, "enable HTTP/2 negotiation; curl must support it")
 		fdInfo      = flag.String("fd-client-info", "", "verbatim X-Apple-I-FD-Client-Info JSON; empty sends none")
 		asJSON      = flag.Bool("json", false, "print the stage receipt as one JSON line")
 		timeout     = flag.Duration("timeout", 45*time.Second, "per request timeout")
@@ -125,8 +125,14 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	defer session.Close()
 
-	receipt := map[string]any{"stage": *stage, "email": st.Email}
+	engine := "go-net-http"
+	if session.UseCurl {
+		engine = "system-curl"
+	}
+	receipt := map[string]any{"stage": *stage, "email": st.Email, "transport": engine,
+		"http2Requested": session.HTTP2, "clientHints": session.CHHints, "skipLanding": session.SkipLanding}
 
 	switch *stage {
 	case "preflight":
