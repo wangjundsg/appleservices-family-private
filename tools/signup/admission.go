@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -86,3 +87,11 @@ func reasonOfAdmission(err error) string {
 }
 
 var errAdmission = errors.New("admission")
+
+// effectiveBase resolves the base a session will actually use.
+func effectiveBase(base string) string {
+	if strings.TrimSpace(base) == "" {
+		return defaultBase
+	}
+	return base
+}

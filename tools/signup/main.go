@@ -183,6 +183,12 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		}
 	}
 	opts := SessionOptions{Base: *base, UserAgent: *ua, Locale: *locale, Timezone: *timezone, Proxy: *proxy, FDClientInfo: *fd, HTTP2: *h2, SkipLanding: *skip, CHHints: *ch, UseCurl: *curl, Timeout: *timeout}
+	// Certificate verification may only be disabled for an offline fixture. The
+	// check runs before any session exists, so a production target cannot be
+	// reached with verification off even by a copied test command.
+	if *engineInsecure && !loopbackBase(effectiveBase(opts.Base)) {
+		return fail("insecure_requires_offline_target")
+	}
 	if st.Session != nil {
 		saved := st.Session.Options
 		pairs := map[string][2]any{"base": {saved.Base, opts.Base}, "proxy": {saved.Proxy, opts.Proxy}, "user-agent": {saved.UserAgent, opts.UserAgent}, "locale": {saved.Locale, opts.Locale}, "tz": {saved.Timezone, opts.Timezone}, "fd-client-info": {saved.FDClientInfo, opts.FDClientInfo}, "http2": {saved.HTTP2, opts.HTTP2}, "skip-landing": {saved.SkipLanding, opts.SkipLanding}, "ch-hints": {saved.CHHints, opts.CHHints}, "curl": {saved.UseCurl, opts.UseCurl}}
@@ -536,6 +542,7 @@ var publicReasons = map[string]bool{
 	"task_blocked":                      true,
 	"device_mismatch":                   true,
 	"unresolved_operation":              true,
+	"insecure_requires_offline_target":  true,
 }
 
 // failureClass turns the numeric status into a public, de-identified class so a

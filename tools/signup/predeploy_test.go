@@ -4,7 +4,9 @@ package main
 // an offline overlay; they live here now so the guarantees stay enforced.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -266,5 +268,43 @@ func TestRefusalKeepsOriginalFailure(t *testing.T) {
 		if after.BlockedReason != "task_needs_review" {
 			t.Fatalf("resume %d did not persist the refusal: %q", i, after.BlockedReason)
 		}
+	}
+}
+
+// Disabling certificate verification is an offline-only affordance: a copied
+// TLS test command must not be able to point it at a real host.
+func TestInsecureRequiresOfflineTarget(t *testing.T) {
+	srv := httptest.NewServer(deviceFixture(t))
+	defer srv.Close()
+
+	// Production-looking -base: refused before any request (already stricter).
+	path := filepath.Join(t.TempDir(), "task.json")
+	code, receipt := invokeSignup(t, path, "https://appleid.apple.com", "-stage", "preflight", "-engine-insecure")
+	if code == 0 || receipt["reason"] != "base_override_must_be_loopback" {
+		t.Fatalf("insecure against a real host: exit=%d reason=%v", code, receipt["reason"])
+	}
+
+	// Production default base (no -base at all) with -engine-insecure: refused.
+	var out, diag bytes.Buffer
+	if rc := runCLI(context.Background(), []string{
+		"-email", "fixture@example.test", "-state", filepath.Join(t.TempDir(), "default.json"),
+		"-stage", "preflight", "-engine-insecure", "-json",
+	}, &out, &diag); rc == 0 {
+		t.Fatalf("insecure against the production base was accepted: %s", out.String())
+	} else {
+		var r map[string]any
+		_ = json.Unmarshal(out.Bytes(), &r)
+		if r["reason"] != "insecure_requires_offline_target" {
+			t.Fatalf("reason = %v, want insecure_requires_offline_target", r["reason"])
+		}
+	}
+
+	// Loopback fixture: still allowed.
+	if code, receipt := invokeSignup(t, path, srv.URL, "-stage", "preflight"); code != 0 {
+		t.Fatalf("loopback sanity: %v", receipt)
+	}
+	if code, receipt := invokeSignup(t, filepath.Join(t.TempDir(), "tls.json"), srv.URL,
+		"-stage", "preflight", "-engine-insecure"); code != 0 {
+		t.Fatalf("loopback with insecure should pass: %v", receipt)
 	}
 }
