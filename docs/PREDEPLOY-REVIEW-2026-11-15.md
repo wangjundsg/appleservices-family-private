@@ -2,7 +2,47 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## 2dca9af 复核与双路径方案决定（最新）
+## 7898145：A＋C 复核（最新，尚不能按完成验收）
+
+基线 `7898145a0ff1b3b7b5236d48529b1d97eccb3009`，远端一致。signup、dashboard 两包测试及定向 vet 通过。该提交仅修改 `tools/signup/admission.go`、`main.go` 和 `predeploy_test.go`，没有修改面板、pipeline 或文档。
+
+先记录前置修复：`b98968b` 的原外部 HTTPS 重定向 overlay 和入库同型测试均已复核通过，恢复后目标检查已移到正确位置；此前明确指出的 I3 重定向问题关闭。它与本次 A＋C 的完整性是两个独立结论。
+
+### P1：方式冻结落在了错误的层，协议执行器被标为 browser
+
+`registrationMethod` 目前只出现在 signup CLI，`internal/dashboard/register.go:24` 的 registerRequest 和 pipeline 任务尚无此字段。`signup.exe` 本身执行的是协议注册，传 browser 也不会变成浏览器流程；当前默认值却会把协议任务回执标记为 browser。旧面板任务默认 browser 的规则被错误应用到了旧 signup 协议状态。
+
+修复要求：面板任务 manifest/pipeline 配置拥有方式选择与冻结，校验输入、持久值和恢复值；旧面板任务维持 browser，旧 signup 任务仍按其真实的 protocol 语义恢复。协议执行器只处理 protocol，或明确校验父任务传入的方式，不应声称能执行 browser。未知 schema/值应拒绝，不能被当作可执行任务。
+
+### P2：旧任务及非法值的边界未覆盖
+
+三个补充用例已离线复现：
+
+- `resolveRegistrationMethod` 没区分新任务和无字段旧任务，旧文件可被显式 protocol 参数改标。该用例检验的是实现自己声明的“旧任务默认 browser”契约；重构后该契约应在面板任务层测试，不能继续错误地约束旧协议 CLI 文件。
+- `main.go:234` 在方式校验失败时仍写出整个 state。非法方式虽然返回错误，却在磁盘留下含账号、生成密码等私密字段的任务文件，违背“不建任务”的交付说明。新任务应先验证再创建；已有任务拒绝更改时也不应改写原状态。
+- 已保存 `registrationMethod=carrier-pigeon` 时，不传该参数仍返回成功，回执带这个非法值。当前仅校验 requested，没有验证 stored。
+
+### P1 / 接入缺口：C 仅改变设备默认目录
+
+`main.go:287` 只调整 device-dir；state、图形验证码输出、验证码输入等路径仍由原参数决定，没有统一归入任务 protocol 子目录。`methodDir` 仅取 state 文件的父目录；同目录下 task-a.json、task-b.json 得到同一个 protocol/devices 目录，不能独立证明任务隔离。
+
+最小落地方式：保留现有 `<panelRoot>/<jobID>/` 的管理文件与旧任务位置，由父任务为新协议执行器明确指定 `<jobDir>/protocol/state.json` 及其他必要私密输入输出路径。不要再把 state 所在目录无条件追加 protocol，造成 protocol/protocol 嵌套。目录根应由可信任务上下文确定；共享设备档案若有业务需要，应单独明确归属，不混称为任务私有产物。
+
+### 验收范围：退出码 4 目前只覆盖 CLI
+
+`TestWaitingInputKeepsTaskSessionAndPhone` 通过 `invokeSignup` 调用 CLI，验证了协议状态、号码字符串和会话续跑，但没有启动 pipeline、没有模拟接码订单、没有观察 settle/refund 调用。它不能证明管理层不会在退出码 4 后退号，也不能证明 pipeline 恢复时不会跳到登录。
+
+B＋D 的方案方向仍成立，但先修正 A＋C 的归属，再进行实际接线。可先写适配器假实现及管理层测试：明确断言等待时取消订单/释放邮箱/切到登录的调用次数都是 0；再覆盖到期、取消、重启、交接超时、激活失败。scnt 在提交邮箱验证码后变化，只能说明后续响应刷新会话，不能据此声称空闲等待期间存在会话保活。
+
+补充复现文件在本机临时目录，未修改业务实现：
+
+```powershell
+go test -overlay C:/Users/HUAWEI/AppData/Local/Temp/apple-review-789-1143e6222fb74fce98922a716386fe81/overlay.json ./tools/signup -run '^TestReview(OldPanelPolicyCannotBeOverridden|InvalidMethodDoesNotCreatePrivateState|CorruptSavedMethodIsRejected)$' -count=1 -v
+```
+
+三例在本基线均失败。源文件为同目录 signup_test.go。没有调用真实注册、接码或付费服务，没有部署或改动运行任务。
+
+## 2dca9af 复核与双路径方案决定（历史记录）
 
 已核对远端 `2dca9af3ee956858ff3f04f07d014ea2b16ac0d1`。其前置提交 `63d4723` 修复了上一节列出的未决 intent 和原始失败原因覆盖问题；本机原补充 overlay 两例全部通过。`TestInsecureRequiresOfflineTarget` 也通过。
 
