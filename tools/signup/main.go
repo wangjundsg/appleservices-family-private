@@ -19,42 +19,43 @@ import (
 )
 
 type state struct {
-	Version          int                  `json:"version"`
-	Email            string               `json:"email"`
-	Password         string               `json:"password,omitempty"`
-	FirstName        string               `json:"firstName,omitempty"`
-	LastName         string               `json:"lastName,omitempty"`
-	Birthday         string               `json:"birthday,omitempty"`
-	Country          string               `json:"country,omitempty"`
-	Language         string               `json:"language,omitempty"`
-	Phone            string               `json:"phone,omitempty"`
-	PhoneCC          string               `json:"phoneCC,omitempty"`
-	Stage            string               `json:"stage"`
-	Status           string               `json:"status"`
-	Failure          string               `json:"failure,omitempty"`
-	HTTPStatus       int                  `json:"httpStatus,omitempty"`
-	ErrorCodes       []string             `json:"errorCodes,omitempty"`
-	Created          bool                 `json:"created"`
-	EmailDone        bool                 `json:"emailVerified"`
-	PhoneDone        bool                 `json:"phoneVerified"`
-	UpdatedAt        time.Time            `json:"updatedAt"`
-	Session          *sessionState        `json:"session,omitempty"`
-	Operations       map[string]operation `json:"operations,omitempty"`
-	Body             map[string]any       `json:"body,omitempty"`
-	Captcha          *captcha             `json:"captcha,omitempty"`
-	CaptchaSource    string               `json:"captchaSource,omitempty"`
-	VerificationID   json.RawMessage      `json:"verificationId,omitempty"`
-	EmailRequestedAt time.Time            `json:"emailRequestedAt,omitempty"`
-	PhoneRequestedAt time.Time            `json:"phoneRequestedAt,omitempty"`
-	Profile          *fingerprint.Profile `json:"profile,omitempty"`
-	ProfileMode      string               `json:"profileMode,omitempty"`
-	Human            *humanConfig         `json:"human,omitempty"`
-	Telemetry        map[string]any       `json:"telemetry,omitempty"`
-	TelemetrySent    bool                 `json:"telemetrySent,omitempty"`
-	DeviceID         string               `json:"deviceId,omitempty"`
-	CooldownUntil    time.Time            `json:"cooldownUntil,omitempty"`
-	BlockedReason    string               `json:"blockedReason,omitempty"`
-	Warmup           map[string]any       `json:"warmup,omitempty"`
+	Version            int                  `json:"version"`
+	Email              string               `json:"email"`
+	Password           string               `json:"password,omitempty"`
+	FirstName          string               `json:"firstName,omitempty"`
+	LastName           string               `json:"lastName,omitempty"`
+	Birthday           string               `json:"birthday,omitempty"`
+	Country            string               `json:"country,omitempty"`
+	Language           string               `json:"language,omitempty"`
+	Phone              string               `json:"phone,omitempty"`
+	PhoneCC            string               `json:"phoneCC,omitempty"`
+	Stage              string               `json:"stage"`
+	Status             string               `json:"status"`
+	Failure            string               `json:"failure,omitempty"`
+	HTTPStatus         int                  `json:"httpStatus,omitempty"`
+	ErrorCodes         []string             `json:"errorCodes,omitempty"`
+	Created            bool                 `json:"created"`
+	EmailDone          bool                 `json:"emailVerified"`
+	PhoneDone          bool                 `json:"phoneVerified"`
+	UpdatedAt          time.Time            `json:"updatedAt"`
+	Session            *sessionState        `json:"session,omitempty"`
+	Operations         map[string]operation `json:"operations,omitempty"`
+	Body               map[string]any       `json:"body,omitempty"`
+	Captcha            *captcha             `json:"captcha,omitempty"`
+	CaptchaSource      string               `json:"captchaSource,omitempty"`
+	VerificationID     json.RawMessage      `json:"verificationId,omitempty"`
+	EmailRequestedAt   time.Time            `json:"emailRequestedAt,omitempty"`
+	PhoneRequestedAt   time.Time            `json:"phoneRequestedAt,omitempty"`
+	Profile            *fingerprint.Profile `json:"profile,omitempty"`
+	ProfileMode        string               `json:"profileMode,omitempty"`
+	Human              *humanConfig         `json:"human,omitempty"`
+	Telemetry          map[string]any       `json:"telemetry,omitempty"`
+	TelemetrySent      bool                 `json:"telemetrySent,omitempty"`
+	DeviceID           string               `json:"deviceId,omitempty"`
+	CooldownUntil      time.Time            `json:"cooldownUntil,omitempty"`
+	BlockedReason      string               `json:"blockedReason,omitempty"`
+	RegistrationMethod string               `json:"registrationMethod,omitempty"`
+	Warmup             map[string]any       `json:"warmup,omitempty"`
 }
 
 func main() { os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
@@ -98,6 +99,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	pacingMin := fs.Duration("pacing-min", 1500*time.Millisecond, "minimum wait before a request in -human mode")
 	pacingMax := fs.Duration("pacing-max", 9000*time.Millisecond, "maximum wait before a request in -human mode")
 	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
+	registrationMethod := fs.String("registration-method", "", "registration path chosen at creation: browser or protocol (frozen afterwards)")
 	journey := fs.Bool("journey", true, "visit apple.com/support before the account page, with a click-through referer")
 	telemetryPath := fs.String("telemetry", "", "replay captured jslog telemetry from this capture file")
 	deviceID := fs.String("device", "", "persistent device profile id: reuse cookies and fingerprint across tasks")
@@ -225,6 +227,16 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return fail("session_configuration_invalid")
 	}
 	defer session.Close()
+	// A + C: the registration path is chosen once, at creation, and frozen. Old
+	// tasks without the field are browser tasks; a resume that asks for another
+	// path is refused instead of switching mid-flight.
+	method, methodErr := resolveRegistrationMethod(st, *registrationMethod)
+	if methodErr != nil {
+		if saveErr := writeState(*statePath, st); saveErr != nil {
+			return fail("state_write_failed")
+		}
+		return fail(methodErr.Error())
+	}
 	// Admission runs before warm-up, telemetry or any device write: a task that
 	// is already paused must not send one more request while we decide. The
 	// receipt still carries the task's own state, so a caller can tell "paused"
@@ -239,7 +251,8 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 			return fail("state_write_failed")
 		}
 		receipt := map[string]any{
-			"ok": false, "stage": st.Stage, "state": st.Status, "reason": reason,
+			"ok": false, "registrationMethod": st.RegistrationMethod,
+			"stage": st.Stage, "state": st.Status, "reason": reason,
 			"failure": st.Failure, "blockedReason": reason,
 			"accountExists": st.Created && st.Status == "ready", "created": st.Created,
 			"emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone,
@@ -270,6 +283,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 			fmt.Fprintf(diagnostic, "device_mismatch: task is bound to %s, got %s\n", st.DeviceID, *deviceID)
 			return fail("device_mismatch")
 		}
+	}
+	if !visited["device-dir"] && method == methodProtocol {
+		*deviceDir = filepath.Join(methodDir(*statePath, method), "devices")
 	}
 	if strings.TrimSpace(*deviceID) != "" {
 		device, err = loadDevice(*deviceDir, *deviceID, time.Now())
@@ -478,7 +494,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if session.engineApplied {
 		engine = "utls"
 	}
-	receipt := map[string]any{"ok": err == nil, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}
+	receipt := map[string]any{"ok": err == nil, "registrationMethod": st.RegistrationMethod, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}
 	receipt["errorCodes"] = st.ErrorCodes
 	receipt["captchaSource"] = st.CaptchaSource
 	receipt["profile"] = profileReceipt(st.Profile, engineInfo)
@@ -512,38 +528,40 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 // Anything else is reported as stage_unconfirmed: a provider body or an internal
 // message must never reach a public receipt.
 var publicReasons = map[string]bool{
-	"bootstrap_unconfirmed":             true,
-	"bootstrap_session_missing":         true,
-	"preflight_unavailable":             true,
-	"mailbox_in_use":                    true,
-	"mailbox_rejected":                  true,
-	"password_policy_rejected":          true,
-	"captcha_answer_required":           true,
-	"captcha_request_failed":            true,
-	"captcha_out_of_order":              true,
-	"validate_out_of_order":             true,
-	"email_out_of_order":                true,
-	"phone_out_of_order":                true,
-	"finalize_out_of_order":             true,
-	"verify_out_of_order":               true,
-	"verification_code_required":        true,
-	"verification_id_missing":           true,
-	"verification_id_empty":             true,
-	"verification_id_invalid":           true,
-	"final_account_binding_unconfirmed": true,
-	"final_creation_receipt_required":   true,
-	"account_readback_unconfirmed":      true,
-	"phone_required":                    true,
-	"unsupported_phone_country":         true,
-	"state_write_failed_after_request":  true,
-	"unsupported_stage":                 true,
-	"profile_blocked":                   true,
-	"task_needs_review":                 true,
-	"server_requires_cooldown":          true,
-	"task_blocked":                      true,
-	"device_mismatch":                   true,
-	"unresolved_operation":              true,
-	"insecure_requires_offline_target":  true,
+	"bootstrap_unconfirmed":               true,
+	"bootstrap_session_missing":           true,
+	"preflight_unavailable":               true,
+	"mailbox_in_use":                      true,
+	"mailbox_rejected":                    true,
+	"password_policy_rejected":            true,
+	"captcha_answer_required":             true,
+	"captcha_request_failed":              true,
+	"captcha_out_of_order":                true,
+	"validate_out_of_order":               true,
+	"email_out_of_order":                  true,
+	"phone_out_of_order":                  true,
+	"finalize_out_of_order":               true,
+	"verify_out_of_order":                 true,
+	"verification_code_required":          true,
+	"verification_id_missing":             true,
+	"verification_id_empty":               true,
+	"verification_id_invalid":             true,
+	"final_account_binding_unconfirmed":   true,
+	"final_creation_receipt_required":     true,
+	"account_readback_unconfirmed":        true,
+	"phone_required":                      true,
+	"unsupported_phone_country":           true,
+	"state_write_failed_after_request":    true,
+	"unsupported_stage":                   true,
+	"profile_blocked":                     true,
+	"task_needs_review":                   true,
+	"server_requires_cooldown":            true,
+	"task_blocked":                        true,
+	"device_mismatch":                     true,
+	"unresolved_operation":                true,
+	"registration_method_invalid":         true,
+	"registration_method_change_rejected": true,
+	"insecure_requires_offline_target":    true,
 }
 
 // failureClass turns the numeric status into a public, de-identified class so a

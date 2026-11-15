@@ -13,6 +13,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -94,4 +95,46 @@ func effectiveBase(base string) string {
 		return defaultBase
 	}
 	return base
+}
+
+const (
+	methodBrowser  = "browser"
+	methodProtocol = "protocol"
+)
+
+var errRegistrationMethod = errors.New("registration_method_invalid")
+
+// resolveRegistrationMethod freezes the path on first use and refuses changes.
+// Old tasks (no field) are browser tasks and get the field persisted so a later
+// resume cannot quietly claim protocol.
+func resolveRegistrationMethod(st *state, requested string) (string, error) {
+	if requested != "" && requested != methodBrowser && requested != methodProtocol {
+		return "", errRegistrationMethod
+	}
+	if st.RegistrationMethod == "" {
+		chosen := requested
+		if chosen == "" {
+			chosen = methodBrowser
+		}
+		if st.RegistrationMethod != chosen {
+			st.RegistrationMethod = chosen
+		}
+		return chosen, nil
+	}
+	if requested != "" && requested != st.RegistrationMethod {
+		return st.RegistrationMethod, errMethodChange
+	}
+	return st.RegistrationMethod, nil
+}
+
+var errMethodChange = errors.New("registration_method_change_rejected")
+
+// methodDir is the private directory of one task's path: <task dir>/<method>.
+// Browser tasks keep their historical directories; nothing is migrated.
+func methodDir(statePath, method string) string {
+	dir := filepath.Dir(statePath)
+	if dir == "" || dir == "." {
+		dir = ".cache/signup"
+	}
+	return filepath.Join(dir, method)
 }

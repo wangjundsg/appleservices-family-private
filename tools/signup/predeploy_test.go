@@ -308,3 +308,138 @@ func TestInsecureRequiresOfflineTarget(t *testing.T) {
 		t.Fatalf("loopback with insecure should pass: %v", receipt)
 	}
 }
+
+// I1-A: the registration path is chosen at creation, frozen afterwards, and old
+// tasks without the field are browser tasks.
+func TestRegistrationMethodIsFrozenAtCreation(t *testing.T) {
+	srv := httptest.NewServer(deviceFixture(t))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "task.json")
+
+	// Old task without the field → browser, and the field is persisted.
+	if code, receipt := invokeSignup(t, path, srv.URL, "-stage", "preflight"); code != 0 {
+		t.Fatalf("legacy task: %v", receipt)
+	}
+	st, _ := loadState(path)
+	if st.RegistrationMethod != methodBrowser {
+		t.Fatalf("legacy task method = %q, want browser", st.RegistrationMethod)
+	}
+
+	// A protocol task, created explicitly.
+	protoPath := filepath.Join(dir, "proto.json")
+	code, receipt := invokeSignup(t, protoPath, srv.URL, "-stage", "preflight", "-registration-method", "protocol")
+	if code != 0 {
+		t.Fatalf("protocol task: %v", receipt)
+	}
+	if receipt["registrationMethod"] != methodProtocol {
+		t.Fatalf("receipt method = %v", receipt["registrationMethod"])
+	}
+
+	// Resume without the flag keeps it; asking for the other path is refused.
+	if code, receipt := invokeSignup(t, protoPath, srv.URL, "-stage", "preflight"); code != 0 {
+		t.Fatalf("resume without flag: %v", receipt)
+	}
+	code, receipt = invokeSignup(t, protoPath, srv.URL, "-stage", "preflight", "-registration-method", "browser")
+	if code == 0 || receipt["reason"] != "registration_method_change_rejected" {
+		t.Fatalf("path switch accepted: exit=%d reason=%v", code, receipt["reason"])
+	}
+	if code, receipt := invokeSignup(t, protoPath, srv.URL, "-stage", "preflight", "-registration-method", "protocol"); code != 0 {
+		t.Fatalf("same-path resume refused: %v", receipt)
+	}
+
+	// An unknown value never becomes a task.
+	code, receipt = invokeSignup(t, filepath.Join(dir, "bad.json"), srv.URL, "-stage", "preflight", "-registration-method", "carrier-pigeon")
+	if code == 0 || receipt["reason"] != "registration_method_invalid" {
+		t.Fatalf("invalid method accepted: exit=%d reason=%v", code, receipt["reason"])
+	}
+}
+
+// I1-C: a protocol task keeps its private artefacts under <task dir>/protocol;
+// browser tasks keep their historical directory.
+func TestProtocolTaskUsesItsOwnDirectory(t *testing.T) {
+	srv := httptest.NewServer(deviceFixture(t))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	protoPath := filepath.Join(dir, "proto.json")
+	if code, receipt := invokeSignup(t, protoPath, srv.URL, "-stage", "preflight",
+		"-registration-method", "protocol", "-device", "proto-dev"); code != 0 {
+		t.Fatalf("protocol task: %v", receipt)
+	}
+	want := filepath.Join(dir, methodProtocol, "devices", "proto-dev.json")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("protocol device record not under its own directory: %v", err)
+	}
+
+	browserPath := filepath.Join(dir, "browser.json")
+	if code, receipt := invokeSignup(t, browserPath, srv.URL, "-stage", "preflight", "-device", "browser-dev"); code != 0 {
+		t.Fatalf("browser task: %v", receipt)
+	}
+	// Browser tasks keep the historical default; nothing was migrated.
+	if _, err := os.Stat(filepath.Join(dir, methodBrowser, "devices", "browser-dev.json")); err == nil {
+		t.Fatal("browser task was moved into a new directory")
+	}
+}
+
+// I1 exit-code-4 acceptance: waiting for a code must keep the task, its session
+// and its number, and a resume must continue the same stage rather than jump to
+// the login path.
+func TestWaitingInputKeepsTaskSessionAndPhone(t *testing.T) {
+	fixture := newFlowFixture("fixture@example.test")
+	srv := httptest.NewServer(fixture.handler())
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "task.json")
+	base := []string{"-stage", "all", "-phone", "4155550134", "-phonecc", "US",
+		"-captcha-answer", "ABCDE", "-registration-method", "protocol"}
+
+	code, receipt := invokeSignup(t, path, srv.URL, base...)
+	if code != 4 {
+		t.Fatalf("waiting for the email code should be exit 4, got %d (%v)", code, receipt)
+	}
+	st, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Stage != "email-sent" || st.Phone == "" || st.Session == nil || st.Session.Scnt == "" {
+		t.Fatalf("waiting state lost: stage=%q phone=%q session=%v", st.Stage, st.Phone, st.Session != nil)
+	}
+	if st.RegistrationMethod != methodProtocol {
+		t.Fatalf("method lost while waiting: %q", st.RegistrationMethod)
+	}
+	phone, scnt := st.Phone, st.Session.Scnt
+
+	emailCode := filepath.Join(dir, "email.txt")
+	if err := os.WriteFile(emailCode, []byte("012345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, receipt = invokeSignup(t, path, srv.URL, append(base, "-email-code-file", emailCode)...)
+	if code != 4 {
+		t.Fatalf("waiting for the SMS code should be exit 4, got %d (%v)", code, receipt)
+	}
+	st, _ = loadState(path)
+	if st.Stage != "phone-sent" || st.Phone != phone || st.Session == nil || st.Session.Scnt == "" {
+		t.Fatalf("resume did not continue the same task: stage=%q phone=%q", st.Stage, st.Phone)
+	}
+	if st.Session.Scnt == scnt {
+		t.Fatal("session was never refreshed while waiting")
+	}
+	if st.RegistrationMethod != methodProtocol {
+		t.Fatalf("method changed across a wait: %q", st.RegistrationMethod)
+	}
+
+	phoneCode := filepath.Join(dir, "phone.txt")
+	if err := os.WriteFile(phoneCode, []byte("065432"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, receipt = invokeSignup(t, path, srv.URL, append(base, "-email-code-file", emailCode, "-phone-code-file", phoneCode)...)
+	if code != 0 {
+		t.Fatalf("final resume failed: %d %v", code, receipt)
+	}
+	if receipt["accountExists"] != true {
+		t.Fatalf("final receipt: %v", receipt)
+	}
+}
