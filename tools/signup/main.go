@@ -96,6 +96,8 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	pacingMax := fs.Duration("pacing-max", 9000*time.Millisecond, "maximum wait before a request in -human mode")
 	warmupAssets := fs.Int("warmup-assets", 2, "widget bundles to fetch during warm-up (-human only)")
 	telemetryPath := fs.String("telemetry", "", "replay captured jslog telemetry from this capture file")
+	deviceID := fs.String("device", "", "persistent device profile id: reuse cookies and fingerprint across tasks")
+	deviceDir := fs.String("device-dir", ".cache/devices", "directory for device records")
 	asJSON := fs.Bool("json", false, "structured redacted receipt")
 	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
 	emailFile := fs.String("email-code-file", "", "private six-digit email code file")
@@ -211,6 +213,26 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return fail("session_configuration_invalid")
 	}
 	defer session.Close()
+	// Device state: a browser that has been used. Loaded before the profile so a
+	// known device keeps its fingerprint, and before warm-up so the visit starts
+	// with cookies behind it.
+	var device *deviceState
+	var cookiesLoaded int
+	var profileReused bool
+	if strings.TrimSpace(*deviceID) != "" {
+		device, err = loadDevice(*deviceDir, *deviceID, time.Now())
+		if err != nil {
+			return fail("device_state_invalid")
+		}
+		if device.Profile != nil && st.Profile == nil {
+			st.Profile = device.Profile
+			profileReused = true
+		}
+		cookiesLoaded, err = device.warmSession(session)
+		if err != nil {
+			return fail("device_cookie_restore_failed")
+		}
+	}
 	// Migration: a brand-new task with egress inputs explicitly given gets the
 	// profile engine without anyone having to remember a flag. Existing tasks
 	// (and runs that give no egress inputs) stay on the legacy path.
@@ -275,6 +297,27 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		// The pacer is attached below, once the workflow exists.
 		_ = pacer
 	}
+	if device != nil {
+		var paths []string
+		if st.Warmup != nil {
+			if steps, ok := st.Warmup["steps"].([]warmupStep); ok {
+				for _, step := range steps {
+					if step.Path != "" {
+						paths = append(paths, step.Path)
+					}
+				}
+			}
+		}
+		device.noteVisit(paths, time.Now())
+		device.noteTask(st.Email)
+		device.captureCookies(session)
+		if st.Profile != nil {
+			device.Profile = st.Profile
+		}
+		if err := device.save(*deviceDir); err != nil {
+			return fail("device_state_write_failed")
+		}
+	}
 	w := &workflow{state: st, session: session, path: *statePath, options: opts, emailFile: *emailFile, phoneFile: *phoneFile, wait: *codeWait}
 	if st.Human != nil {
 		w.pacer = pacing.New(st.Human.Pacing, nil)
@@ -338,6 +381,9 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	}
 	if st.Telemetry != nil {
 		receipt["telemetry"] = st.Telemetry
+	}
+	if device != nil {
+		receipt["device"] = deviceReceipt(device, time.Now(), cookiesLoaded, profileReused)
 	}
 	if st.Human != nil {
 		receipt["pacing"] = map[string]any{"enabled": st.Human.Pacing.Enabled, "minMs": st.Human.Pacing.Min.Milliseconds(), "maxMs": st.Human.Pacing.Max.Milliseconds(), "applied": w.PacerApplied()}
