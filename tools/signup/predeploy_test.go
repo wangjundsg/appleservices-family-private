@@ -169,3 +169,102 @@ func TestStaleLockIsBounded(t *testing.T) {
 		t.Fatal("lock exceeded its deadline while a stale lock file stayed open")
 	}
 }
+
+// An operation that was started but never confirmed (a crashed process leaves
+// exactly that) must stop the task before warm-up or telemetry send anything.
+func TestUnresolvedIntentBlocksBeforeAnyRequest(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		extra  []string
+	}{
+		{"running", "running", nil},
+		{"telemetry", "running", []string{"-telemetry", ""}},
+		{"expiredCooldown", "rate_limited", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			base := deviceFixture(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				base.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+
+			path := filepath.Join(t.TempDir(), "task.json")
+			if code, receipt := invokeSignup(t, path, srv.URL, "-stage", "preflight"); code != 0 {
+				t.Fatalf("setup: %v", receipt)
+			}
+			st, _ := loadState(path)
+			st.Status = tc.status
+			if tc.status == "rate_limited" {
+				// Expired cooldown: the pause alone no longer applies, the intent does.
+				st.CooldownUntil = time.Now().Add(-time.Minute)
+			}
+			st.Operations = map[string]operation{"validate": {Status: "intent"}}
+			if err := writeState(path, st); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"-stage", "preflight", "-human", "-journey=false",
+				"-pacing-min", "0s", "-pacing-max", "0s", "-warmup-assets", "0"}
+			if tc.name == "telemetry" {
+				args = append(args, "-telemetry", writeCapture(t, sampleCapture()))
+			}
+			before := calls.Load()
+			code, receipt := invokeSignup(t, path, srv.URL, args...)
+			if code == 0 {
+				t.Fatalf("unresolved intent ran: %v", receipt)
+			}
+			if got := calls.Load() - before; got != 0 {
+				t.Fatalf("unresolved intent sent %d requests (%v)", got, receipt["reason"])
+			}
+			if receipt["reason"] != "unresolved_operation" {
+				t.Fatalf("reason = %v, want unresolved_operation", receipt["reason"])
+			}
+		})
+	}
+}
+
+// Refusing a resume must not rewrite the original cause. Two refusals in a row
+// keep it, and the refusal itself is reported separately.
+func TestRefusalKeepsOriginalFailure(t *testing.T) {
+	srv := httptest.NewServer(deviceFixture(t))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "task.json")
+	if code, receipt := invokeSignup(t, path, srv.URL, "-stage", "preflight"); code != 0 {
+		t.Fatalf("setup: %v", receipt)
+	}
+	st, _ := loadState(path)
+	st.Status = "needs_review"
+	st.Failure = "final_account_binding_unconfirmed"
+	st.HTTPStatus = 400
+	if err := writeState(path, st); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		code, receipt := invokeSignup(t, path, srv.URL, "-stage", "preflight")
+		if code == 0 {
+			t.Fatalf("resume %d ran a needs_review task: %v", i, receipt)
+		}
+		if receipt["failure"] != "final_account_binding_unconfirmed" {
+			t.Fatalf("resume %d receipt lost the cause: %v", i, receipt["failure"])
+		}
+		if receipt["blockedReason"] != "task_needs_review" {
+			t.Fatalf("resume %d did not report the refusal: %v", i, receipt["blockedReason"])
+		}
+		after, err := loadState(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Failure != "final_account_binding_unconfirmed" || after.HTTPStatus != 400 {
+			t.Fatalf("resume %d overwrote the cause: failure=%q http=%d", i, after.Failure, after.HTTPStatus)
+		}
+		if after.BlockedReason != "task_needs_review" {
+			t.Fatalf("resume %d did not persist the refusal: %q", i, after.BlockedReason)
+		}
+	}
+}

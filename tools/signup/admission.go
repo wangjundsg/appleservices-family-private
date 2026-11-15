@@ -13,6 +13,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -21,7 +22,25 @@ import (
 const rateLimitCooldown = 15 * time.Minute
 
 // blockers are the statuses that must stop a run before it sends anything.
+// unresolvedOperations lists side-effecting calls that were started but never
+// confirmed. A process that died mid-request leaves exactly that shape, and the
+// only safe next move is a human looking at it.
+func unresolvedOperations(st *state) []string {
+	var pending []string
+	for key, op := range st.Operations {
+		if op.Status == "succeeded" || op.Status == "" {
+			continue
+		}
+		pending = append(pending, key)
+	}
+	sort.Strings(pending)
+	return pending
+}
+
 func admissionBlocked(st *state, now time.Time) (string, bool) {
+	if len(unresolvedOperations(st)) > 0 {
+		return "unresolved_operation", true
+	}
 	switch st.Status {
 	case "needs_review":
 		return "task_needs_review", true
@@ -45,6 +64,7 @@ func admitTask(st *state, now time.Time) error {
 		st.Failure = ""
 		st.HTTPStatus = 0
 		st.CooldownUntil = time.Time{}
+		st.BlockedReason = ""
 	}
 	return nil
 }

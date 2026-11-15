@@ -53,6 +53,7 @@ type state struct {
 	TelemetrySent    bool                 `json:"telemetrySent,omitempty"`
 	DeviceID         string               `json:"deviceId,omitempty"`
 	CooldownUntil    time.Time            `json:"cooldownUntil,omitempty"`
+	BlockedReason    string               `json:"blockedReason,omitempty"`
 	Warmup           map[string]any       `json:"warmup,omitempty"`
 }
 
@@ -223,12 +224,16 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	// from "broken" without reading the log.
 	if admitErr := admitTask(st, time.Now()); admitErr != nil {
 		reason := reasonOfAdmission(admitErr)
-		st.Failure = reason
+		// st.Failure keeps the original cause ("why it stopped"); BlockedReason
+		// records "why this run refused". Overwriting the first with the second
+		// would erase the only durable explanation.
+		st.BlockedReason = reason
 		if saveErr := writeState(*statePath, st); saveErr != nil {
 			return fail("state_write_failed")
 		}
 		receipt := map[string]any{
 			"ok": false, "stage": st.Stage, "state": st.Status, "reason": reason,
+			"failure": st.Failure, "blockedReason": reason,
 			"accountExists": st.Created && st.Status == "ready", "created": st.Created,
 			"emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone,
 			"transport": "", "httpStatus": st.HTTPStatus,
@@ -530,6 +535,7 @@ var publicReasons = map[string]bool{
 	"server_requires_cooldown":          true,
 	"task_blocked":                      true,
 	"device_mismatch":                   true,
+	"unresolved_operation":              true,
 }
 
 // failureClass turns the numeric status into a public, de-identified class so a
