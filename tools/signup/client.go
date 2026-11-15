@@ -32,6 +32,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/fingerprint"
 )
 
 const (
@@ -74,6 +76,7 @@ type Session struct {
 	hcBits       int
 	hcChallenge  string
 	fdClientInfo string
+	profileHints *fingerprint.ClientHints
 	lastRequest  string
 
 	// Transport switches describe the requested engine, not server acceptance.

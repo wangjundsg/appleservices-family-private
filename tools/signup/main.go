@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/fingerprint"
 )
 
 type state struct {
@@ -43,6 +45,8 @@ type state struct {
 	VerificationID   json.RawMessage      `json:"verificationId,omitempty"`
 	EmailRequestedAt time.Time            `json:"emailRequestedAt,omitempty"`
 	PhoneRequestedAt time.Time            `json:"phoneRequestedAt,omitempty"`
+	Profile          *fingerprint.Profile `json:"profile,omitempty"`
+	ProfileMode      string               `json:"profileMode,omitempty"`
 }
 
 func main() { os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
@@ -77,6 +81,11 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	curl := fs.Bool("curl", false, "use system curl; no automatic fallback")
 	h2 := fs.Bool("http2", false, "request HTTP/2 negotiation")
 	fd := fs.String("fd-client-info", "", "FD JSON matching configured UA and locale")
+	profileMode := fs.String("profile-mode", "legacy", "legacy|new fingerprint profile mode")
+	profileKind := fs.String("profile", "auto", "auto|chrome|firefox|mac_safari|ios_safari")
+	egressCountry := fs.String("egress-country", "", "verified egress country (ISO2); required in new mode")
+	egressSource := fs.String("egress-source", "", "explicit|verified-egress; required in new mode")
+	engineInsecure := fs.Bool("engine-insecure", false, "skip certificate verification (offline tests only)")
 	asJSON := fs.Bool("json", false, "structured redacted receipt")
 	timeout := fs.Duration("timeout", 45*time.Second, "request timeout")
 	emailFile := fs.String("email-code-file", "", "private six-digit email code file")
@@ -192,6 +201,38 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return fail("session_configuration_invalid")
 	}
 	defer session.Close()
+	// Migration: a brand-new task with egress inputs explicitly given gets the
+	// profile engine without anyone having to remember a flag. Existing tasks
+	// (and runs that give no egress inputs) stay on the legacy path.
+	effectiveMode := *profileMode
+	if !visited["profile-mode"] && st.Profile == nil && st.ProfileMode == "" && st.Session == nil && st.Stage == "" &&
+		strings.TrimSpace(*egressCountry) != "" && strings.TrimSpace(*egressSource) != "" {
+		effectiveMode = profileModeNew
+	}
+	profile, engineInfo, profileErr := installProfile(st, session, profileConfig{
+		Mode:          effectiveMode,
+		Kind:          *profileKind,
+		EgressCountry: *egressCountry,
+		EgressSource:  *egressSource,
+		Insecure:      *engineInsecure,
+	}, opts.Proxy, opts.Timeout)
+	if profileErr != nil {
+		fmt.Fprintln(diagnostic, profileErr)
+		if errors.Is(profileErr, ErrProfileBlocked) {
+			st.Status = "needs_review"
+			st.Failure = "profile_blocked"
+			_ = writeState(*statePath, st)
+			return fail("profile_blocked")
+		}
+		return fail("profile_configuration_invalid")
+	}
+	if profile != nil {
+		// Persist before the first network request: a crash between here and the
+		// first call must not leave a task that later mints a second profile.
+		if err := writeState(*statePath, st); err != nil {
+			return fail("state_write_failed")
+		}
+	}
 	if st.Body != nil {
 		account, ok := st.Body["account"].(map[string]any)
 		if !ok || account["name"] != st.Email {
@@ -235,9 +276,13 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if session.UseCurl {
 		engine = "system-curl"
 	}
+	if st.ProfileMode == profileModeNew && st.Profile != nil {
+		engine = "utls"
+	}
 	receipt := map[string]any{"ok": err == nil, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}
 	receipt["errorCodes"] = st.ErrorCodes
 	receipt["captchaSource"] = st.CaptchaSource
+	receipt["profile"] = profileReceipt(st.Profile, engineInfo)
 	if err != nil {
 		receipt["error"] = reason
 	}
