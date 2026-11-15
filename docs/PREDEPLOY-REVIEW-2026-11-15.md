@@ -2,7 +2,26 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## 0c3cf43：准入仍被旧恢复逻辑绕过，intent 不能证明可续跑（最新）
+## 4bbec7d：前两项关闭，冷却准入仍有缺口（最新）
+
+基线 `4bbec7d41d62b3860085fc2a8663b453b2fd293c`，审查开始时与远端一致。使用独立 git archive 快照，未混入工作区 dashboard 的其他修改。上一轮两组 intent/旧恢复分支复现均通过：unknown/needs_review 不再绕过准入，单凭 intent 不再调用 resume。
+
+验证结果：Python 85 项、Go 五包、定向 vet 均通过；历史补充 16 项通过。历史 review_closure.py 的等待夹具原来缺少 challenge_stage，本轮仅给该夹具补上与 email-sent 一致的绑定，未放宽断言；没有证据的旧等待被拒绝属于本轮预期行为。新增两个边界用例失败，因此仍不能把这轮视为生产接入验收完成。
+
+1. **P1 / 冷却未结束仍允许恢复。** `pipeline.py:813` 仅拒绝 unknown/needs_review，没有检查 rate_limited 或 cooldown_until。真实 execute("resume") 恢复一个已经确认邮箱挑战、status=rate_limited、cooldown_until 尚有 30 分钟的任务，适配器 resume 实测调用 1 次，最终 status/reason 均变为 waiting_input。run 的 begin 会先把限流状态改为 running，后续无法再靠状态词制止调用。这违反“遇限流先停止并冷却”的约束；不应依赖未来 signup 子进程再次拒绝来补父流程缺口。统一准入须在任何状态改写/资源/执行器调用之前识别尚未解除的冷却，保留状态、原因和原截止时间，create/resume/购号/交接/退号均为 0。不能通过重复 resume 刷新截止时间；冷却到期后仍须按挑战、未决操作与结果证据决定是否允许继续。
+2. **P2 / operation 记录形状不统一，核实原因被异常覆盖。** `pipeline.py:815-816` 将每个 operation 值直接放进集合做成员判断，只支持字符串；同模块 panel_once（第 668 行）使用 `{state, started_at, intent_hash, ...}` 字典记录。补充用例给未完成协议任务放入结构化 phone intent，实际触发 unhashable dict，run 将任务改为 unknown/interrupted_or_local_error，原 phone_outcome_pending 丢失。该用例构造了结构化注册操作，并不声称当前假适配器已经会生成这种记录；现有新测试只覆盖字符串。接真实适配器前应明确共享 operations 的 schema：规范读取 state，未决记录安全停止，格式损坏受控报错并保留原始证据；不能为通过准入把记录直接压成字符串而丢失幂等键/结果。至少覆盖字符串兼容、结构化 intent/succeeded、非法记录三种边界。
+
+本轮不继续修改业务实现。建议把执行许可集中成明确的准入表（含冷却、终止、等待、未决），而不是在调用点继续补状态例外。前两项修复可以关闭；上面冷却缺口关闭、operation 契约统一后，再验真实适配器的离线跨进程链路。exit 0/4 必须结合绑定任务的有效回执判断，不能仅凭退出码授权交接或恢复。I2/I4、面板输入写入到适配器读取的完整链路、真实服务验收仍不在本轮通过范围。
+
+离线复现目录：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-4bbe-f8d7fc802f87402692d486bd4575fa98/`；source 是该提交快照。新增用例：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-4bbe-f8d7fc802f87402692d486bd4575fa98/review_gate_edges.py -v
+```
+
+`test_future_cooldown_stops_real_resume`、`test_structured_pending_operation_preserves_review_reason` 均失败。历史 review_intent.py、review_admission.py、review_recovery.py、review_closure.py、review_pipeline.py、review_maintenance.py 全部通过。所有外部适配器交互为本地替身，没有真实购号、退号、注册、定时任务修改或部署。
+
+## 0c3cf43：准入仍被旧恢复逻辑绕过，intent 不能证明可续跑（历史记录）
 
 基线 `0c3cf43d51d57795d7909046b38e02c1a6088770`，远端一致。独立 git archive 快照中的 Python 81 项测试通过。上一轮 email-sent 状态组的准入复现通过，unknown/needs_review 不再在该场景调用适配器。仍有两个必须关闭的 P1，暂不接真实执行器。
 
