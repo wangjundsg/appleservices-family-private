@@ -2,7 +2,29 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## da2bc04：协议适配器边界复核（最新，暂不接真实执行器）
+## 0f37a8a：恢复与维护扫描仍有两个 P1（最新）
+
+基线 `0f37a8a42125e197247607c470d2fe1e64712df6`，远端一致。独立提交快照的 Python 56 项测试通过。上一轮四个补充用例原样重跑：购号路径、异常分支不结算、字段冲突三项通过；等码恢复仍失败。没有修改业务实现或混入其他未提交工作区改动。
+
+1. **P1 / 等码恢复仍跳登录，原因是先 begin 再判断等待。** `pipeline.py:532` 的 begin(stage) 会执行 `status=running`，紧接着第 533 行才判断 waiting_input，因此 email-sent 等待任务仍落入 dashboard_handoff。实测 handoff=1、adapter.resume=0。新测试在 `test_protocol_adapter.py:220` 将 begin 替换为空函数，移除了导致缺陷的状态转换。修复应保留父阶段 create、另存协议子阶段，或使用明确的恢复动作在 begin 前决定分流；不要把是否 resume 绑定到已经被改写的展示状态。实际 begin、run(resume=True) 和持久化恢复必须参加回归测试，不能用空函数代替。等待/查状态也不能无意消耗提交动作的重试预算。
+2. **P1 / 维护扫描绕过未决结果保护。** 新异常分支设置 refund_deferred=True，但 maintain_once 第 818 行见该字段就调用 settle_number；自动号码的 Supply.settle 可能立刻 setStatus=8。新增测试使用真实维护、结算和本地账本，仅替换供应商 HTTP 边界：任务 needs_review、registration_started=True、号码未到期、供应商显示未收码时，仍记录到 1 次退号请求。此标志表示“需要保留并核实”，不能同时作为“现在允许取消”的授权。结算准入必须覆盖运行、维护、手动 refund、取消等入口，并区分未决注册、明确失败、过期与已收短信。修复不能只在 run 里继续加 guard。
+
+可以继续开发输入/到期/取消，但先把上述两项纳入该步并修复；真实 signup 接入仍放在边界验收之后。用户提出的三条策略作如下明确：
+
+- **到期：** 停止自动发码和恢复，不自动重购，转 needs_review/number_expired，并保留此前的注册副作用事实。订单收尾依据供应商状态与账号核实结果；不能无限等待过期号码。
+- **取消：** adapter.cancelled 仅证明执行停止，不能证明未建号、可退款或邮箱可重新分配。只有确认未提交或明确未建成、供应商确认未收到短信等条件满足时，才允许按既有退款规则收尾；未知结果保留核实，已收短信记录 OTP_RECEIVED，冷却拒退进入持久 pending 队列。
+- **输入：** 从已冻结的任务 protocol 路径读取；缺文件维持等待。存在与 mtime 新鲜度只是必要检查，还需匹配账号、任务、当前挑战/发送时间与输入类型，验证格式、拒绝已消费或旧挑战的输入。面板写入与适配器读取须使用同一路径；OTP 不进入命令行和公开日志。执行器仍负责验证自己的挑战绑定，不能仅信任父流程的文件检查。
+
+本机复现目录 `C:/Users/HUAWEI/AppData/Local/Temp/apple-review-0f37-42bffa662bf74b9582591b759efb99d7/`，source 为独立提交快照：
+
+```powershell
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-0f37-42bffa662bf74b9582591b759efb99d7/review_pipeline.py
+python C:/Users/HUAWEI/AppData/Local/Temp/apple-review-0f37-42bffa662bf74b9582591b759efb99d7/review_maintenance.py
+```
+
+第一组 3 过 1 失败；第二组维护扫描用例失败。所有供应商交互均为本地替身，没有真实购号、退号、注册或部署。
+
+## da2bc04：协议适配器边界复核（历史记录）
 
 基线 `da2bc042895d9c02163372e3a574dec5e0f73c94`，远端一致。独立 git archive 快照中 Python 原有 52 项测试通过；本轮新增四个真实控制流边界用例均失败。没有混入工作区其他未提交修改，没有访问真实资源服务。
 
