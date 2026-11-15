@@ -13,6 +13,13 @@ type StoragePlanInfo = icloud.StoragePlanInfo
 type PurchaseTarget = icloud.PurchaseTarget
 type PurchaseResult = icloud.PurchaseResult
 
+func (l *Login) passwordForStore() string {
+	if l.storePassword != "" {
+		return l.storePassword
+	}
+	return l.creds.Password
+}
+
 func (l *Login) PreviewStoragePurchase(ctx context.Context) (*icloud.StoreFormInfo, error) {
 	info, err := l.StoragePlanInfo(ctx)
 	if err != nil {
@@ -43,7 +50,7 @@ func (l *Login) CheckStoragePurchaseSession(ctx context.Context, code string) (*
 	if err != nil {
 		return nil, errors.New("appleservices: Store anisette generation failed")
 	}
-	session, err := icloud.AuthenticateStore(ctx, l.creds.AppleID, l.creds.Password, code, headers)
+	session, err := icloud.AuthenticateStore(ctx, l.creds.AppleID, l.passwordForStore(), code, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +72,7 @@ func (l *Login) CheckSkillStoragePurchaseSession(ctx context.Context, codeProvid
 	if err != nil {
 		return nil, errors.New("appleservices: Store anisette generation failed")
 	}
-	session, err := icloud.AuthenticateMatchedSkillStore(ctx, l.creds.AppleID, l.creds.Password, headers, codeProvider)
+	session, err := icloud.AuthenticateMatchedSkillStore(ctx, l.creds.AppleID, l.passwordForStore(), headers, codeProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +253,7 @@ func (l *Login) SubmitStoragePurchase(ctx context.Context, target PurchaseTarget
 	if err != nil || existing != nil {
 		return existing, err
 	}
-	result, err := icloud.SubmitStoragePurchaseAnonymous(ctx, info, l.creds.AppleID, l.creds.Password, l.client.DSID, l.client.ADSID, l.client.MMEAuthToken, l.client.StorageBuyToken, headers, target)
+	result, err := icloud.SubmitStoragePurchaseAnonymous(ctx, info, l.creds.AppleID, l.passwordForStore(), l.client.DSID, l.client.ADSID, l.client.MMEAuthToken, l.client.StorageBuyToken, headers, target)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +274,7 @@ func (l *Login) SubmitStoragePurchaseWithStoreSession(ctx context.Context, targe
 			return nil, err
 		}
 	}
-	result, err := l.storeCommerce.SubmitStoragePurchase(ctx, info, l.creds.AppleID, l.creds.Password, l.client.DSID, l.client.ADSID, l.client.MMEAuthToken, l.client.StorageBuyToken, headers, target)
+	result, err := l.storeCommerce.SubmitStoragePurchase(ctx, info, l.creds.AppleID, l.passwordForStore(), l.client.DSID, l.client.ADSID, l.client.MMEAuthToken, l.client.StorageBuyToken, headers, target)
 	if err != nil {
 		return nil, err
 	}

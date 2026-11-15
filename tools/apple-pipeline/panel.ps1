@@ -3,7 +3,8 @@ param(
     [string]$Python = 'python',
     [switch]$Build,
     [switch]$NoOpen,
-    [switch]$AllowPurchase
+    [switch]$AllowPurchase,
+    [switch]$AllowSubscription
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,11 @@ try {
         }
     }
     $taskWorker = Join-Path $taskRoot 'bin\trusted-device-gui.exe'
+    $taskFamily = Join-Path $taskRoot 'bin\familyinspect.exe'
+    if ($Build -or -not (Test-Path -LiteralPath $taskFamily)) {
+        & go build -o $taskFamily ./tools/familyinspect
+        if ($LASTEXITCODE -ne 0) { throw 'Build failed: family helper' }
+    }
     if ($Build -or -not (Test-Path -LiteralPath $taskWorker)) {
         & go build -ldflags '-H=windowsgui -s -w' -o $taskWorker ./cmd/trusted-device
         if ($LASTEXITCODE -ne 0) { throw 'Build failed: dashboard account worker' }
@@ -52,6 +58,7 @@ try {
     }
     $taskArgs = @('-repo', ('"' + $taskRoot + '"'), '-dir', ('"' + $taskState + '"'), '-python', ('"' + $Python + '"'), '-port', $Port)
     if ($AllowPurchase) { $taskArgs += '--allow-purchase' }
+    if ($AllowSubscription) { $taskArgs += '--allow-subscription' }
     $taskProcess = Start-Process -FilePath $taskDashboard -ArgumentList $taskArgs -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $taskState 'dashboard.out.log') -RedirectStandardError (Join-Path $taskState 'dashboard.err.log')
 } finally {

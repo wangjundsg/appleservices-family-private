@@ -245,6 +245,9 @@ func run() (runErr error) {
 		serial = "AS" + strings.ToUpper(fmt.Sprintf("%x", identity[:5]))
 	}
 	options := []appleservices.Option{appleservices.WithAnisetteServers(*server), appleservices.WithDeviceSerialNumber(serial), appleservices.WithPushToken(push.State().Token)}
+	if *resumeSession && password != "" {
+		options = append(options, appleservices.WithStorePassword(password))
+	}
 	var localADI *nativeadi.Client
 	if *useNativeADI {
 		library, err := filepath.Abs(*adiLibrary)

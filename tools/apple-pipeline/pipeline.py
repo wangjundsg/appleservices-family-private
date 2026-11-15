@@ -25,7 +25,7 @@ from sms_supply import Supply, SupplyError
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
-STAGES = ("create", "login", "terms", "gsa", "device", "keepalive")
+STAGES = ("create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
              "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM"}
 
@@ -376,7 +376,7 @@ class Job:
             if not str(port).isdigit() or not 0 < int(port) < 65536:
                 raise PipelineError("browser_port_missing")
             inp = {"email": self.cfg["email"], "password": self.cfg["password"], "phone": str(sms["phone"]),
-                   "country": COUNTRIES[sms["phonecc"]],
+                   "country": COUNTRIES[self.cfg.get("account_country") or sms["phonecc"]],
                    "phonecc": sms["phonecc"], "activation": str(sms["activation"]), "hero-key": sms["key"],
                    "sms-api": sms.get("api", "https://api.grizzlysms.com/stubs/handler_api.php"),
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
@@ -487,7 +487,7 @@ class Job:
                         raise PipelineError("number_purchase_requires_readback", "needs_review")
                     # A crash/timeout after a submit is never permission to repeat registration.
                     self.update(stage="login", status="queued", reason="reconcile_interrupted_creation")
-            elif resume and stage in {"login", "terms", "gsa", "device"} and self.status["status"] != "queued":
+            elif resume and stage in {"login", "terms", "gsa", "device", "subscription", "family"} and self.status["status"] != "queued":
                 raise PipelineError("ambiguous_stage_requires_readback", "needs_review")
             while self.status["status"] != "ready":
                 stage = self.status["stage"]
@@ -533,7 +533,10 @@ class Job:
         reply = json.loads(request(url, {"action":action, **body},
                                   {"Content-Type":"application/json", "X-App-Token":bridge["token"]}, timeout=210))
         if reply.get("state") == "rate_limited": raise PipelineError("code_rate_limited", "rate_limited")
-        if reply.get("state") == "unknown": raise PipelineError("panel_handoff_requires_readback", "needs_review")
+        if reply.get("state") == "unknown":
+            reason=reply.get("reason")
+            known={"family_binding_invalid","family_role_mismatch","family_action_invalid","family_readback_required","family_full","family_organizer_not_ready","subscription_disabled","subscription_auth_required","subscription_readback_required","subscription_offer_unsupported"}
+            raise PipelineError(reason if reason in known else "panel_handoff_requires_readback", "needs_review")
         return reply
 
     def panel_once(self, action, **body):
@@ -606,6 +609,7 @@ class Job:
                 self.check_cancel()
                 state=self.panel_call("observe")
                 if state.get("activated") and state.get("online"):
+                    self.complete_family()
                     self.update(status="ready", account_created=True, handoff_complete=True,
                                 reason="panel_handoff_complete", next_run_at=None)
                     return
@@ -617,6 +621,35 @@ class Job:
             try: self.panel_call("stop")
             except Exception: pass
             raise
+
+    def complete_family(self):
+        family=self.cfg.get("family", {})
+        role=family.get("role")
+        if role in (None,"","none"): return
+        if role not in ("organizer","member"): raise PipelineError("family_role_mismatch","usage")
+        if role=="organizer":
+            if family.get("acceptSubscription") is not True: raise PipelineError("subscription_disabled","usage")
+            self.update(stage="subscription",reason="subscription_planning")
+            plan=self.panel_call("subscription-plan")
+            if plan.get("ok") is not True: raise PipelineError("subscription_offer_unsupported","needs_review")
+            if not plan.get("existing"):
+                action=plan.get("purchase_action")
+                if action not in {"storage-purchase","storage-skill-purchase-us"}: raise PipelineError("subscription_offer_unsupported","needs_review")
+                if action=="storage-skill-purchase-us": self.panel_once("subscription-auth",plan=action)
+                self.panel_once("subscription-buy",plan=action)
+            if self.panel_call("subscription-verify").get("ok") is not True:
+                raise PipelineError("subscription_readback_required","needs_review")
+            self.update(subscription_verified=True,stage="family",reason="family_creating")
+            self.panel_once("family-create")
+            self.panel_once("family-share")
+        else:
+            if not family.get("organizer"): raise PipelineError("family_binding_invalid","usage")
+            self.update(stage="family",reason="family_joining")
+            self.panel_once("family-join")
+            self.panel_once("family-join-storage")
+        if self.panel_call("family-verify").get("ok") is not True:
+            raise PipelineError("family_readback_required","needs_review")
+        self.update(family_complete=True,family_role=role,reason="family_completed")
 
     def check_cancel(self):
         if (self.folder / "cancel.request").exists():

@@ -270,4 +270,50 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(p.PipelineError,"purchase_policy_required"):self.job.number()
         call.assert_not_called()
 
+    def test_family_organizer_orders_subscription_before_create_and_share(self):
+        self.job.cfg["family"]={"role":"organizer","acceptSubscription":True}
+        actions=[]
+        def call(action,**body):
+            actions.append(action)
+            return {"ok":True,"purchase_action":"storage-skill-purchase-us"}
+        with patch.object(self.job,"panel_call",side_effect=call):self.job.complete_family()
+        self.assertEqual(actions,["subscription-plan","subscription-auth","subscription-buy","subscription-verify","family-create","family-share","family-verify"])
+        self.assertTrue(self.job.status["family_complete"])
+
+    def test_family_member_only_joins_and_verifies(self):
+        self.job.cfg["family"]={"role":"member","organizer":"mother"}
+        with patch.object(self.job,"panel_call",return_value={"ok":True}) as call:self.job.complete_family()
+        self.assertEqual([c.args[0] for c in call.call_args_list],["family-join","family-join-storage","family-verify"])
+        self.assertTrue(self.job.status["family_complete"])
+
+    def test_uncertain_subscription_blocks_family_and_repurchase(self):
+        self.job.cfg["family"]={"role":"organizer","acceptSubscription":True}
+        def call(action,**body):
+            if action=="subscription-buy":raise p.PipelineError("transport_result_unknown")
+            return {"ok":True,"purchase_action":"storage-purchase"}
+        with patch.object(self.job,"panel_call",side_effect=call) as calls:
+            for _ in range(2):
+                with self.assertRaises(p.PipelineError):self.job.complete_family()
+        actions=[c.args[0] for c in calls.call_args_list]
+        self.assertEqual(actions.count("subscription-buy"),1)
+        self.assertNotIn("family-create",actions)
+        self.assertFalse(self.job.status.get("family_complete",False))
+
+    def test_existing_paid_plan_skips_purchase_and_failed_readback_stops_create(self):
+        self.job.cfg["family"]={"role":"organizer","acceptSubscription":True}
+        def call(action,**body):return {"ok":action!="subscription-verify","existing":True}
+        with patch.object(self.job,"panel_call",side_effect=call) as calls:
+            with self.assertRaisesRegex(p.PipelineError,"subscription_readback_required"):self.job.complete_family()
+        self.assertEqual([c.args[0] for c in calls.call_args_list],["subscription-plan","subscription-verify"])
+
+    def test_account_region_is_independent_of_phone_country(self):
+        self.job.cfg["account_country"]="US"
+        self.job.cfg["sms"]["phonecc"]="GB"
+        def forge(action,**body):return {"dirId":"fixture-browser","debuggingPort":12345}
+        with patch.object(self.job,"forge",side_effect=forge),patch.object(self.job,"process",return_value=(0,{})),patch.object(self.job,"cleanup_browser"):
+            self.job.create()
+        data=p.read(self.root/"create-input.json")
+        self.assertEqual(data["country"],"USA")
+        self.assertEqual(data["phonecc"],"GB")
+
 if __name__ == "__main__": unittest.main()

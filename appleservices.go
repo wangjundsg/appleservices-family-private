@@ -70,6 +70,13 @@ type options struct {
 	servers       []string
 	serialNumber  string
 	pushToken     []byte
+	storePassword string
+}
+
+// WithStorePassword supplies an in-memory password for separate Store authentication
+// after ResumeLogin. It does not authenticate GSA or persist the password.
+func WithStorePassword(password string) Option {
+	return func(o *options) { o.storePassword = password }
 }
 
 // WithDeviceSerialNumber identifies this installation in account-device calls.

@@ -4,12 +4,13 @@
   const token = document.querySelector('meta[name="app-token"]').content;
   const form = $('registerForm');
   const field = name => form.elements.namedItem(name);
-  const stages = ['creating','login','twofa','terms','device','keepalive'];
-  const stageNames = {queued:'排队',creating:'注册',create:'注册',login:'网页登录',terms:'服务条款',twofa:'账户验证',gsa:'账户验证',device:'设备登记',keepalive:'会话验证',done:'完成'};
+  const stages = ['creating','login','twofa','terms','device','keepalive','subscription','family'];
+  const stageNames = {queued:'排队',creating:'注册',create:'注册',login:'交接面板',terms:'iCloud 激活',twofa:'账户验证',gsa:'账户验证',device:'设备登记',keepalive:'后台在线',subscription:'iCloud+ 订阅',family:'家庭共享',done:'完成'};
   const stateNames = {queued:'等待开始',running:'正在进行',waiting_input:'等待验证码',ready:'流程已完成',failed:'失败',usage:'参数需要修正',unknown:'结果待核实',needs_review:'需要核实',rate_limited:'Apple 要求冷却',needs_login:'会话需要重新验证',cancelled:'已取消'};
   let selected = '', retryOf = '', submitting = false, polling = false;
   let jobs = [];
   let setup = null;
+  let familySelected=false;
   function automaticMode() {
     const automatic = field('automatic').checked;
     for (const name of ['email','password','phone','platform','activation','expiresAt']) {
@@ -21,9 +22,25 @@
     $('registerAutomaticHint').hidden=!automatic;
     const ready=setup && setup.purchaseEnabled && setup.budgetConfigured && setup.mailboxConfigured;
     $('registerAutomaticHint').textContent=ready ? '自动选取未占用邮箱、生成密码并取码。建号后交给现有面板完成激活。' : '自动购号尚未开放：需先商定并配置价格、邮箱池，再显式开启购号。';
-    $('registerSubmit').disabled=submitting || (automatic && !ready);
+    const role=field('familyRole').value, mother=role==='organizer', member=role==='member';
+    $('registerFamilyRegionLabel').hidden=!mother;field('familyRegion').disabled=!mother;
+    $('registerOrganizerLabel').hidden=!member; field('organizer').disabled=!member; field('organizer').required=member;
+    $('registerSubscriptionConsent').hidden=!mother; field('acceptSubscription').disabled=!mother;field('acceptSubscription').required=mother;
+    const familyReady=mother ? setup?.subscriptionEnabled : member ? !!field('organizer').value : true;
+    $('registerFamilyHint').textContent=mother ? (setup?.subscriptionEnabled ? '母号确认付费容量后自动新建家庭并开启储存共享。' : '自动订阅开关关闭，母号任务暂不能启动。') : member ? '成员只加入指定母号的家庭并验证共享储存，不购买订阅。' : '完成激活后停止，不执行家庭或订阅操作。';
+    $('registerSubmit').disabled=submitting || (automatic && !ready) || !familyReady;
   }
   field('automatic').addEventListener('change',automaticMode);
+  field('familyRole').addEventListener('change',()=>{familySelected=true;automaticMode();});
+  field('organizer').addEventListener('change',automaticMode);
+  async function loadSetup() {
+    setup=await api('/config');
+    const prior=field('organizer').value, mothers=setup.familyOrganizers||[];
+    field('organizer').replaceChildren(...(mothers.length ? mothers.map(m=>new Option(m.name||m.id,m.id)) : [new Option('请先完成一个母号','')]));
+    if(mothers.some(m=>m.id===prior)) field('organizer').value=prior;
+    if(!familySelected) field('familyRole').value=mothers.length ? 'member':'organizer';
+    automaticMode();
+  }
   function notice(message) { $('registerNotice').textContent = message; $('registerNotice').hidden = !message; }
   async function api(path, body) {
     const response = await fetch('/api/register'+path, {method:body === undefined ? 'GET':'POST',headers:{'X-App-Token':token,'Content-Type':'application/json'},body:body === undefined ? undefined:JSON.stringify(body)});
@@ -35,7 +52,7 @@
     form.hidden = !show; $('registerToggle').setAttribute('aria-expanded',String(show));
     $('registerToggle').textContent = show ? '收起表单':'新建账号';
   }
-  $('registerToggle').addEventListener('click', () => showForm(form.hidden));
+  $('registerToggle').addEventListener('click', () => {showForm(form.hidden);if(!form.hidden) loadSetup().catch(error=>notice(error.message));});
   function validatePassword() {
     if (field('automatic').checked) { field('password').setCustomValidity(''); return; }
     const value = field('password').value;
@@ -51,8 +68,11 @@
     submitting=true; $('registerSubmit').disabled=true; notice('正在创建任务…');
     try {
       const manual=automatic ? {} : {email:field('email').value.trim(),password:field('password').value,phone:field('phone').value,platform:field('platform').value,activation:field('activation').value,expiresAt:expiry.toISOString(),...(retryOf ? {retryOf}: {})};
-      const result=await api('',{automatic,...manual,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
+      const role=field('familyRole').value;
+      const family={role,...(role==='member'?{organizer:field('organizer').value}:{}),...(role==='organizer'?{region:field('familyRegion').value,acceptSubscription:field('acceptSubscription').checked}:{})};
+      const result=await api('',{automatic,...manual,family,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
       selected=result.jobId; retryOf=''; field('password').value=''; $('registerRetryNote').hidden=true;
+      field('acceptSubscription').checked=false;familySelected=false;
       showForm(false); notice(automatic ? '任务已提交，邮箱和短信验证码将自动读取。' : '任务已提交。请留意邮箱验证码；短信由接码平台读取。');
       await refresh();
     } catch (error) { notice(error.message); }
@@ -63,6 +83,7 @@
     $('registerElapsed').textContent='用时 '+Math.max(0,Math.floor(job.elapsedMs/60000))+' 分 '+Math.max(0,Math.floor(job.elapsedMs/1000)%60)+' 秒';
     const index=job.stage==='done' ? stages.length:stages.indexOf(job.stage);
     for (const li of $('registerStages').children) {
+      li.hidden=(li.dataset.stage==='subscription' && job.familyRole!=='organizer') || (li.dataset.stage==='family' && !['organizer','member'].includes(job.familyRole));
       const i=stages.indexOf(li.dataset.stage);
       li.classList.toggle('complete',i<index); li.classList.toggle('current',i===index);
       if(i===index) li.setAttribute('aria-current','step'); else li.removeAttribute('aria-current');
@@ -78,6 +99,7 @@
     if(job.refundConfirmed) detail+=' 平台已确认退号。';
     if(job.cleanupPending) detail+=' 浏览器清理待重试。';
     if(job.message) detail+=' '+job.message;
+    if(job.familyComplete) detail+=job.familyRole==='organizer' ? ' 母号的 iCloud+ 和家庭储存共享均已确认。' : ' 已加入指定母号的家庭，共享储存已生效。';
     if(job.spend) detail+=' 购号 '+job.spend.purchases+' 次，累计 '+job.spend.gross+' '+job.spend.currency+'，已退 '+job.spend.refunded+'。';
     $('registerDetail').textContent=detail;
     $('registerCodeForm').hidden=!(job.active && job.stage==='creating' && !job.automatic);
@@ -139,6 +161,6 @@
       }
     } catch(error) { notice(error.message); }
   });
-  automaticMode(); api('/config').then(value=> {setup=value;automaticMode();}).catch(error=>notice(error.message));
+  automaticMode(); loadSetup().catch(error=>notice(error.message));
   refresh(); setInterval(refresh,3000);
 })();

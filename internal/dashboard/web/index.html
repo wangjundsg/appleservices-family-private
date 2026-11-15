@@ -37,6 +37,9 @@
       <label class="register-consent"><input name="automatic" type="checkbox" checked>自动从 Outlook 邮箱池选取邮箱并购买号码</label>
       <p id="registerAutomaticHint" class="cache-note">正在检查自动建号配置…</p>
       <div class="register-fields">
+        <label>账号用途<select name="familyRole"><option value="organizer">母号 · 开通 iCloud+ 并新建家庭</option><option value="member">成员 · 加入母号家庭</option><option value="none">仅建号和激活</option></select></label>
+        <label id="registerOrganizerLabel" hidden>指定母号<select name="organizer" disabled><option value="">请先完成一个母号</option></select></label>
+        <label id="registerFamilyRegionLabel">家庭账号地区<select name="familyRegion"><option value="US">美国 · 现有限定 USD 0.99/月</option><option value="CN">中国大陆 · 现有限定 CNY 6.00/月</option></select></label>
         <label>账号邮箱<input name="email" type="email" maxlength="254" autocomplete="off" required placeholder="你的邮箱地址"></label>
         <label>账号密码<input name="password" type="password" minlength="8" maxlength="256" autocomplete="new-password" required aria-describedby="registerPasswordHint"></label>
         <label>号码国家<select name="phonecc"><option value="GB">英国 +44</option><option value="US">美国 +1</option><option value="CA">加拿大 +1</option><option value="ID">印尼 +62</option><option value="VN">越南 +84</option><option value="AU">澳大利亚 +61</option><option value="CN">中国 +86</option><option value="DE">德国 +49</option><option value="FR">法国 +33</option><option value="SG">新加坡 +65</option><option value="HK">中国香港 +852</option><option value="JP">日本 +81</option></select></label>
@@ -50,13 +53,15 @@
       <p id="registerPasswordHint" class="cache-note">密码至少 8 位，包含大小写字母、数字和特殊字符。</p>
       <p id="registerExpiryHint" class="cache-note">按接码平台的实际到期时间填写。请保持邮箱可用，流程中需要输入邮箱验证码。</p>
       <label class="register-consent"><input name="acceptTerms" type="checkbox" required>我同意为此账号接受 Apple 和 iCloud 服务条款</label>
+      <label id="registerSubscriptionConsent" class="register-consent"><input name="acceptSubscription" type="checkbox">允许本母号按现有限定开通 50GB 月付订阅并自动续费：CNY 6.00/月或 USD 0.99/月（美区另计适用税费）。仅匹配 Apple 当前返回的方案才提交。</label>
+      <p id="registerFamilyHint" class="cache-note"></p>
       <div class="register-actions"><button type="submit" class="button button-primary" id="registerSubmit">开始注册</button><span id="registerRetryNote" class="cache-note" hidden>将创建新任务，请填写新的号码、激活 ID 和密码。</span></div>
     </form>
     <p id="registerNotice" class="register-notice" role="status" hidden></p>
     <div id="registerJobs" hidden>
       <label class="register-job-select">注册任务<select id="registerJobSelect" aria-label="查看注册任务"></select></label>
       <div class="register-progress-head"><strong id="registerState">等待开始</strong><span id="registerElapsed" class="cache-note"></span></div>
-      <ol class="register-stages" id="registerStages"><li data-stage="creating">注册</li><li data-stage="login">交接面板</li><li data-stage="twofa">登录验证</li><li data-stage="terms">iCloud 激活</li><li data-stage="device">设备登记</li><li data-stage="keepalive">后台在线</li></ol>
+      <ol class="register-stages" id="registerStages"><li data-stage="creating">注册</li><li data-stage="login">交接面板</li><li data-stage="twofa">登录验证</li><li data-stage="terms">iCloud 激活</li><li data-stage="device">设备登记</li><li data-stage="keepalive">后台在线</li><li data-stage="subscription">iCloud+ 订阅</li><li data-stage="family">家庭共享</li></ol>
       <p id="registerDetail" class="card-description"></p>
       <form id="registerCodeForm" class="register-code" hidden><label for="registerEmailCode">邮箱验证码</label><input id="registerEmailCode" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="one-time-code" required placeholder="4–8 位验证码"><button type="submit" class="button button-light">提交邮箱验证码</button></form>
       <div class="register-actions"><button type="button" class="text-button" id="registerEvidence">查看证据</button><button type="button" class="text-button" id="registerRetry" hidden>用新号码重试</button><button type="button" class="text-button" id="registerCancel">取消任务</button></div>

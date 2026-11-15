@@ -176,6 +176,28 @@ func TestResumeLoginUsesBoundSavedSessionsWithoutPasswordHandshake(t *testing.T)
 	}
 }
 
+func TestResumedStorePasswordDoesNotEnableGSAHandshakeOrEnterSession(t *testing.T) {
+	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", Tokens: map[string]string{"com.apple.gs.idms.pet": "pet", "com.apple.gs.idms.hb": "heartbeat", "com.apple.gs.appleid.auth": "account-token"}}}
+	backend := &fakeBackend{}
+	accepted := RestoredICloudSession{DSID: "icloud-account", ADSID: "gsa-account", MMEAuthToken: "mme-token", ServiceData: map[string]any{}}
+	opts := append(testOptions(backend, testDelegate), WithStorePassword("Fixture-store-only123!"))
+	login, err := ResumeLogin("owner@example.test", store, accepted, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.calls != 0 || login.creds.Password != "" || login.passwordForStore() != "Fixture-store-only123!" {
+		t.Fatal("Store credentials changed resume authentication")
+	}
+	if err := login.SaveSession(); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range store.session.Tokens {
+		if token == login.passwordForStore() {
+			t.Fatal("Store password persisted")
+		}
+	}
+}
+
 func TestResumeLoginWithoutLegacyDeviceIdentityRequiresOneReconnect(t *testing.T) {
 	store := &memoryStore{session: &Session{AppleID: "owner@example.test", DSID: "gsa-account", Tokens: map[string]string{
 		"com.apple.gs.idms.pet": "pet", "com.apple.gs.idms.hb": "heartbeat", "com.apple.gs.appleid.auth": "account-token",

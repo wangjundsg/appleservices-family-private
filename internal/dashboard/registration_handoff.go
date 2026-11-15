@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Laky-64/appleservices/internal/control"
@@ -16,9 +17,10 @@ import (
 // Adapter only: Python decides when to advance; these actions reuse existing
 // account login and activation code. Unknown writes are never retried here.
 type handoffInput struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Handoff  string `json:"handoff"`
+	Email    string             `json:"email"`
+	Password string             `json:"password"`
+	Handoff  string             `json:"handoff"`
+	Family   registrationFamily `json:"family"`
 }
 
 type registrationContextKey struct{}
@@ -85,6 +87,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		Action string `json:"action"`
 		Code   string `json:"code"`
 		Terms  string `json:"terms"`
+		Plan   string `json:"plan"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -121,16 +124,40 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 	}
 	defer s.handoffMu.Unlock()
 	mutating := body.Action == "attach" || body.Action == "start" || body.Action == "sms" || body.Action == "activate" || body.Action == "resume"
+	mutating = mutating || body.Action == "subscription-auth" || body.Action == "subscription-buy" || body.Action == "family-create" || body.Action == "family-share" || body.Action == "family-join" || body.Action == "family-join-storage"
 	receiptFile := filepath.Join(folder, "handoff-actions.json")
 	receipts := map[string]handoffReceipt{}
 	encoded, _ := json.Marshal(body)
 	digest := sha256.Sum256(encoded)
 	intent := handoffReceipt{Digest: hex.EncodeToString(digest[:]), State: "intent"}
-	if mutating {
+	prerequisite := ""
+	switch body.Action {
+	case "family-share":
+		prerequisite = "family-create"
+	case "family-join-storage":
+		prerequisite = "family-join"
+	case "family-verify":
+		if input.Family.Role == "organizer" {
+			prerequisite = "family-share"
+		} else {
+			prerequisite = "family-join-storage"
+		}
+	case "subscription-buy":
+		if body.Plan == "storage-skill-purchase-us" {
+			prerequisite = "subscription-auth"
+		}
+	}
+	if mutating || prerequisite != "" {
 		if err := readRegisterJSON(receiptFile, &receipts); err != nil && !os.IsNotExist(err) {
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "state": "unknown"})
 			return
 		}
+	}
+	if prerequisite != "" && receipts[prerequisite].State != "succeeded" {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "state": "unknown", "reason": "family_readback_required"})
+		return
+	}
+	if mutating {
 		if prior, exists := receipts[body.Action]; exists {
 			if prior.State == "succeeded" && prior.Digest == intent.Digest {
 				json.NewEncoder(w).Encode(prior.Result)
@@ -145,53 +172,60 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	var result control.Result
-	switch body.Action {
-	case "attach":
-		var err error
-		account, err = s.attachRegistration(id, input)
-		result.OK = err == nil
-	case "start":
-		if account != nil {
-			result = s.startAccount(ctx, account, credentials{AppleID: input.Email, Password: input.Password, TwoFactor: "sms"})
-		}
-	case "sms":
-		if account != nil && registrationOTPPattern.MatchString(body.Code) {
-			if s.callFor(ctx, account.Dir, "/action", control.Action{Action: "submit-sms", Code: body.Code}, &result) != nil {
-				result.OK = false
+	var value map[string]any
+	if strings.HasPrefix(body.Action, "subscription-") || strings.HasPrefix(body.Action, "family-") {
+		value = s.registrationFamilyAction(ctx, account, input, body.Action, body.Plan)
+	} else {
+		var result control.Result
+		switch body.Action {
+		case "attach":
+			var err error
+			account, err = s.attachRegistration(id, input)
+			result.OK = err == nil
+		case "start":
+			if account != nil {
+				result = s.startAccount(ctx, account, credentials{AppleID: input.Email, Password: input.Password, TwoFactor: "sms"})
 			}
-		}
-	case "plan":
-		result = s.activationAction(ctx, account, false, "")
-	case "activate":
-		result = s.activationAction(ctx, account, true, body.Terms)
-	case "resume":
-		if account != nil {
-			if s.accountStatus(account).Running && s.accountStatus(account).Authenticated {
-				result.OK = true
-			} else {
-				result = s.startSavedAccount(ctx, account)
+		case "sms":
+			if account != nil && registrationOTPPattern.MatchString(body.Code) {
+				if s.callFor(ctx, account.Dir, "/action", control.Action{Action: "submit-sms", Code: body.Code}, &result) != nil {
+					result.OK = false
+				}
 			}
+		case "plan":
+			result = s.activationAction(ctx, account, false, "")
+		case "activate":
+			result = s.activationAction(ctx, account, true, body.Terms)
+		case "resume":
+			if account != nil {
+				if s.accountStatus(account).Running && s.accountStatus(account).Authenticated {
+					result.OK = true
+				} else if input.Family.Role == "organizer" {
+					result = s.startInMode(ctx, account.Dir, credentials{AppleID: input.Email, Password: input.Password, TwoFactor: "sms"}, account, true)
+				} else {
+					result = s.startSavedAccount(ctx, account)
+				}
+			}
+		case "stop":
+			if account != nil {
+				result.OK = s.stopIn(ctx, account.Dir) == nil
+			}
+		default:
+			http.Error(w, `{"state":"unknown"}`, 400)
+			return
 		}
-	case "stop":
+		value = map[string]any{"ok": result.OK}
 		if account != nil {
-			result.OK = s.stopIn(ctx, account.Dir) == nil
+			value["account_id"] = account.ID
 		}
-	default:
-		http.Error(w, `{"state":"unknown"}`, 400)
-		return
+		if result.Activation != nil {
+			value["terms"] = activationTuple(result.Activation)
+		}
+		if !result.OK {
+			value["state"] = "unknown"
+		}
 	}
-	value := map[string]any{"ok": result.OK}
-	if account != nil {
-		value["account_id"] = account.ID
-	}
-	if result.Activation != nil {
-		value["terms"] = activationTuple(result.Activation)
-	}
-	if !result.OK {
-		value["state"] = "unknown"
-	}
-	if mutating && result.OK {
+	if mutating && value["ok"] == true {
 		intent.State, intent.Result = "succeeded", value
 		receipts[body.Action] = intent
 		if writeRegisterJSON(receiptFile, receipts) != nil {

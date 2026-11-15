@@ -32,6 +32,7 @@ type Config struct {
 	Dir, Worker, Library, Python, MacPushSetup, RepoRoot string
 	Port                                                 int
 	AllowPurchase                                        bool
+	AllowSubscription                                    bool
 }
 type Server struct {
 	config     Config
@@ -444,7 +445,7 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	request.Header.Set("Content-Type", "application/json")
 	timeout := 95 * time.Second
 	if action, ok := body.(control.Action); ok {
-		if action.Action == "storage-skill-auth-file" {
+		if action.Action == "storage-skill-auth-file" || action.Action == "storage-skill-auth-local" {
 			timeout = 3*time.Minute + 5*time.Second
 		} else if action.Action == "family-add-self" || strings.HasPrefix(action.Action, "hme-") {
 			timeout = 2*time.Minute + 5*time.Second
@@ -942,7 +943,7 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 		}
 	}
 	command.Env = append(command.Env, "APPLESERVICES_APPLEID="+strings.TrimSpace(creds.AppleID))
-	if !resume {
+	if creds.Password != "" {
 		command.Env = append(command.Env, "APPLESERVICES_PASSWORD="+creds.Password)
 	}
 	command.Stdout, command.Stderr = output, diagnostic

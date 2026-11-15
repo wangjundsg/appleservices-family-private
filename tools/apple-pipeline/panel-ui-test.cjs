@@ -4,14 +4,15 @@ async page => {
   const check = (value, message) => { if (!value) throw new Error(message); };
   let job = null, submitted = null, delivered = false, cancelled = false;
   let purchaseEnabled=false;
+  let mothers=[];
   await page.route('**/api/register**', async route => {
     const request = route.request(), url = new URL(request.url());
     let value;
     if (url.pathname === '/api/register/config') {
-      value={purchaseEnabled,budgetConfigured:purchaseEnabled,mailboxConfigured:true};
+      value={purchaseEnabled,subscriptionEnabled:purchaseEnabled,familyOrganizers:mothers,budgetConfigured:purchaseEnabled,mailboxConfigured:true};
     } else if (url.pathname === '/api/register' && request.method() === 'POST') {
       submitted = request.postDataJSON();
-      job = {jobId:'reg-20261114-abcdefabcdefabcd',state:'waiting_input',stage:'creating',startedAt:new Date().toISOString(),elapsedMs:12000,active:true,canRetry:false,automatic:submitted.automatic};
+      job = {jobId:'reg-20261114-abcdefabcdefabcd',state:'waiting_input',stage:'creating',startedAt:new Date().toISOString(),elapsedMs:12000,active:true,canRetry:false,automatic:submitted.automatic,familyRole:submitted.family?.role};
       value = {jobId:job.jobId};
     } else if (url.pathname.endsWith('/input')) {
       delivered = request.postDataJSON().code === '654321'; value = {ok:true};
@@ -31,6 +32,7 @@ async page => {
   check(await page.locator('#registerSubmit').isDisabled(),'automatic purchase enabled without configured switch');
   check(await form.locator('[name=email]').isHidden(),'automatic mode asks for manual mailbox');
   await form.locator('[name=automatic]').uncheck();
+  await form.locator('[name=familyRole]').selectOption('none');
   await form.locator('[name=email]').fill('fixture@example.test');
   await form.locator('[name=password]').fill('weak');
   check(await form.locator('[name=password]').evaluate(e => !e.checkValidity()),'weak password accepted');
@@ -73,13 +75,29 @@ async page => {
   purchaseEnabled=true;job=null;
   await page.reload();await page.locator('#registerToggle').click();
   await page.waitForFunction(()=>!document.getElementById('registerSubmit').disabled);
+  check(await form.locator('[name=familyRole]').inputValue()==='organizer','first family task is not organizer');
+  check(await form.locator('[name=acceptSubscription]').evaluate(e=>e.required && !e.checkValidity()),'subscription consent is not required');
+  await form.locator('[name=acceptSubscription]').check();
   await form.locator('[name=mode]').selectOption('direct');
   await form.locator('[name=acceptTerms]').check();
   await page.screenshot({path:'.cache/panel-qa/automatic.png'});
   await page.locator('#registerSubmit').click();
   await page.locator('#registerJobs').waitFor({state:'visible'});
   check(submitted.automatic && !('email' in submitted) && !('activation' in submitted) && !('password' in submitted),'automatic submission includes manual credentials');
+  check(submitted.family.role==='organizer' && submitted.family.acceptSubscription && submitted.family.region==='US','organizer authorization or account region not bound to request');
   check(await page.locator('#registerCodeForm').isHidden(),'automatic task asks for manual email code');
+  mothers=[{id:'auto-fixture-mother',name:'模拟母号'}];job=null;
+  await page.reload();await page.locator('#registerToggle').click();
+  await page.waitForFunction(()=>document.querySelector('[name=familyRole]').value==='member');
+  check(await form.locator('[name=organizer]').inputValue()==='auto-fixture-mother','member has no bound organizer');
+  check(await page.locator('#registerSubscriptionConsent').isHidden(),'member is asked to buy subscription');
+  await form.locator('[name=acceptTerms]').check();
+  await page.locator('#registerSubmit').click();
+  await page.locator('#registerJobs').waitFor({state:'visible'});
+  check(submitted.family.role==='member' && submitted.family.organizer==='auto-fixture-mother' && !submitted.family.acceptSubscription && !submitted.family.region,'member request can purchase, override region or join wrong family');
+  job={...job,state:'ready',stage:'done',active:false,handoffComplete:true,familyComplete:true};
+  await page.waitForFunction(()=>document.getElementById('registerDetail').textContent.includes('共享储存已生效'));
+  check(await page.locator('[data-stage=subscription]').isHidden(),'member shows a purchase stage');
   await page.unroute('**/api/register**');
-  return {passed:true,checks:['desktop/mobile','price gate','automatic submit','password and activation validation','submit','email code','cancel','safe retry']};
+  return {passed:true,checks:['desktop/mobile','price gate','organizer consent','member binding without purchase','automatic submit','password and activation validation','submit','email code','cancel','safe retry']};
 }

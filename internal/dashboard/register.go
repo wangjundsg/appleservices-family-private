@@ -22,17 +22,18 @@ import (
 // The panel supervises the existing pipeline. Credentials stay in private files;
 // neither subprocess output nor upstream responses are sent to the browser.
 type registerRequest struct {
-	Automatic       bool      `json:"automatic"`
-	Email           string    `json:"email"`
-	Password        string    `json:"password"`
-	Phone           string    `json:"phone"`
-	PhoneCC         string    `json:"phonecc"`
-	Platform        string    `json:"platform"`
-	Activation      string    `json:"activation"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	AcceptTerms     bool      `json:"acceptTerms"`
-	CaptchaProvider string    `json:"captchaProvider"`
-	RetryOf         string    `json:"retryOf,omitempty"`
+	Family          registrationFamily `json:"family"`
+	Automatic       bool               `json:"automatic"`
+	Email           string             `json:"email"`
+	Password        string             `json:"password"`
+	Phone           string             `json:"phone"`
+	PhoneCC         string             `json:"phonecc"`
+	Platform        string             `json:"platform"`
+	Activation      string             `json:"activation"`
+	ExpiresAt       time.Time          `json:"expiresAt"`
+	AcceptTerms     bool               `json:"acceptTerms"`
+	CaptchaProvider string             `json:"captchaProvider"`
+	RetryOf         string             `json:"retryOf,omitempty"`
 	Egress          struct {
 		Mode      string `json:"mode"`
 		ProxyPort int    `json:"proxyPort"`
@@ -60,6 +61,7 @@ type pipelineReceipt struct {
 	HeartbeatAt          time.Time        `json:"heartbeat_at"`
 	HeartbeatDeadline    time.Time        `json:"heartbeat_deadline"`
 	HandoffComplete      bool             `json:"handoff_complete"`
+	FamilyComplete       bool             `json:"family_complete"`
 	Spend                *purchaseSummary `json:"spend"`
 	AccountCreated       bool             `json:"account_created"`
 	RegistrationStarted  bool             `json:"registration_started"`
@@ -118,6 +120,15 @@ var registerMessages = map[string]string{
 	"number_purchase_rejected":               "接码平台明确拒绝购买，请检查平台状态。",
 	"purchase_budget_invalid":                "购号预算或币种配置无效，未购买号码。",
 	"purchase_country_not_allowed":           "该国家不在自动购号范围内。",
+	"subscription_disabled":                  "自动订阅未开启，未提交购买。",
+	"subscription_offer_unsupported":         "报价不符合现有 50GB 月付限定，未提交购买。",
+	"subscription_auth_required":             "Apple Store 独立认证未完成，需要核实，未自动重复认证或购买。",
+	"subscription_readback_required":         "订阅或付费容量未确认，请先核实账单和容量，不能重复购买。",
+	"family_binding_invalid":                 "账号与所选母号的家庭关系不符合要求，请核实。",
+	"family_readback_required":               "家庭操作或共享储存未得到完整确认，请核实原操作。",
+	"family_organizer_not_ready":             "母号尚未完成建组和储存共享。",
+	"family_full":                            "家庭可用名额不足，已停止添加成员。",
+	"family_role_mismatch":                   "任务用途不允许执行此家庭或订阅操作。",
 }
 var registrationCountries = map[string][2]string{
 	"GB": {"en-GB", "Europe/London"}, "US": {"en-US", "America/New_York"},
@@ -141,6 +152,9 @@ func strongRegistrationPassword(value string) bool {
 }
 
 func validateRegistration(body registerRequest) error {
+	if err := body.Family.validate(); err != nil {
+		return err
+	}
 	if body.Automatic {
 		if body.RetryOf != "" {
 			return errors.New("自动任务请在原任务中核实，不能换任务重购")
@@ -277,6 +291,24 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if err := validateRegistration(body); err != nil {
 		return "", err
 	}
+	if body.Family.Role == "organizer" && !s.config.AllowSubscription {
+		return "", errors.New("自动订阅尚未开启；需服务端显式 --allow-subscription，当前不会开始建号或扣费")
+	}
+	if body.Family.Role == "member" && !s.readyFamilyOrganizer(body.Family.Organizer) {
+		return "", errors.New("请选择已完成建组和储存共享的母号")
+	}
+	if body.Family.Role == "member" {
+		var family registrationFamilyReady
+		if readRegisterJSON(filepath.Join(s.lookup(body.Family.Organizer).Dir, "family-ready.json"), &family) != nil {
+			return "", errors.New("母号地区信息不可读")
+		}
+		body.Family.Region = family.Region
+	}
+	if body.Family.Role == "organizer" || body.Family.Role == "member" {
+		if info, err := os.Stat(filepath.Join(filepath.Dir(s.config.Worker), "familyinspect.exe")); err != nil || !info.Mode().IsRegular() {
+			return "", errors.New("家庭工具未构建，当前不会开始建号或扣费")
+		}
+	}
 	settings, err := s.registerSettings()
 	if err != nil {
 		return "", err
@@ -381,6 +413,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		api = "https://hero-sms.com/stubs/handler_api.php"
 	}
 	manifest := map[string]any{"job_id": id, "email": body.Email, "password": body.Password, "accept_terms": true,
+		"family":  body.Family,
 		"handoff": "dashboard", "panel_bridge": map[string]string{"url": s.URL() + "/api/register/" + id + "/handoff", "token": s.token},
 		"email_code_file": filepath.Join(folder, "email-code.txt"), "captcha_solver": "yes", "yescaptcha_key": os.Getenv("YESCAPTCHA_KEY"),
 		"egress_mode": body.Egress.Mode, "roxy": roxy,
@@ -389,6 +422,9 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		delete(manifest, "email_code_file")
 		manifest["code_pool_config"] = settings.CodePoolConfig
 		manifest["sms"] = map[string]any{"auto_purchase": true, "phonecc": body.PhoneCC, "currency": settings.Purchase.Currency, "max_price": settings.Purchase.MaxPrice, "max_total": settings.Purchase.MaxTotal}
+	}
+	if body.Family.Role == "organizer" || body.Family.Role == "member" {
+		manifest["account_country"] = body.Family.Region
 	}
 	if body.RetryOf != "" {
 		manifest["retry_of"] = body.RetryOf
@@ -433,7 +469,8 @@ func (s *Server) registerView(id string) map[string]any {
 	var receipt pipelineReceipt
 	folder := s.registerFolder(id)
 	var request struct {
-		SMS struct {
+		Family registrationFamily `json:"family"`
+		SMS    struct {
 			Auto bool `json:"auto_purchase"`
 		} `json:"sms"`
 	}
@@ -468,7 +505,7 @@ func (s *Server) registerView(id string) map[string]any {
 		end = *meta.FinishedAt
 	}
 	return map[string]any{"jobId": id, "state": state, "stage": stage, "startedAt": meta.StartedAt, "elapsedMs": end.Sub(meta.StartedAt).Milliseconds(),
-		"automatic": request.SMS.Auto, "handoffComplete": receipt.HandoffComplete,
+		"automatic": request.SMS.Auto, "handoffComplete": receipt.HandoffComplete, "familyRole": request.Family.Role, "familyComplete": receipt.FamilyComplete,
 		"message":  registerMessages[receipt.Reason],
 		"exitCode": meta.ExitCode, "active": active, "canRetry": !request.SMS.Auto && retryableReceipt(receipt), "imported": meta.Imported || receipt.HandoffComplete, "spend": receipt.Spend,
 		"refundPending": receipt.RefundPending, "refundDeferred": receipt.RefundDeferred, "refundConfirmed": receipt.RefundConfirmed,
@@ -482,7 +519,7 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settings, err := s.registerSettings()
-		json.NewEncoder(w).Encode(map[string]any{"purchaseEnabled": s.config.AllowPurchase, "budgetConfigured": err == nil && settings.Purchase.valid(), "mailboxConfigured": err == nil && settings.CodePoolConfig != ""})
+		json.NewEncoder(w).Encode(map[string]any{"purchaseEnabled": s.config.AllowPurchase, "subscriptionEnabled": s.config.AllowSubscription, "familyOrganizers": s.familyOrganizers(), "budgetConfigured": err == nil && settings.Purchase.valid(), "mailboxConfigured": err == nil && settings.CodePoolConfig != ""})
 		return
 	}
 	if r.URL.Path == "/api/register" {
@@ -596,7 +633,7 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				// Only known enums cross the UI boundary, never reason/output strings.
-				if !strings.Contains("|create|login|terms|gsa|device|keepalive|", "|"+row.Stage+"|") || !strings.Contains("|queued|running|waiting_input|ready|failed|usage|unknown|needs_review|rate_limited|needs_login|cancelled|", "|"+row.Status+"|") {
+				if !strings.Contains("|create|login|terms|gsa|device|keepalive|subscription|family|", "|"+row.Stage+"|") || !strings.Contains("|queued|running|waiting_input|ready|failed|usage|unknown|needs_review|rate_limited|needs_login|cancelled|", "|"+row.Status+"|") {
 					continue
 				}
 				rows = append(rows, map[string]string{"stage": row.Stage, "state": row.Status, "at": row.UpdatedAt.Format(time.RFC3339)})

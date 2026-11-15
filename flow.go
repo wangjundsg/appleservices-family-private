@@ -46,6 +46,7 @@ type Login struct {
 	client          *Client
 	serialNumber    string
 	storeCommerce   *icloud.StoreCommerceSession
+	storePassword   string
 	gsaCheckpointed bool
 }
 
@@ -61,7 +62,7 @@ func prepareLogin(creds Credentials, store Store, requirePassword bool, opts ...
 	for _, opt := range opts {
 		opt(&o)
 	}
-	l := &Login{creds: creds, store: store, fetchDelegate: o.fetchDelegate}
+	l := &Login{creds: creds, store: store, fetchDelegate: o.fetchDelegate, storePassword: o.storePassword}
 	if o.anisette != nil {
 		l.anisette = o.anisette
 	} else {
