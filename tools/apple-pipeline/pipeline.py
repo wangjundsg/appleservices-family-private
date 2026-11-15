@@ -181,8 +181,32 @@ def reserve_code(sms, state_root=None):
 
 
 class Job:
+    @staticmethod
+    def upgrade_status(status):
+        """Convert an older schema explicitly, once, at load time.
+
+        A job written before challenges had identities stored only a timestamp and
+        a stage. Converting it here (and marking it legacy) keeps the decision
+        table honest: it never invents an open challenge on the fly.
+        """
+        if not status or status.get("challenge"):
+            return status
+        stage, stamp = status.get("challenge_stage"), status.get("challenge_at")
+        if not stage or not stamp:
+            return status
+        status["challenge"] = {
+            "id": "legacy-" + str(stamp),
+            "kind": { "email-sent": "email", "phone-sent": "phone" }.get(stage, stage),
+            "stage": stage,
+            "status": "open",
+            "sent_at": stamp,
+            "legacy": True,
+        }
+        return status
+
     def __init__(self, folder, cfg, status=None, allow_purchase=False):
         self.folder, self.cfg = Path(folder), cfg
+        status = self.upgrade_status(status) if status else status
         self.method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
         self.allow_purchase = allow_purchase
         self.status = status or {"job_id": cfg["job_id"], "stage": "create", "status": "queued",
@@ -283,6 +307,10 @@ class Job:
         # outcome is unknown is not a job that may start over.
         if action is None:
             action = self.protocol_action()
+        if (self.folder / "cancel.request").exists():
+            # An explicit stop outranks the review gate here too: protocol_step is
+            # also called directly, not only from run().
+            return self.protocol_cancel(adapter_registry.resolve(self.cfg.get("protocol")))
         if action == "review":
             # Keep the reason that made this job unresolved; do not rewrite it as
             # a waiting state and do not call the adapter at all.
@@ -309,10 +337,15 @@ class Job:
             # A new stage means a new challenge: rebind the timestamp so the code
             # from the previous stage cannot answer this one.
             stage_now = outcome.get("stage") or self.status["stage"]
-            if self.status.get("challenge_stage") != stage_now:
-                self.update(challenge_at=iso(), challenge_stage=stage_now)
-            elif not self.status.get("challenge_at"):
-                self.update(challenge_at=iso(), challenge_stage=stage_now)
+            kind = self.challenge_kind_for(stage_now)
+            current = self.status.get("challenge") or {}
+            if current.get("stage") != stage_now or current.get("status") not in {"open", "sent"}:
+                # Sending a code for a new stage is a new challenge: it gets its own
+                # identity and is bound to this job and stage.
+                challenge = self.open_challenge(kind or stage_now, source_id=outcome.get("verification_id", ""))
+                challenge["stage"] = stage_now
+                challenge["job_id"] = self.cfg["job_id"]
+                self.update(challenge=challenge, challenge_at=challenge["sent_at"], challenge_stage=stage_now)
             self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
                         reason=outcome.get("reason") or "waiting_input", active=False,
                         create_confirmed=True, operations={**(self.status.get("operations") or {}),
@@ -322,7 +355,7 @@ class Job:
             # A new challenge gets a new timestamp; the old one must not admit an
             # already-delivered code.
             self.update(stage="login", status="queued", account_created=True, challenge_at=None,
-                        challenge_stage=None,
+                        challenge_stage=None, challenge=None,
                         reason=outcome.get("reason") or "protocol_registration_complete")
             return False
         raise PipelineError(outcome.get("reason") or "protocol_adapter_failed",
@@ -559,7 +592,13 @@ class Job:
                 self.protocol_cancel(adapter_registry.resolve(self.cfg.get("protocol")))
                 return
             if protocol_action == "review":
-                raise PipelineError(self.status.get("reason") or "registration_outcome_unverified", "needs_review")
+                # Keep the fact that made us stop: a cooldown keeps its deadline and
+                # its rate_limited state instead of being rewritten as needs_review.
+                hold = self.policy_decision()
+                if hold.reason == "server_requires_cooldown":
+                    raise PipelineError("server_requires_cooldown", "rate_limited")
+                raise PipelineError(hold.reason or self.status.get("reason") or "registration_outcome_unverified",
+                                    "needs_review")
             # Browser jobs claim the activation here; protocol jobs do it inside
             # protocol_step so the purchase and the claim stay together.
             if (self.method != "protocol" and self.status["stage"] == "create"
@@ -612,8 +651,10 @@ class Job:
                 elif stage == "keepalive": self.keepalive()
                 else: raise PipelineError("invalid_stage", "usage")
         except PipelineError as error:
-            self.update(status=error.state, reason=error.reason,
-                        cooldown_until=iso(time.time() + 3600) if error.state == "rate_limited" else None)
+            previous = self.status.get("cooldown_until")
+            cooldown = previous if error.state == "rate_limited" and previous else (
+                iso(time.time() + 3600) if error.state == "rate_limited" else previous)
+            self.update(status=error.state, reason=error.reason, cooldown_until=cooldown)
             if (self.method != "protocol" and self.cfg.get("handoff") != "dashboard" and self.status["stage"] == "create"
                     and error.state == "unknown" and self.cfg["sms"].get("activation")):
                 self.update(stage="login", status="queued", reason="registration_needs_confirmation")
@@ -800,14 +841,15 @@ class Job:
 
     def policy_view(self):
         """The facts the decision table needs, and nothing else."""
+        # Older rows carry only a timestamp; convert them once, explicitly.
+        self.status = self.upgrade_status(self.status) or self.status
+        # Only a challenge that was actually opened counts. A bare timestamp is not
+        # evidence, so it is not promoted into an open challenge here.
         challenge = self.status.get("challenge") or {}
-        if not challenge.get("id") and self.status.get("challenge_at"):
-            challenge = {"id": self.status.get("challenge_at"),
-                         "kind": (self.status.get("challenge_stage") or "") .replace("-sent", ""),
-                         "status": "open"}
         return {
             "run": {"state": self.status.get("status"), "cooldown_until": self.status.get("cooldown_until")},
             "status": self.status.get("status"),
+            "stage": self.status.get("stage"),
             "reason": self.status.get("reason"),
             "registration_started": self.status.get("registration_started"),
             "create_attempted": self.status.get("create_attempted"),
@@ -818,6 +860,13 @@ class Job:
             "account_created": self.status.get("account_created"),
         }
 
+    def policy_decision(self):
+        facts = {
+            "needs_purchase": bool(self.cfg["sms"].get("auto_purchase") and not self.status.get("number_owned")),
+            "stop_requested": bool(self.status.get("stop_requested") or (self.folder / "cancel.request").exists()),
+        }
+        return job_policy.decide(self.policy_view(), "run", time.time(), facts)
+
     def protocol_action(self):
         """Delegates to the shared decision table (job_policy.decide).
 
@@ -826,9 +875,7 @@ class Job:
         review — anything unresolved, expired, cooling down or stopped
         done   — registration is proven and the job belongs to activation
         """
-        decision = job_policy.decide(
-            self.policy_view(), "run", time.time(),
-            {"needs_purchase": bool(self.cfg["sms"].get("auto_purchase") and not self.status.get("number_owned"))})
+        decision = self.policy_decision()
         return {"create": "create", "acquire_then_create": "create",
                 "resume": "resume", "handoff": "done"}.get(decision.action, "review")
 
@@ -990,10 +1037,15 @@ class Job:
              "run": {"state": self.status.get("status")}},
             {"id": sms.get("activation"), "state": "refund_confirmed" if self.status.get("refund_confirmed") else "owned",
              "cost": (self.status.get("spend") or {}).get("cost")},
-            {"otp_received": bool(self.status.get("code_received")),
-             "confirmed_absent": bool(self.status.get("registration_not_applied")),
+            {"sms_state": self.status.get("sms_state"),
+             "otp_received": bool(self.status.get("code_received")),
+             "business_release_allowed": bool(
+                 self.status.get("registration_not_applied")
+                 or not (self.status.get("registration_started") or self.status.get("create_attempted")
+                         or (self.status.get("attempts") or {}).get("create"))),
+             "order_matches": self.status.get("order_matches", True),
              "evidence": self.status.get("failure")})
-        if verdict.action not in {"refund"} and not force and not needs_probe:
+        if verdict.action not in {"refund"} and not needs_probe:
             if self.status.get("number_owned") and not self.status.get("account_created"):
                 self.update(refund_deferred=True, settlement_reason=verdict.reason)
             return

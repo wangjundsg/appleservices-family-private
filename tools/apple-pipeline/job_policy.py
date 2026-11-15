@@ -51,25 +51,51 @@ class Decision:
         }
 
 
+TERMINAL_OPERATION_STATES = {"succeeded", "not_applied", "rejected", "cancelled"}
+
+
 def _pending_operations(operations: Mapping[str, Any] | None) -> list[str]:
+    """Anything that is not provably finished counts as unresolved.
+
+    An unknown state value must never read as "no pending operation": that is how
+    a corrupted record would turn into permission to run.
+    """
     pending = []
     for key, value in (operations or {}).items():
         state = value.get("state") if isinstance(value, dict) else value
-        if state in {"intent", "executing", "inconclusive"}:
+        if not isinstance(state, str) or state not in TERMINAL_OPERATION_STATES:
             pending.append(key)
     return sorted(pending)
+
+
+def _parse_instant(raw: Any) -> float | None:
+    """Parse an ISO timestamp with its zone; None when it cannot be trusted."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        import datetime as _dt
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = _dt.datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, TypeError):
+        return None
 
 
 def _cooldown(job: Mapping[str, Any], now: float) -> float | None:
     run = job.get("run") or {}
     raw = run.get("cooldown_until") or job.get("cooldown_until")
     if not raw:
-        return None
-    try:
-        import calendar, time as _time
-        parsed = calendar.timegm(_time.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S"))
-    except (ValueError, TypeError):
-        return float("-inf")  # unparseable deadline is a hold, not permission
+        # A rate-limited job without a deadline is a hold: we cannot prove the
+        # window ended, so we do not act.
+        state = run.get("state") or job.get("status")
+        return float("inf") if state == "rate_limited" else None
+    parsed = _parse_instant(raw)
+    if parsed is None:
+        return float("inf")  # unparseable deadline blocks instead of permitting
     return parsed - now
 
 
@@ -140,11 +166,36 @@ def decide(job: Mapping[str, Any], command: str = "run", now: float = 0.0, facts
     # challenge bound to the current stage.
     confirmed = bool(job.get("create_confirmed") or state == "waiting_input")
     challenge = job.get("challenge") or {}
-    live = bool(challenge.get("id")) and challenge.get("status") in {None, "open", "sent"}
+    # The business stage decides which challenge is current; the run state only
+    # says the job is waiting.
+    stage = job.get("stage") or ""
+    live = _challenge_live(job, challenge, stage)
     if not (confirmed and live):
         return Decision("reconcile", "registration_outcome_unverified",
                         preserved={"reason": job.get("reason")})
     return Decision("resume", "waiting_on_challenge", needs_executor=True, may_change_state=True)
+
+
+STAGE_KIND = {"email-sent": "email", "phone-sent": "phone"}
+
+
+def _challenge_live(job: Mapping[str, Any], challenge: Mapping[str, Any], stage: str = "") -> bool:
+    """A challenge authorises a resume only for its own job, stage and kind."""
+    if not challenge.get("id"):
+        return False
+    if challenge.get("status") not in {None, "open", "sent"}:
+        return False
+    owner = challenge.get("job_id")
+    if owner and job.get("job_id") and owner != job.get("job_id"):
+        return False
+    kind = challenge.get("kind")
+    expected = STAGE_KIND.get(stage)
+    if expected and kind and kind != expected:
+        return False  # an email challenge cannot answer the phone stage
+    owned_stage = challenge.get("stage")
+    if owned_stage and stage and owned_stage != stage:
+        return False
+    return True
 
 
 # ---- settlement -----------------------------------------------------------
@@ -161,22 +212,26 @@ def settlement_decision(job: Mapping[str, Any], order: Mapping[str, Any] | None,
     """
     order = order or {}
     observation = observation or {}
-    if observation.get("otp_received") is True:
+    provider_state = observation.get("sms_state")
+    if provider_state == OTP_RECEIVED or observation.get("otp_received") is True:
         return Decision("hold", OTP_RECEIVED, preserved={"cost": order.get("cost")})
     registration = (job.get("registration") or {}).get("outcome")
     if registration == "registered":
         return Decision("hold", "registration_proven")
     if order.get("state") in {"cancelled", "refund_confirmed"}:
         return Decision("hold", "already_settled")
-    if observation.get("confirmed_absent") is True:
+
+    # Two independent facts must both hold; neither substitutes for the other.
+    business = (job.get("business_release_allowed") is True
+                or observation.get("business_release_allowed") is True)
+    provider = provider_state == "confirmed_no_otp"
+    if business and provider and observation.get("order_matches") is not False:
         return Decision("refund", "refund_eligible", may_change_state=True,
                         detail={"order": order.get("id"), "evidence": observation.get("evidence")})
-    # Never submitted: stopping is enough, because no registration exists to lose.
-    started = bool(job.get("registration_started") or job.get("create_attempted")
-                   or (job.get("attempts") or {}).get("create"))
-    if not started:
-        return Decision("refund", "stopped_before_submission", may_change_state=True,
-                        detail={"order": order.get("id")})
-    if registration in {None, "unknown"}:
-        return Decision("hold", "registration_outcome_unconfirmed")
+    if not business:
+        return Decision("hold", "business_release_not_justified",
+                        preserved={"order": order.get("id")})
+    if not provider:
+        return Decision("reconcile", "provider_sms_state_unconfirmed",
+                        preserved={"order": order.get("id")})
     return Decision("reconcile", UNKNOWN, preserved={"order": order.get("id")})

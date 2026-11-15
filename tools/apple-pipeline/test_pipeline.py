@@ -94,6 +94,8 @@ class PipelineTests(unittest.TestCase):
         sms.assert_not_called()
 
     def test_refund_cooldown_is_persisted_without_secret(self):
+        # Both facts must hold before a refund is attempted.
+        self.job.update(business_release_allowed=True, sms_state="confirmed_no_otp")
         self.job.update(status="failed", number_owned=True)
         with patch.object(p, "sms_call", return_value="EARLY_CANCEL_DENIED"):
             self.job.settle_number()
@@ -161,6 +163,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_cancel_before_submission_refunds_and_does_not_repeat_refund(self):
         (self.root / "cancel.request").write_text("cancel")
+        # Refund needs both facts: the business may release it, and the provider
+        # confirms no code arrived.
+        self.job.update(sms_state="confirmed_no_otp")
         with patch.object(self.job, "create") as create, patch.object(p, "sms_call", return_value="ACCESS_CANCEL") as sms:
             self.job.run()
             self.job.settle_number()

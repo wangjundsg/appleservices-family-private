@@ -46,6 +46,16 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 | W4 面板衔接 | 面板 input/resume/cancel API 未改（本轮未动 `internal/dashboard` 的注册路由） | **未实现** |
 | W5 迁移与发布 | schema 迁移器、ACL、包清单、故障演练 **未做** | **未实现** |
 
+## 1.1 本轮并入的四组修正（W1/W2）
+
+| 意见 | 修法 | 证据 |
+|---|---|---|
+| 冷却被改成需复核、截止时间被清空 | `apply` 走 `policy_decision()`：冷却保留 `rate_limited` 状态与**原截止时间**，不再被异常分支清空或加时 | `job_policy` 冷却用例 + `pipeline` 的 cooldown 保留分支 |
+| 持久化停止标记未进许可表 | `policy_decision()` 的 facts 带入 `stop_requested`（状态字段或 cancel.request 任一） | `test_run_routes_cancel_through_the_adapter` |
+| 非法冷却时间/未知 operation 被放行 | 冷却带时区解析；不可解析或缺截止 → **阻塞**；operation 状态不在终态集合（含未知值/缺字段）**一律算未决** | `test_job_policy` 严格解析用例 |
+| 邮箱挑战可放行短信阶段 | 挑战必须匹配 **job + 业务阶段 + kind**（`STAGE_KIND`）；旧状态由 `upgrade_status` **显式转换**（标记 legacy），决策时不再凭空补造 | `test_confirmed_challenge_may_resume`、`test_stale_sms_code_is_refused_after_stage_change` |
+| 退款二选一 | `settlement_decision` 要求 **business_release_allowed** 与 **provider sms_state=confirmed_no_otp** 同时成立；缺失任一方 → hold/reconcile；`force`/probe 不再豁免 | `test_business_release_alone_is_not_enough`、`test_provider_confirmation_alone_is_not_enough`、`test_both_facts_together_allow_refund` |
+
 ## 2. 验收矩阵
 
 | 组 | 结论 | 证据 / 缺口 |

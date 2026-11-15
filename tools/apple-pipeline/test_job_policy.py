@@ -127,14 +127,22 @@ class SettlementTableTest(unittest.TestCase):
         decision = job_policy.settlement_decision(self._job(), {"state": "owned"}, {})
         self.assertEqual(decision.action, "hold")
 
-    def test_cancel_before_submission_may_refund(self):
+    def test_business_release_alone_is_not_enough(self):
         decision = job_policy.settlement_decision(
-            self._job(registration_started=False), {"state": "owned"}, {"otp_received": False})
-        self.assertEqual(decision.action, "refund")
+            self._job(registration_started=False), {"state": "owned"},
+            {"sms_state": "unknown", "business_release_allowed": True})
+        self.assertEqual(decision.action, "reconcile")
 
-    def test_confirmed_absent_is_the_only_override(self):
+    def test_provider_confirmation_alone_is_not_enough(self):
         decision = job_policy.settlement_decision(
-            self._job(), {"state": "owned"}, {"otp_received": False, "confirmed_absent": True})
+            self._job(business_release_allowed=False), {"state": "owned"},
+            {"sms_state": "confirmed_no_otp"})
+        self.assertEqual(decision.action, "hold")
+
+    def test_both_facts_together_allow_refund(self):
+        decision = job_policy.settlement_decision(
+            self._job(business_release_allowed=True), {"state": "owned"},
+            {"sms_state": "confirmed_no_otp", "evidence": "supplier_readback"})
         self.assertEqual(decision.action, "refund")
 
     def test_unverifiable_observation_asks_for_reconcile(self):
