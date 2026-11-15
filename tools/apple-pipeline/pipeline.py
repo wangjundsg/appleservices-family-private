@@ -181,6 +181,18 @@ def reserve_code(sms, state_root=None):
 
 
 class Job:
+    SUPPORTED_SCHEMA = 2
+
+    @classmethod
+    def guard_schema(cls, status):
+        """Refuse a status written by a newer build instead of guessing."""
+        if not status:
+            return status
+        version = status.get("schema_version")
+        if isinstance(version, int) and version > cls.SUPPORTED_SCHEMA:
+            raise PipelineError("schema_unsupported", "needs_review")
+        return status
+
     @staticmethod
     def upgrade_status(status):
         """Convert an older schema explicitly, once, at load time.
@@ -207,6 +219,7 @@ class Job:
 
     def __init__(self, folder, cfg, status=None, allow_purchase=False):
         self.folder, self.cfg = Path(folder), cfg
+        status = self.guard_schema(status)
         status = self.upgrade_status(status) if status else status
         self.method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
         self.allow_purchase = allow_purchase

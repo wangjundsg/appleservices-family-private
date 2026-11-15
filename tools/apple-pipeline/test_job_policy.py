@@ -155,3 +155,24 @@ class SettlementTableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaGuardTest(unittest.TestCase):
+    def test_newer_schema_is_refused(self):
+        import pipeline
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(pipeline.PipelineError) as caught:
+                pipeline.Job(Path(tmp), {"job_id": "j", "email": "a@b.c"},
+                             {"schema_version": 99, "job_id": "j"})
+            self.assertEqual(caught.exception.reason, "schema_unsupported")
+
+    def test_current_schema_is_accepted(self):
+        import pipeline
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            job = pipeline.Job(Path(tmp), {"job_id": "j", "email": "a@b.c"},
+                               {"schema_version": 2, "job_id": "j", "stage": "create", "status": "queued"})
+            self.assertEqual(job.status["status"], "queued")

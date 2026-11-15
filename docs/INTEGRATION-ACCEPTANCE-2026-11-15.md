@@ -89,9 +89,9 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 | --- | --- | --- |
 | W1 状态与许可 | 新增 `job_policy.py`：`decide()` 纯函数许可表 + `settlement_decision()`；`Job.protocol_action()` 改为调用它（CLI/维护/退款共用同一答案）；冷却先于执行、未决 operation 先于一切、`unknown/needs_review` 不执行、号码到期不重购、已注册才交接 | **已实现**（G01/G03 关闭；G02/G04 部分） |
 | W2 资源与输入 | `open_challenge()` + `active_challenge()`：挑战拥有独立 `challenge_id`；`inputs` 状态机已建；结算由 `settlement_decision()` 决定；**R01 已关闭**：`acquisition_id` 先落盘，同一意图在账本里命中已购订单直接复用（`test_sms_supply.AcquisitionIdempotencyTest`），号码上限仍生效 | **部分实现**（I02/R01 关闭；I01 状态机未接入全部调用点） |
-| W3 协议适配器 | 仍为测试注入的假适配器；薄上下文、子进程树、PID 复用校验 **未做** | **未实现** |
-| W4 面板衔接 | 面板 input/resume/cancel API 未改（本轮未动 `internal/dashboard` 的注册路由） | **未实现** |
-| W5 迁移与发布 | schema 迁移器、ACL、包清单、故障演练 **未做** | **未实现** |
+| W3 协议适配器 | `signup_adapter.py`：冻结上下文、版本化回执绑定校验、exit 4/0/其它语义、超时杀进程树、缺依赖零资源、取消不声称退款 | **已实现**（PID 复用校验未做） |
+| W4 面板衔接 | 未动：`internal/dashboard` 存在他人未提交改动，本轮不触碰；路由与公开视图仍缺 | **未实现**（避免覆盖他人改动） |
+| W5 迁移与发布 | 已加 schema 版本护栏（拒绝更新版本）；ACL、包清单、故障演练仍缺 | **部分** |
 
 ## 1.1 本轮并入的四组修正（W1/W2）
 
@@ -130,6 +130,10 @@ python docs/review-fixtures/registration-2026-11-15/review_policy_batch.py -v
 python docs/review-fixtures/registration-2026-11-15/review_gate_edges.py -v
 python docs/review-fixtures/registration-2026-11-15/review_decision_application.py -v
 ```
+
+## 1.6 W5 片段：版本护栏
+
+`Job.guard_schema`：`schema_version` 高于本构建支持值（2）时直接 `schema_unsupported`（needs_review），**不猜测、不按旧版本读新状态**——这是"回滚不会重放"的最小前提。用例：`test_job_policy.SchemaGuardTest`。
 
 ## 2. 验收矩阵
 
