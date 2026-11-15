@@ -582,3 +582,82 @@ class RealDispatchTest(unittest.TestCase):
         job.protocol_step(waiting=True)
         self.assertEqual(FakeAdapter.last_inputs, {})
         self.assertFalse(job.status.get("consumed_inputs"), "a malformed code was marked consumed")
+
+class RecoveryAdmissionTest(unittest.TestCase):
+    """A resume follows the persisted business stage, not the status word."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={
+            "emailCode": str(self.folder / "email-code.txt"),
+            "phoneCode": str(self.folder / "phone-code.txt")})
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def _resume(self, status, stage="email-sent", account_created=False):
+        job = pipeline.Job(self.folder, self.cfg)
+        job.status.update(stage=stage, status=status, number_owned=True, number="4155550134",
+                          account_created=account_created, challenge_at=pipeline.iso(pipeline.time.time() - 30),
+                          challenge_stage=stage)
+        handoffs = {"count": 0}
+
+        def handoff():
+            handoffs["count"] += 1
+            job.update(status="ready", stage="done")
+
+        job.dashboard_handoff = handoff
+        job.settle_number = lambda force=False: None
+        FakeAdapter.reset({"state": "waiting_input", "stage": stage})
+        job.run()
+        return job, handoffs
+
+    def test_unconfirmed_statuses_stay_with_the_adapter(self):
+        for status in ("running", "unknown", "needs_review"):
+            with self.subTest(status):
+                job, handoffs = self._resume(status)
+                self.assertEqual(handoffs["count"], 0, f"{status} jumped to the login handoff")
+                self.assertGreaterEqual(FakeAdapter.calls["create"] + FakeAdapter.calls["resume"], 1,
+                                        f"{status} never reached the adapter")
+                self.assertFalse(job.status.get("account_created"))
+
+    def test_proven_account_goes_to_handover(self):
+        job, handoffs = self._resume("running", stage="email-sent", account_created=True)
+        self.assertEqual(handoffs["count"], 1, "a proven account was not handed over")
+
+
+class ResumeWithoutAdapterTest(unittest.TestCase):
+    """A resume without an adapter must stop before buying anything."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        self.cfg = make_config(self.folder, sms={"auto_purchase": True, "phonecc": "US", "key": "k",
+                                                 "api": "https://fixture.invalid/api"})
+        pipeline.atomic(self.folder / "input.json", self.cfg)
+        pipeline.atomic(self.folder / "result.json", {
+            "job_id": self.cfg["job_id"], "stage": "create", "status": "waiting_input",
+            "number_owned": False, "account_created": False})
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def test_purchase_never_happens_without_an_adapter(self):
+        purchases = []
+        original = pipeline.Job.number
+        pipeline.Job.number = lambda self: purchases.append(self.cfg["job_id"])
+        try:
+            with self.assertRaises(pipeline.PipelineError) as caught:
+                pipeline.execute("run", input_file=str(self.folder / "input.json"))
+        finally:
+            pipeline.Job.number = original
+        self.assertEqual(caught.exception.reason, "protocol_adapter_missing")
+        self.assertEqual(purchases, [], "a number was bought before the adapter check")

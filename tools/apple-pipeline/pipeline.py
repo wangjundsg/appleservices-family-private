@@ -278,11 +278,13 @@ class Job:
             self.update(status="needs_review", stage=self.status["stage"], reason="number_expired",
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
             raise PipelineError("number_expired", "needs_review")
+        # Resolve first: an absent adapter must stop the job before the number is
+        # bought, on a resume exactly as on a fresh run.
+        adapter = adapter_registry.resolve(self.cfg.get("protocol"))
         if not self.status.get("number_owned"):
             # Same lifecycle as the browser path: buy when allowed, claim the
             # activation, and record it before the adapter sees anything.
             self.number()
-        adapter = adapter_registry.resolve(self.cfg.get("protocol"))
         if waiting is None:
             waiting = self.status.get("status") == "waiting_input"
         if (self.folder / "cancel.request").exists():
@@ -563,10 +565,11 @@ class Job:
                     self.update(stage=stage, status="running", reason="polling")
                 else:
                     self.begin(stage)
-                if self.method == "protocol" and (stage == "create" or was_waiting):
-                    # The adapter owns the create stage and any resume of a waiting
-                    # job; once it reports ready the loop continues to the next
-                    # stage instead of delegating again.
+                if self.method == "protocol" and not self.status.get("account_created"):
+                    # Until an account is proven, the adapter owns the job whatever
+                    # the persisted status says: running, unknown and needs_review
+                    # all mean "registration outcome not confirmed", never "go to
+                    # login". Only account_created hands the job to the next stage.
                     if self.protocol_step(waiting=was_waiting):
                         return
                 elif stage == "create": self.create_with_replacement()
@@ -890,7 +893,17 @@ def execute(action, job_id=None, input_file=None, allow_purchase=False):
                 raise PipelineError("job_id_conflict", "usage")
             cfg = existing
             status = read(folder / "result.json")
-            if action == "run": return status  # identical invocation is a read, not a retry
+            if action == "run":
+                # A resume has to pass the same gate as a new job: without an
+                # adapter there is nothing to run, and buying a number first would
+                # spend money on a job that cannot proceed.
+                method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
+                if method == "protocol":
+                    try:
+                        adapter_registry.resolve(cfg.get("protocol"))
+                    except adapter_registry.AdapterMissing as missing:
+                        raise PipelineError(missing.reason, "needs_review")
+                return status  # identical invocation is a read, not a retry
         else:
             if action != "run": raise PipelineError("job_not_found", "usage")
             validate(cfg)
