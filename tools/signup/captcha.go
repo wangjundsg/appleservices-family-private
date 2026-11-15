@@ -2,7 +2,7 @@
 //
 // The widget asks POST /captcha {"type":"IMAGE"} and gets back
 // {"id":<int>,"token":"<hex>","type":"IMAGE","payload":{"contentType":...,
-// "content":"<base64 jpeg>"}}. The answer is 5 characters, and id+token are
+// "content":"<base64 jpeg>"}}. Answer length can vary; id+token are
 // single use: every rejected answer needs a fresh image.
 //
 // Two answer sources, in order of preference:
@@ -51,16 +51,29 @@ func (c *captcha) decodeImage() error {
 	return nil
 }
 
+func captchaSource(manual, key, answerPath string) string {
+	if manual != "" {
+		return "manual"
+	}
+	if answerPath != "" {
+		return "answer_file"
+	}
+	if key != "" {
+		return "solver"
+	}
+	return "unconfigured"
+}
+
 // answerQuestion returns the characters a human or a paid solver read.
-// `manual` wins when set; otherwise YesCaptcha is asked. When neither is
-// available and an answer file is configured, the image is written out and the
+// `manual` wins, then an explicit answer file, then the configured solver.
+// For an answer file, the image is written out and the
 // call blocks until a human drops the answer in (same-process, so the captcha
 // token stays bound to this session).
 func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout time.Duration, imagePath, answerPath string) (string, error) {
 	if manual != "" {
 		return strings.ToUpper(strings.TrimSpace(manual)), nil
 	}
-	if key != "" {
+	if captchaSource(manual, key, answerPath) == "solver" {
 		return solveYesCaptcha(ctx, key, c.image, timeout)
 	}
 	if answerPath == "" {
@@ -77,7 +90,7 @@ func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if raw, err := os.ReadFile(answerPath); err == nil {
-			if text := strings.TrimSpace(string(raw)); text != "" {
+			if text := strings.TrimSpace(strings.TrimPrefix(string(raw), "\ufeff")); text != "" {
 				_ = os.Remove(answerPath)
 				return strings.ToUpper(text), nil
 			}

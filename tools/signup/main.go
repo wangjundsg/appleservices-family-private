@@ -39,6 +39,7 @@ type state struct {
 	Operations       map[string]operation `json:"operations,omitempty"`
 	Body             map[string]any       `json:"body,omitempty"`
 	Captcha          *captcha             `json:"captcha,omitempty"`
+	CaptchaSource    string               `json:"captchaSource,omitempty"`
 	VerificationID   json.RawMessage      `json:"verificationId,omitempty"`
 	EmailRequestedAt time.Time            `json:"emailRequestedAt,omitempty"`
 	PhoneRequestedAt time.Time            `json:"phoneRequestedAt,omitempty"`
@@ -208,6 +209,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	}
 	w := &workflow{state: st, session: session, path: *statePath, options: opts, emailFile: *emailFile, phoneFile: *phoneFile, wait: *codeWait}
 	w.captchaAnswer = func(ctx context.Context, c *captcha) (string, error) {
+		st.CaptchaSource = captchaSource(*answer, *key, *answerFile)
 		if err := writeCaptchaImage(*capImage, c.image); err != nil {
 			return "", err
 		}
@@ -235,6 +237,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	}
 	receipt := map[string]any{"ok": err == nil, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}
 	receipt["errorCodes"] = st.ErrorCodes
+	receipt["captchaSource"] = st.CaptchaSource
 	if err != nil {
 		receipt["error"] = reason
 	}
