@@ -266,21 +266,32 @@ class Job:
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
 
-    def protocol_step(self):
+    def protocol_step(self, waiting=None):
         """One delegation to the adapter: create the first time, resume afterwards.
 
         Returns True when the job must stay waiting — the caller then leaves the
         run loop without releasing anything.
         """
+        sms = self.cfg["sms"]
+        if sms.get("expires_at") and timestamp(sms["expires_at"]) <= time.time():
+            # Expiry stops the job; it never buys another number on its own.
+            self.update(status="needs_review", stage=self.status["stage"], reason="number_expired",
+                        refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
+            raise PipelineError("number_expired", "needs_review")
         if not self.status.get("number_owned"):
             # Same lifecycle as the browser path: buy when allowed, claim the
             # activation, and record it before the adapter sees anything.
             self.number()
         adapter = adapter_registry.resolve(self.cfg.get("protocol"))
-        waiting = self.status.get("status") == "waiting_input"
+        if waiting is None:
+            waiting = self.status.get("status") == "waiting_input"
         outcome = (adapter.resume(self) if waiting else adapter.create(self)) or {}
         state = outcome.get("state")
         if state == "waiting_input":
+            # The challenge this wait belongs to is recorded once; a code file older
+            # than it is a stale answer, not an answer to this challenge.
+            if not self.status.get("challenge_at"):
+                self.update(challenge_at=iso())
             self.update(status="waiting_input", stage=outcome.get("stage") or self.status["stage"],
                         reason=outcome.get("reason") or "waiting_input", active=False)
             return True
@@ -529,12 +540,16 @@ class Job:
                 raise PipelineError("ambiguous_stage_requires_readback", "needs_review")
             while self.status["status"] != "ready":
                 stage = self.status["stage"]
+                # begin() flips the status to running, so the waiting flag has to be
+                # read first; otherwise a resumed job looks like a fresh create and
+                # falls through to the login handoff.
+                was_waiting = self.status.get("status") == "waiting_input"
                 self.begin(stage)
-                if self.method == "protocol" and (stage == "create" or self.status.get("status") == "waiting_input"):
+                if self.method == "protocol" and (stage == "create" or was_waiting):
                     # The adapter owns the create stage and any resume of a waiting
                     # job; once it reports ready the loop continues to the next
                     # stage instead of delegating again.
-                    if self.protocol_step():
+                    if self.protocol_step(waiting=was_waiting):
                         return
                 elif stage == "create": self.create_with_replacement()
                 elif self.cfg.get("handoff") == "dashboard": self.dashboard_handoff()
@@ -702,12 +717,52 @@ class Job:
             raise PipelineError("family_readback_required","needs_review")
         self.update(family_complete=True,family_role=role,reason="family_completed")
 
+    def read_input(self, kind):
+        """Read one verification code, bound to this task and this challenge.
+
+        Rejects a path outside the job folder, a file older than the current
+        challenge, and a code that was already consumed. Adapters call this instead
+        of opening files themselves.
+        """
+        key = {"email": "emailCode", "phone": "phoneCode"}.get(kind)
+        if key is None:
+            raise PipelineError("unknown_input_kind", "usage")
+        raw = (self.cfg.get("protocol") or {}).get(key) or self.cfg.get(key)
+        if not raw:
+            raise PipelineError("input_path_missing", "usage")
+        path = Path(raw).resolve()
+        if self.folder.resolve() not in path.parents:
+            raise PipelineError("input_outside_task", "usage")
+        if not path.is_file():
+            raise PipelineError("input_not_ready", "waiting_input")
+        challenge = self.status.get("challenge_at")
+        if challenge and path.stat().st_mtime < timestamp(challenge):
+            raise PipelineError("input_predates_challenge", "waiting_input")
+        code = path.read_text(encoding="utf-8").strip()
+        if not code:
+            raise PipelineError("input_empty", "waiting_input")
+        digest = hashlib.sha256((kind + ":" + code).encode()).hexdigest()
+        consumed = self.status.get("consumed_inputs") or {}
+        if digest in consumed:
+            raise PipelineError("input_already_consumed", "needs_review")
+        consumed[digest] = iso()
+        self.update(consumed_inputs=consumed)
+        return code
+
     def check_cancel(self):
         if (self.folder / "cancel.request").exists():
             raise PipelineError("cancelled_requires_readback" if self.status.get("registration_started") else "cancelled_before_registration", "cancelled")
 
-    def settle_number(self):
+    def settle_number(self, force=False):
         sms = self.cfg["sms"]
+        # One guard for every caller (run's finally, the exception path and the
+        # maintenance sweep): an unresolved job keeps its number. Only an explicit
+        # confirmed cancellation may pass force=True.
+        if not force and (self.status.get("status") in {"needs_review", "waiting_input", "unknown"}
+                          or self.status.get("refund_deferred")):
+            if self.status.get("number_owned") and not self.status.get("account_created"):
+                self.update(refund_deferred=True)
+            return
         if sms.get("auto_purchase"):
             if (self.folder / "create-sms.txt").exists() and sms.get("supply_operation"):
                 self.supply().otp_received(sms["supply_operation"])
@@ -732,9 +787,18 @@ class Job:
         if self.status["stage"] != "create" and not expired:
             self.update(refund_deferred=True)
             return
-        safe_cancel = self.status["status"] == "cancelled" and not self.status.get("registration_started")
+        # A cancelled job only means "stop". It is not evidence that no account was
+        # created, so it is never on its own a refund basis: the registration result
+        # and the SMS receive state have to be confirmed first.
+        safe_cancel = (self.status["status"] == "cancelled"
+                       and not self.status.get("registration_started")
+                       and not self.status.get("code_received")
+                       and not self.status.get("activation_used"))
         if self.status["status"] not in {"failed", "usage"} and not expired and not safe_cancel:
             self.update(refund_deferred=True)
+            return
+        if self.status["status"] == "cancelled" and not safe_cancel:
+            self.update(refund_deferred=True, reason="cancelled_requires_outcome_check")
             return
         if self.status.get("refund_attempts", 0) >= 5: return
         if self.status.get("refund_after") and timestamp(self.status["refund_after"]) > time.time(): return
@@ -815,7 +879,11 @@ def maintain_once():
                 if (receipt.parent / "cancel.request").exists() and job.status.get("status") != "ready":
                     job.update(status="cancelled", reason="cancelled_requires_readback" if job.status.get("registration_started") else "cancelled_before_registration")
                 if job.status.get("cleanup_pending") or (receipt.parent / "browser.json").exists(): job.cleanup_browser()
-                if job.status.get("refund_pending") or job.status.get("refund_deferred") or job.status.get("status") == "cancelled": job.settle_number()
+                # The sweep may retry a *pending* refund, but never an unresolved one:
+                # settle_number itself refuses those, and the explicit call stays
+                # reserved for a confirmed cancellation.
+                if job.status.get("refund_pending"):
+                    job.settle_number()
                 if job.cfg.get("handoff") != "dashboard" and job.status.get("status") == "ready" and timestamp(job.status["next_run_at"]) <= time.time():
                     try: job.keepalive()
                     except PipelineError as e: job.update(status=e.state, reason=e.reason)

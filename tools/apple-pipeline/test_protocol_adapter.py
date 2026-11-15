@@ -267,3 +267,135 @@ class ProtocolMethodFieldsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class WaitingResumeWithRealBeginTest(unittest.TestCase):
+    """The waiting flag must be read before begin() rewrites the status."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def test_real_begin_still_resumes(self):
+        cfg = make_config(self.folder)
+        job = pipeline.Job(self.folder, cfg)
+        job.status.update(stage="email-sent", status="waiting_input", number_owned=True,
+                          number="4155550134", challenge_at=pipeline.iso())
+        handoffs = {"count": 0}
+
+        def handoff():
+            handoffs["count"] += 1
+            job.update(status="ready", stage="done")
+
+        job.dashboard_handoff = handoff
+        # begin() is NOT replaced: it flips the status to running, which is exactly
+        # what used to defeat the waiting check.
+        FakeAdapter.reset({"state": "waiting_input", "stage": "phone-sent"})
+        job.run()
+        self.assertEqual(FakeAdapter.calls["resume"], 1, "resume did not reach the adapter")
+        self.assertEqual(FakeAdapter.calls["create"], 0)
+        self.assertEqual(handoffs["count"], 0, "a waiting job was handed to login")
+        self.assertEqual(job.status["status"], "waiting_input")
+
+
+class MaintenanceSettlementTest(unittest.TestCase):
+    """The maintenance sweep must not settle an unresolved job."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self._state = pipeline.STATE
+        self._sms = pipeline.sms_call
+        self.calls = []
+        pipeline.STATE = self.root
+        pipeline.sms_call = lambda *a, **kw: (self.calls.append(kw), {"ok": True})[1]
+
+    def tearDown(self):
+        pipeline.STATE = self._state
+        pipeline.sms_call = self._sms
+        self.tmp.cleanup()
+
+    def test_needs_review_with_deferred_refund_is_not_settled(self):
+        folder = self.root / "reg-maint"
+        folder.mkdir(parents=True, exist_ok=True)
+        cfg = make_config(folder)
+        cfg["sms"] = {"activation": "12345", "phone": "4155550134", "phonecc": "US",
+                      "expires_at": "2099-01-01T00:00:00Z", "key": "k"}
+        pipeline.atomic(folder / "input.json", cfg)
+        pipeline.atomic(folder / "result.json", {
+            "job_id": cfg["job_id"], "stage": "create", "status": "needs_review",
+            "number_owned": True, "account_created": False, "refund_deferred": True,
+            "registration_started": True,
+        })
+        pipeline.maintain_once()
+        releases = [c for c in self.calls if c.get("action") == "setStatus"]
+        self.assertEqual(releases, [], "the sweep released an unresolved number")
+
+
+class ExpiredNumberTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        Path(self.folder / "email-code.txt").write_text("", encoding="utf-8")
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        FakeAdapter.reset()
+
+    def tearDown(self):
+        os.environ.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)
+        self.tmp.cleanup()
+
+    def test_expired_number_does_not_repurchase(self):
+        cfg = make_config(self.folder, sms={"auto_purchase": True, "phonecc": "US", "key": "k",
+                                            "api": "https://fixture.invalid/api"})
+        cfg["sms"]["expires_at"] = pipeline.iso(pipeline.time.time() - 60)
+        job = pipeline.Job(self.folder, cfg)
+        job.status.update(stage="create", status="waiting_input", number_owned=True, number="4155550134")
+        purchases = {"count": 0}
+        job.number = lambda: purchases.__setitem__("count", purchases["count"] + 1)
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            job.protocol_step()
+        self.assertEqual(caught.exception.reason, "number_expired")
+        self.assertEqual(job.status["status"], "needs_review")
+        self.assertEqual(purchases["count"], 0, "an expired job bought another number")
+
+
+class BoundInputTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        self.code = self.folder / "email-code.txt"
+        self.code.write_text("012345", encoding="utf-8")
+        self.cfg = make_config(self.folder, protocol={"emailCode": str(self.code),
+                                                      "phoneCode": str(self.folder / "phone-code.txt")})
+        self.job = pipeline.Job(self.folder, self.cfg)
+        self.job.status.update(challenge_at=pipeline.iso())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_stale_code_is_refused(self):
+        old = pipeline.time.time() - 600
+        os.utime(self.code, (old, old))
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            self.job.read_input("email")
+        self.assertEqual(caught.exception.reason, "input_predates_challenge")
+
+    def test_consumed_code_is_refused(self):
+        self.assertEqual(self.job.read_input("email"), "012345")
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            self.job.read_input("email")
+        self.assertEqual(caught.exception.reason, "input_already_consumed")
+
+    def test_code_outside_the_task_is_refused(self):
+        outside = Path(tempfile.mkdtemp()) / "code.txt"
+        outside.write_text("999999", encoding="utf-8")
+        self.job.cfg["protocol"]["emailCode"] = str(outside)
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            self.job.read_input("email")
+        self.assertEqual(caught.exception.reason, "input_outside_task")
