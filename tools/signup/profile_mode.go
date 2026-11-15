@@ -89,6 +89,12 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 				if migrateErr != nil {
 					return nil, nil, fmt.Errorf("%w: %v", ErrProfileBlocked, migrateErr)
 				}
+				// A migration rewrites one field; the rest of the profile still has
+				// to pass the complete check. Otherwise a broken archive (wrong
+				// schema, bad UA, missing hints) would ride the migration through.
+				if revalidateErr := fingerprint.Validate(migrated, cap); revalidateErr != nil {
+					return nil, nil, fmt.Errorf("%w: migration left an invalid profile: %v", ErrProfileBlocked, revalidateErr)
+				}
 				profile = migrated
 				st.Profile = &profile
 				migratedNote = migrated.Engine.Name

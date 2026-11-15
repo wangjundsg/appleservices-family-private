@@ -152,9 +152,19 @@ func (w *workflow) prepare(ctx context.Context) error {
 	if w.session.sessionID == "" {
 		return errors.New("bootstrap_session_missing")
 	}
+	// Three different things used to collapse into one message: a failed request,
+	// a rejected address and an occupied one. They must stay apart, because a
+	// warming run may treat "occupied" as benign and must never treat a 429/503
+	// as if the address had been judged.
 	free, used, err := w.session.EmailFree(ctx, st.Email)
-	if err != nil || !free || used {
-		return errors.New("mailbox_not_confirmed_available")
+	if err != nil {
+		return errors.New("preflight_unavailable")
+	}
+	if used {
+		return errors.New("mailbox_in_use")
+	}
+	if !free {
+		return errors.New("mailbox_rejected")
 	}
 	if err = w.session.CheckPassword(ctx, st.Email, st.Password, st.FirstName, st.LastName); err != nil {
 		return errors.New("password_policy_rejected")

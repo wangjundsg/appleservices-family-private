@@ -390,13 +390,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	}
 	err = w.run(ctx, *stage, *code)
 	if err != nil && st.Failure == "" {
-		// Surface the underlying reason in the receipt: "stage_unconfirmed" alone
-		// hides whether the bootstrap, the session or the request failed.
-		message := err.Error()
-		if len(message) > 160 {
-			message = message[:160]
-		}
-		st.Failure = message
+		st.Failure = publicReason(err)
 	}
 	if *stage == "captcha" && err == nil && st.Captcha != nil {
 		err = writeCaptchaImage(*capImage, st.Captcha.image)
@@ -445,6 +439,50 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		fmt.Fprintf(out, "stage=%s state=%s created=%v reason=%s\n", st.Stage, st.Status, st.Created, reason)
 	}
 	return exit
+}
+
+// publicReasons is the complete set of failure codes a receipt may carry.
+// Anything else is reported as stage_unconfirmed: a provider body or an internal
+// message must never reach a public receipt.
+var publicReasons = map[string]bool{
+	"bootstrap_unconfirmed":             true,
+	"bootstrap_session_missing":         true,
+	"preflight_unavailable":             true,
+	"mailbox_in_use":                    true,
+	"mailbox_rejected":                  true,
+	"password_policy_rejected":          true,
+	"captcha_answer_required":           true,
+	"captcha_request_failed":            true,
+	"captcha_out_of_order":              true,
+	"validate_out_of_order":             true,
+	"email_out_of_order":                true,
+	"phone_out_of_order":                true,
+	"finalize_out_of_order":             true,
+	"verify_out_of_order":               true,
+	"verification_code_required":        true,
+	"verification_id_missing":           true,
+	"verification_id_empty":             true,
+	"verification_id_invalid":           true,
+	"final_account_binding_unconfirmed": true,
+	"final_creation_receipt_required":   true,
+	"account_readback_unconfirmed":      true,
+	"phone_required":                    true,
+	"unsupported_phone_country":         true,
+	"state_write_failed_after_request":  true,
+	"unsupported_stage":                 true,
+	"profile_blocked":                   true,
+}
+
+// publicReason maps an internal error to a stable receipt code.
+func publicReason(err error) string {
+	message := err.Error()
+	if publicReasons[message] {
+		return message
+	}
+	if strings.HasPrefix(message, "profile_blocked") || errors.Is(err, ErrProfileBlocked) {
+		return "profile_blocked"
+	}
+	return "stage_unconfirmed"
 }
 
 func accountFrom(st *state) Account {

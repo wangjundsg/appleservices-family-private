@@ -64,7 +64,10 @@ $record = [ordered]@{
   device   = $Device
   email    = $Email
   exit     = $exit
-  ok       = [bool]($receipt -and ($receipt.ok -eq $true -or $receipt.reason -in @('mailbox_not_confirmed_available', 'preflight_unavailable')))
+  # Only a definitive address verdict ('mailbox_in_use') is benign for warming:
+  # the visit happened and the address question is separate. A transport or
+  # server failure ('preflight_unavailable') stays a failure.
+  ok       = [bool]($receipt -and ($receipt.ok -eq $true -or $receipt.reason -eq 'mailbox_in_use'))
   visits   = if ($dev) { $dev.visits } else { $null }
   ageDays  = if ($dev) { $dev.ageDays } else { $null }
   cookies  = if ($dev) { $dev.cookies } else { $null }

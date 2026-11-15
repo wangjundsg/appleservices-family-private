@@ -22,6 +22,16 @@
 - 「画像、节奏、设备三处都有版本和签名」不成立。实际是：**画像**有 schema+内容签名；**设备**有 schema 版本，本轮补了设备级锁（`withLock`，30s 陈旧锁可回收）；**节奏**只有配置字段，没有版本与签名。
 - 「Edge 普通窗口通过、Chrome 无痕失败」这条对照**同时改变了浏览器与配置状态**，只能作为线索，不足以断言浏览器历史是决定性因素；而且进入邮箱验证页也不等于建号成功。原文已按此降级。
 
+## 0.0000 第四轮复审修复（针对 `29c6078` 的 3 条）
+
+| # | 意见 | 处理 | 证据 |
+|---|---|---|---|
+| 1 | P1 养护把服务错误判为成功（429/503 与"已占用"同一码） | 预检拆成三个稳定码：`preflight_unavailable`（请求失败）/ `mailbox_rejected`（地址被拒）/ `mailbox_in_use`（已占用）。养护脚本只把 `mailbox_in_use` 视为良性，`preflight_unavailable` 仍是失败 | `TestServiceFailureIsNotAnAddressVerdict`（429/503 → `preflight_unavailable`）、`TestTakenAddressIsDistinctFromRejected` |
+| 2 | P1 原始错误正文进入公开回执 | 删除 `err.Error()` 直写；回执只输出**白名单错误码**（`publicReasons`），未登记的一律 `stage_unconfirmed` | `TestPublicReceiptNeverEchoesProviderText`（用带标记的 400 响应体验证） |
+| 3 | P2 显式迁移绕过完整校验 | 迁移后**再次 `Validate` 全量校验**，不通过即 `profile_blocked`，且不写回任务/设备 | `TestMigrationRevalidatesTheWholeProfile`（schema 999 的旧别名档案被拒） |
+
+实物核对：重建二进制后跑了一次养护，回执 `reason=""`、`warmup 3/3`；期间另有一次 `preflight_unavailable`（服务端瞬时失败），按新规则记为失败、不重试。
+
 ## 0.000 事实更正：`used: true` 不等于账号存在
 
 2026-11-15 实测：`2897667304@qq.com` 在**邮箱验证码从未提交**的情况下，`POST /account/validation/appleid` 返回 `used: true`。
