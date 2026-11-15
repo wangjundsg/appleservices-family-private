@@ -84,9 +84,11 @@ var scriptSrcPattern = regexp.MustCompile(`src="([^"]+\.js[^"]*)"`)
 // skips them.
 // Apple can only observe its own properties, so "browse other websites" buys
 // nothing. What it CAN see is that this browser's first and only Apple contact
-// was the signup page — which no ordinary customer does. The journey prefix
-// fixes that: homepage -> product -> support -> click through to the account
-// page, with the referer chain a real visit would carry.
+// was the signup page — which no ordinary customer does. The journey prefix is an
+// EXPERIMENT: homepage -> product -> support -> account page, carrying a referer
+// chain and same-site markers. It reproduces the shape of such a visit; it does
+// not reproduce a real click, and a real browser would also apply the source
+// page's Referrer-Policy, which we can only approximate.
 func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets int, journey bool) []warmupStep {
 	var steps []warmupStep
 	previous := "start"
@@ -130,13 +132,14 @@ func (s *Session) runWarmup(ctx context.Context, pacer *pacing.Pacer, maxAssets 
 		if _, _, ok := fetch("journey-product", product, s.navigationHeaders("same-site", referer)); ok {
 			referer = referenceURL(s.lastWarmupURL)
 		}
-		if _, _, ok := fetch("journey-support", support, s.navigationHeaders("cross-site", referer)); ok {
+		if _, _, ok := fetch("journey-support", support, s.navigationHeaders("same-site", referer)); ok {
 			// A customer who came from Apple's own pages arrives at the account
 			// page by clicking, so the landing carries that referer.
 			referer = referenceURL(s.lastWarmupURL)
 		}
 	}
-	landingHeaders := s.navigationHeaders("cross-site", referer)
+	// www/support/account are all apple.com, i.e. same-site (different origins).
+	landingHeaders := s.navigationHeaders("same-site", referer)
 	if referer == "" {
 		landingHeaders = s.navigationHeaders("none", "")
 	}

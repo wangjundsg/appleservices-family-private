@@ -5,6 +5,7 @@ package main
 // the full validation.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -136,6 +137,69 @@ func TestPreflightFailureCarriesAClass(t *testing.T) {
 		}
 		if status, _ := receipt["httpStatus"].(float64); int(status) != tc.status {
 			t.Fatalf("HTTP %d httpStatus = %v", tc.status, receipt["httpStatus"])
+		}
+	}
+}
+
+// The journey flag is part of the task configuration: changing it later must not
+// change what an interrupted task does when it resumes.
+func TestJourneyIsFrozenWithTheTask(t *testing.T) {
+	st := newProfileState("journey@example.test")
+	session := newProfileSession(t)
+	cfg, err := freezeHuman(st, true, 0, time.Millisecond, 0, true, session)
+	if err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if !cfg.Journey || st.Human == nil || !st.Human.Journey {
+		t.Fatalf("journey=true was not frozen into the task: %+v", st.Human)
+	}
+	// A resume that would flip the flag keeps the stored value.
+	again, err := freezeHuman(st, true, 0, time.Millisecond, 0, false, session)
+	if err != nil {
+		t.Fatalf("refreeze: %v", err)
+	}
+	if !again.Journey {
+		t.Fatal("resume changed the frozen journey setting")
+	}
+}
+
+// apple.com properties are same-site (different origins), not cross-site.
+func TestJourneyUsesSameSiteMarkers(t *testing.T) {
+	assets := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer assets.Close()
+	fixture := &warmupFixture{asset: assets}
+	server := httptest.NewServer(fixture.handler(t))
+	defer server.Close()
+
+	session, err := newSession(SessionOptions{Base: server.URL, Locale: "en-US", Timezone: "America/New_York", Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("newSession: %v", err)
+	}
+	session.widgetKey = "test-widget"
+	session.runWarmup(context.Background(), nil, 0, true)
+
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	want := map[string]string{
+		"/www/":                "none",
+		"/www/shop/buy-iphone": "same-site",
+		"/support/":            "same-site",
+	}
+	for path, site := range want {
+		var seen string
+		for _, r := range fixture.requests {
+			if r.URL.Path == path {
+				seen = r.Header.Get("Sec-Fetch-Site")
+				break
+			}
+		}
+		if seen != site {
+			t.Fatalf("%s Sec-Fetch-Site = %q, want %q", path, seen, site)
+		}
+	}
+	for _, r := range fixture.requests {
+		if strings.Contains(r.URL.Path, "/support") && r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			t.Fatalf("%s was marked cross-site although it is apple.com", r.URL.Path)
 		}
 	}
 }

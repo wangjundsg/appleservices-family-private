@@ -308,7 +308,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		}
 		pacer := pacing.New(human.Pacing, nil)
 		if st.Stage == "" || st.Warmup == nil {
-			steps := session.runWarmup(ctx, pacer, human.Assets, *journey)
+			steps := session.runWarmup(ctx, pacer, human.Assets, human.Journey)
 			st.Warmup = describeWarmup(steps, session.warmupCookieCount())
 			// Only skip the bootstrap walk when the warm-up actually established a
 			// usable session. A warm-up that came back with cookies but no session

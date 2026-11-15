@@ -37,7 +37,7 @@ func freezeHuman(st *state, enabled bool, min, max time.Duration, assets int, jo
 		return nil, errHumanAssets
 	}
 	seed := seedFromTask(st, session)
-	cfg := humanConfig{Pacing: pacing.Config{Enabled: true, Min: min, Max: max, Seed: seed}, Assets: assets}
+	cfg := humanConfig{Pacing: pacing.Config{Enabled: true, Min: min, Max: max, Seed: seed}, Assets: assets, Journey: journey}
 	st.Human = &cfg
 	return &cfg, nil
 }
