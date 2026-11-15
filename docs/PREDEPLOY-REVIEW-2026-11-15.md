@@ -2,7 +2,31 @@
 
 审查代码基线：`7062c90b3e663f0ee030904d3ebfcaab4b3a525d`。目标：现有 Windows 机器的 18741 面板。日期：2026-11-15。
 
-## 7898145：A＋C 复核（最新，尚不能按完成验收）
+## c399782：面板 A＋C 再复核（最新）
+
+基线 `c3997826d6d5a636ed0e5e16ed8a20c4b092be63`，远端一致。工作区另有非本任务的 dashboard 未提交修改；本轮将该提交通过 git archive 导出到独立临时目录，测试不混入这些修改。独立快照的定向 vet、Go 五包测试、Python 44 项测试全部通过，signup 可构建。没有部署、请求真实服务或改动那些工作区文件。
+
+CLI 只接受 protocol、拒绝非法值不写任务、按任务名生成默认目录等修正方向正确。但面板 A＋C 仍不能按完成验收：
+
+1. **P1 / 新建协议任务被自己刚写的 manifest 锁成 browser。** `register.go:436` 先写不含 registrationMethod 的 request.json，第 443 行才调用 registrationMethodFor。读取到存在但缺字段的文件后，函数应用“旧任务=browser”规则，拒绝本次 protocol 请求。本轮走真实 `startRegistration` 入口、只使用临时假资源配置，复现错误“任务已冻结为 browser，不能切换到 protocol”。校验应在新任务首次写入之前完成，首次持久化就包含冻结值；读取旧任务和创建新任务必须区分。非法请求也不能先留下含凭据的 request.json/panel.json，避免后续被重复任务检查挡住。
+2. **P1 / 面板直连协议命令既绕过管理层，又不能执行。** `registrationProgram` 直接返回 signup.exe，违背统一 pipeline 管理边界。参数含不存在的 `-cap-image`（CLI 实际为 `-captcha-dump`），实际构建后运行所生成的参数立即报 unknown flag；还没有邮箱、号码、账号绑定输入和注册阶段，默认阶段仅 preflight。当前创建阻断使这条分支尚不可达，但修复第 1 项后不能直接开放它。应移除这条不完整直连，在 pipeline 的注册阶段接适配器，协议参数由适配器按私密任务配置构造。
+3. **P2 / 持久 manifest 的非法或损坏状态被放行。** `frozenRegistrationMethod` 把任何读取错误都当作“没有旧任务”；`registrationMethodFor` 不验证 stored。实测保存非法方式后仍返回成功，保存破损 JSON 后也被当成新 protocol 任务。只有文件确实不存在才可走新建；解析、权限等错误必须停止，持久方式也必须校验枚举。
+4. **接入未闭合。** 面板 input 仍写 jobDir/email-code.txt，协议参数指向 jobDir/protocol/email-code.txt；进度读取 pipeline result.json，取消写 cancel.request，直接 signup 不消费这些管理协议。新增测试只检查 helper 返回字符串和目录存在，尚未验证用户创建、输入、查看进度、取消和恢复。原有依赖检查也尚未按方式分流。
+
+因此可以继续做 B＋D 的假适配器，但先纠正上面的首次冻结时序并撤下不完整直连，协议业务入口在接线验收前保持不可执行。测试应启动真实 pipeline Job 管理逻辑，以可替换的注册执行器和资源客户端为测试边界；不能另建一个 stub 返回 waiting_input 后，仅检查三个从未接入真实管理逻辑的计数器。
+
+最低验收：创建 protocol 任务成功且首次 manifest 即冻结；wait 时不退号、不释放邮箱、不切登录；重启仍续同一 protocol 状态；输入路径一致；取消和过期按统一资源规则收尾；ready 才交接且幂等；未知结果不换路径；browser 原有任务保持可用。已有的“协议执行器不得经过 pipeline”测试断言应改为“协议注册不得调用浏览器执行器”，统一资源管理仍必须经过 pipeline。
+
+本机复现目录：`C:/Users/HUAWEI/AppData/Local/Temp/apple-review-c399-a21b5d55ea7a45e783bdc2bf04a40c3e/`。source 为独立提交快照，dashboard_test.go/overlay.json 为复核用例：
+
+```powershell
+Set-Location C:/Users/HUAWEI/AppData/Local/Temp/apple-review-c399-a21b5d55ea7a45e783bdc2bf04a40c3e/source
+go test -overlay ../overlay.json ./internal/dashboard -run '^TestReview(CreateProtocolThroughPanel|StoredPanelMethodMustBeValid|UnreadableManifestMustNotBecomeNewTask)$' -count=1 -v
+```
+
+三例在该基线全部失败；新建协议用例只检查真实入口的冻结判断，不启动真实执行器，也不连接供应商。
+
+## 7898145：A＋C 复核（历史记录）
 
 基线 `7898145a0ff1b3b7b5236d48529b1d97eccb3009`，远端一致。signup、dashboard 两包测试及定向 vet 通过。该提交仅修改 `tools/signup/admission.go`、`main.go` 和 `predeploy_test.go`，没有修改面板、pipeline 或文档。
 
