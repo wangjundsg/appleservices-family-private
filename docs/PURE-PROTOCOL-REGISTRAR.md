@@ -340,3 +340,43 @@ GET /account?countryCode=USA → HTTP 404
 | P0 | 干净的出口 IP（当前 IP 已 404） | 引导必须 200 才能开跑 |
 | P1 | CN 号供给（hero 之外的平台） | 走「家宽 CN + zh-CN + +86」这条不需要代理的组合 |
 | P2 | 一个可用的 `X-Apple-I-FD-Client-Info` 来源 | 用 `-fd-client-info` 单独验证 fd 是否参与这条判定（工具已支持该参数） |
+
+---
+
+## 10 第三轮（10:20–11:40）：链路全绿，卡在出口信誉
+
+### 10.1 三个真 bug 被挖出来并修掉
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| B1 | 引导 `404` + `www.apple.com/errors/us_error.html`，同一出口 curl 却 200 | **引导 GET 不能带整套 widget 头**（Origin/widget-key/request-context）。裸 `UA + Accept` 才 200 | 引导单独用最小头（`client.go` Bootstrap），API POST 仍带全套 |
+| B2 | 号码提交报 `ExceedsLength / Invalid Phone Number` | hero 回的号码带国码（`15853099954`），客户端把它当国内号直填 | `formatPhone` 先剥离国码再格式化成 `(NXX) NXX-XXXX` |
+| B3 | 同出口连探几次后连引导都 404 | 一个出口一次作业，别在同一 sticky 端口上反复试探 | 一次尝试一个端口；`-skip-landing` 默认 |
+
+另外补了两件工具：`tools/capture/fd-harvest.cjs`（真 Chrome 采一份新鲜 `X-Apple-I-FD-Client-Info`）、`tools/signup/attempt.ps1`（买号→建号→邮箱码→短信码→终判 一条龙，失败自动退号）。
+
+### 10.2 现在的真实卡点
+
+四条尝试（US 住宅出口 + US 号 + en-US/America/New_York + 不同邮箱/FD）全部停在同一条：
+
+```json
+{"service_errors":[{"code":"-34607001","title":"Could Not Create Account",
+ "message":"Your account cannot be created at this time."}],"hasError":true}
+```
+
+已排除的变量：`fdClientInfo`（有无都试过，含真 Chrome 现采）、邮箱域（outlook/hotmail）、号码来源（hero/grizzly）、HTTP 版本与 client hints、号码格式。
+
+结论：**协议链路没有任何阻塞，卡的是 Apple 对这个出口的信誉判定。** 与 `docs/RESEARCH-APPLE-SUPPLY.md` §3.3「换任何商业住宅代理即被判」一致——DataImpulse 的住宅段被 Apple 认出来了。
+
+### 10.3 下一轮的唯一前置
+
+要么给一个 Apple 不认的住宅出口（**Roxy** 的 `ROXY_TOKEN/workspaceId/projectId`，`REGISTRAR-CONTRACT.md` §1.2 那套；或 `RESOURCES.md` §4.2 的 711 账号密码），要么回到本机家宽 + 中国号 + `zh-CN`（hero 的 CN 段 `getNumber service=wx country=3` 全档 `NO_NUMBERS`，得换供应商）。
+
+工具侧已经全部就绪，一条命令即可跑：
+
+```powershell
+powershell -File tools\signup\attempt.ps1 -Email <mailbox> -GraphCfg <graph.json> `
+  -Provider hero -SmsCountry 187 -PhoneCC US -ExitPort <fresh> -Locale en-US -Tz America/New_York
+```
+
+`-ExitPort` 每次换一个（一端口一 IP 一作业），失败自动 `setStatus=8` 退号（≥120 秒窗口后重试）。

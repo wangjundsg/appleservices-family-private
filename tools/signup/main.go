@@ -67,6 +67,10 @@ func main() {
 		captchaAns  = flag.String("captcha-answer", "", "answer to use instead of asking YesCaptcha")
 		captchaFile = flag.String("captcha-answer-file", "", "read the answer from this file (blocks until it appears)")
 		captchaWait = flag.Duration("captcha-wait", 180*time.Second, "how long to wait for -captcha-answer-file")
+		chHints     = flag.Bool("ch-hints", true, "send Sec-Ch-Ua/Sec-Fetch-* like Chrome (some edges flag the mismatch)")
+		skipLanding = flag.Bool("skip-landing", false, "skip the portal landing page (no cookies)")
+		curlMode    = flag.Bool("curl", false, "send the wire through curl.exe (needed when Apple's edge 404s Go's TLS)")
+		http2       = flag.Bool("http2", false, "use HTTP/2 (Apple's edge 404s Go's h2 fingerprint)")
 		fdInfo      = flag.String("fd-client-info", "", "verbatim X-Apple-I-FD-Client-Info JSON; empty sends none")
 		asJSON      = flag.Bool("json", false, "print the stage receipt as one JSON line")
 		timeout     = flag.Duration("timeout", 45*time.Second, "per request timeout")
@@ -112,6 +116,10 @@ func main() {
 		Timezone:     *timezone,
 		Proxy:        *proxy,
 		FDClientInfo: *fdInfo,
+		HTTP2:        *http2,
+		SkipLanding:  *skipLanding,
+		CHHints:      *chHints,
+		UseCurl:      *curlMode,
 		Timeout:      *timeout,
 	})
 	if err != nil {
@@ -384,9 +392,19 @@ func digitsOnly(s string) string {
 }
 
 // formatPhone mirrors the widget's display format for a US-style number; other
-// countries are sent bare.
+// countries are sent bare. SMS relays hand out numbers with or without the
+// country code (hero returns +1 585 309 9954 as "15853099954") and Apple
+// answers `ExceedsLength / Invalid Phone Number` when the dial code lands in
+// the national slot, so it is stripped first.
 func formatPhone(number, iso2 string) string {
-	if strings.ToUpper(iso2) == "US" && len(number) == 10 {
+	iso2 = strings.ToUpper(iso2)
+	dial := localDialCode(iso2)
+	if dial != "" && strings.HasPrefix(number, dial) && len(number) > len(dial) {
+		if national := number[len(dial):]; len(national) == 10 || (iso2 != "US" && len(number) > 11) {
+			number = national
+		}
+	}
+	if iso2 == "US" && len(number) == 10 {
 		return fmt.Sprintf("(%s) %s-%s", number[:3], number[3:6], number[6:])
 	}
 	return number

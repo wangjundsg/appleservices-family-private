@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,19 +61,29 @@ func (e *ProtocolError) Error() string {
 // Session is one browser identity: cookies, scnt counter, session id and the
 // hashcash challenge dropped by the last response.
 type Session struct {
-	base         string
-	portal       string
-	userAgent    string
-	locale       string
-	timezone     string
-	widgetKey    string
-	client       *http.Client
+	base      string
+	portal    string
+	userAgent string
+	locale    string
+	timezone  string
+	widgetKey string
+	client    *http.Client
+
 	scnt         string
 	sessionID    string
 	hcBits       int
 	hcChallenge  string
 	fdClientInfo string
 	lastRequest  string
+
+	// Transport switches. UseCurl is the escape hatch when Apple's edge blocks
+	// Go's TLS fingerprint (see curl_transport.go).
+	UseCurl     bool
+	SkipLanding bool
+	CHHints     bool
+	HTTP2       bool
+	proxyURL    string
+	curlJar     string
 }
 
 // SessionOptions configures the transport and the browser identity it claims.
@@ -83,6 +94,10 @@ type SessionOptions struct {
 	Timezone     string
 	Proxy        string
 	FDClientInfo string
+	HTTP2        bool
+	SkipLanding  bool
+	CHHints      bool
+	UseCurl      bool
 	Timeout      time.Duration
 }
 
@@ -98,6 +113,14 @@ func newSession(opts SessionOptions) (*Session, error) {
 			return nil, fmt.Errorf("invalid proxy: %w", err)
 		}
 		transport.Proxy = http.ProxyURL(parsed)
+	}
+	// Apple's edge answers HTTP/2 from Go's TLS stack with a 404 error page
+	// (www.apple.com/errors/us_error.html) while the same headers over HTTP/1.1
+	// return 200. HTTP/1.1 unless the caller asks for h2 with -http2.
+	if !opts.HTTP2 {
+		transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 45 * time.Second
@@ -147,6 +170,19 @@ func (s *Session) headers(contentType string, hashcash bool, now time.Time) (htt
 	h.Set("X-Apple-Widget-Key", s.widgetKey)
 	h.Set("X-Apple-I-Request-Context", "account")
 	h.Set("X-Apple-I-Timezone", s.timezone)
+	if s.CHHints {
+		// A Chrome UA without these is an inconsistent client: the captured
+		// browser sends them on every call (UA says 141, hint says 157; copied
+		// verbatim). Apple's edge rejects the mismatch against a non-browser TLS
+		// fingerprint, so the switch exists.
+		h.Set("Sec-Ch-Ua", `"Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"`)
+		h.Set("Sec-Ch-Ua-Mobile", "?0")
+		h.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+		h.Set("Sec-Fetch-Dest", "empty")
+		h.Set("Sec-Fetch-Mode", "cors")
+		h.Set("Sec-Fetch-Site", "same-origin")
+		h.Set("Priority", "u=1, i")
+	}
 	if contentType != "" {
 		h.Set("Content-Type", contentType)
 	}
@@ -169,42 +205,61 @@ func (s *Session) headers(contentType string, hashcash bool, now time.Time) (htt
 	return h, nil
 }
 
-// absorb copies the rotating server state out of every response. scnt is
-// re-issued on all of them; dropping it is exactly the defect that made an
+// absorb copies the rotating server state out of a response header set. scnt
+// is re-issued on all of them; dropping it is exactly the defect that made an
 // earlier pure-HTTP attempt answer 403.
-func (s *Session) absorb(resp *http.Response) {
-	if v := strings.TrimSpace(resp.Header.Get("scnt")); v != "" {
+func (s *Session) absorb(header http.Header) {
+	if v := strings.TrimSpace(header.Get("scnt")); v != "" {
 		s.scnt = v
 	}
-	if v := strings.TrimSpace(resp.Header.Get("X-Apple-ID-Session-Id")); v != "" {
+	if v := strings.TrimSpace(header.Get("X-Apple-ID-Session-Id")); v != "" {
 		s.sessionID = v
 	}
-	if v := strings.TrimSpace(resp.Header.Get("X-Apple-HC-Bits")); v != "" {
+	if v := strings.TrimSpace(header.Get("X-Apple-HC-Bits")); v != "" {
 		var bits int
 		if _, err := fmt.Sscanf(v, "%d", &bits); err == nil && bits > 0 {
 			s.hcBits = bits
 		}
 	}
-	if v := strings.TrimSpace(resp.Header.Get("X-Apple-HC-Challenge")); v != "" {
+	if v := strings.TrimSpace(header.Get("X-Apple-HC-Challenge")); v != "" {
 		s.hcChallenge = v
 	}
 }
 
+// send is the single transport switch: curl when the edge blocks Go's TLS
+// fingerprint, net/http otherwise.
+func (s *Session) send(ctx context.Context, method, url string, header http.Header, body []byte) (int, http.Header, []byte, error) {
+	if s.UseCurl {
+		return s.curlRoundTrip(ctx, method, url, header, body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	req.Header = header
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return resp.StatusCode, resp.Header, nil, err
+	}
+	return resp.StatusCode, resp.Header, raw, nil
+}
+
 // do performs one call, absorbs server state and returns the raw body.
 func (s *Session) do(ctx context.Context, stage, method, path string, body any, hashcash bool) ([]byte, error) {
-	var payload io.Reader
+	var payload []byte
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		payload = bytes.NewReader(raw)
+		payload = raw
 	}
 	url := s.base + path
-	req, err := http.NewRequestWithContext(ctx, method, url, payload)
-	if err != nil {
-		return nil, err
-	}
 	contentType := ""
 	if body != nil {
 		contentType = "application/json"
@@ -213,20 +268,14 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", stage, err)
 	}
-	req.Header = header
 
-	resp, err := s.client.Do(req)
+	status, respHeader, raw, err := s.send(ctx, method, url, header, payload)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", stage, err)
 	}
-	defer resp.Body.Close()
-	s.absorb(resp)
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("%s: read body: %w", stage, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: resp.StatusCode, Body: clip(string(raw), 600)}
+	s.absorb(respHeader)
+	if status < 200 || status > 299 {
+		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
 	}
 	return raw, nil
 }
@@ -234,24 +283,20 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 // refreshWidgetKey pulls the live serviceKey. A failure is not fatal: the
 // known-good constant is used and the caller keeps going.
 func (s *Session) refreshWidgetKey(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.portal, nil)
+	header := http.Header{}
+	header.Set("User-Agent", s.userAgent)
+	header.Set("Accept", "application/json")
+	status, _, raw, err := s.send(ctx, http.MethodGet, s.portal, header, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set("Accept", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("portal bootstrap HTTP %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return fmt.Errorf("portal bootstrap HTTP %d", status)
 	}
 	var portal struct {
 		ServiceKey string `json:"serviceKey"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&portal); err != nil {
+	if err := json.Unmarshal(raw, &portal); err != nil {
 		return err
 	}
 	if portal.ServiceKey != "" {
@@ -264,22 +309,17 @@ func (s *Session) refreshWidgetKey(ctx context.Context) error {
 // portal lives on account.apple.com while every API call lives on
 // appleid.apple.com, and the jar has to carry cookies across both.
 func (s *Session) getAbsolute(ctx context.Context, stage, url string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set("Accept-Language", s.locale)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	resp, err := s.client.Do(req)
+	header := http.Header{}
+	header.Set("User-Agent", s.userAgent)
+	header.Set("Accept-Language", s.locale)
+	header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	status, respHeader, _, err := s.send(ctx, http.MethodGet, url, header, nil)
 	if err != nil {
 		return fmt.Errorf("%s: %w", stage, err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<20))
-	s.absorb(resp)
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return &ProtocolError{Stage: stage, Method: http.MethodGet, URL: url, Status: resp.StatusCode}
+	s.absorb(respHeader)
+	if status < 200 || status > 299 {
+		return &ProtocolError{Stage: stage, Method: http.MethodGet, URL: url, Status: status}
 	}
 	return nil
 }
@@ -298,11 +338,26 @@ func (s *Session) Bootstrap(ctx context.Context, countryISO3 string) error {
 	// rate limited by IP (503, docs/signup-protocol.md §8) and the config call
 	// works without it, so a failure here is reported and ignored.
 	landing := strings.Replace(s.base, "//appleid.", "//account.", 1) + "/account"
-	if err := s.getAbsolute(ctx, "landing", landing); err != nil {
-		warnf("landing page: %v (continuing)", err)
+	if !s.SkipLanding {
+		if err := s.getAbsolute(ctx, "landing", landing); err != nil {
+			warnf("landing page: %v (continuing)", err)
+		}
 	}
-	if _, err := s.do(ctx, "bootstrap", http.MethodGet, "/account?countryCode="+url.QueryEscape(countryISO3), nil, false); err != nil {
-		return err
+	// The config call is the one request Apple's edge is fussy about: a bare
+	// UA/Accept pair passes while the full widget header set answers 404 with
+	// www.apple.com/errors/us_error.html. Measured 2026-11-15, same exit IP.
+	header := http.Header{}
+	header.Set("User-Agent", s.userAgent)
+	header.Set("Accept-Language", s.locale)
+	header.Set("Accept", "application/json, text/plain, */*")
+	url := s.base + "/account?countryCode=" + url.QueryEscape(countryISO3)
+	status, respHeader, raw, err := s.send(ctx, http.MethodGet, url, header, nil)
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	s.absorb(respHeader)
+	if status < 200 || status > 299 {
+		return &ProtocolError{Stage: "bootstrap", Method: http.MethodGet, URL: url, Status: status, Body: clip(string(raw), 200)}
 	}
 	if s.scnt == "" {
 		return errors.New("bootstrap: server returned no scnt header; the portal layout changed")
