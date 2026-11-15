@@ -854,7 +854,8 @@ class Job:
         if not kind:
             return {}
         try:
-            return {kind: self.read_input(kind)}
+            code, _ = self._parse_input(kind)
+            return {kind: code}
         except PipelineError as error:
             if error.reason in {"input_not_ready", "input_path_missing", "input_empty",
                                 "input_predates_challenge", "input_malformed"}:
@@ -1004,13 +1005,16 @@ class Job:
         inputs[input_id] = record
         self.update(inputs=inputs)
 
-    def read_input(self, kind):
-        """Read one verification code, bound to this task and this challenge.
+    def peek_input(self, kind):
+        """Validate a code without consuming it.
 
-        Rejects a path outside the job folder, a file older than the current
-        challenge, and a code that was already consumed. Adapters call this instead
-        of opening files themselves.
+        Returns (code, input_id). The caller decides whether it is dispatched, so a
+        crash before dispatch leaves nothing consumed.
         """
+        return self._parse_input(kind)
+
+    def _parse_input(self, kind):
+        """Shared validation: path, freshness, shape, binding. No side effects."""
         key = {"email": "emailCode", "phone": "phoneCode"}.get(kind)
         if key is None:
             raise PipelineError("unknown_input_kind", "usage")
@@ -1022,23 +1026,42 @@ class Job:
             raise PipelineError("input_outside_task", "usage")
         if not path.is_file():
             raise PipelineError("input_not_ready", "waiting_input")
-        challenge = self.status.get("challenge_at")
-        if challenge and path.stat().st_mtime < timestamp(challenge):
+        challenge = self.active_challenge(kind) or {}
+        sent_at = challenge.get("sent_at") or self.status.get("challenge_at")
+        if sent_at and path.stat().st_mtime < timestamp(sent_at):
             raise PipelineError("input_predates_challenge", "waiting_input")
         code = path.read_text(encoding="utf-8").strip()
         if not code:
             raise PipelineError("input_empty", "waiting_input")
         if not self.CODE_PATTERN.match(code):
-            # Shape is checked before consumption: "not-a-code" must stay readable
-            # for the next attempt instead of burning the input.
+            # Shape is checked before any reservation: "not-a-code" must stay usable.
             raise PipelineError("input_malformed", "waiting_input")
-        digest = hashlib.sha256((kind + ":" + code).encode()).hexdigest()
-        consumed = self.status.get("consumed_inputs") or {}
-        if digest in consumed:
+        digest = hashlib.sha256(f"{kind}:{code}:{challenge.get('id', '')}".encode()).hexdigest()
+        state = self.input_state(digest)
+        if state in {"dispatch_intent", "accepted"}:
             raise PipelineError("input_already_consumed", "needs_review")
-        consumed[digest] = iso()
-        self.update(consumed_inputs=consumed)
+        if state in {"rejected", "inconclusive"}:
+            raise PipelineError("input_dispatch_unconfirmed", "needs_review")
+        return code, digest
+
+    def read_input(self, kind):
+        """Validate and reserve one code. A reservation is reclaimable; a
+        dispatch intent is not."""
+        code, digest = self._parse_input(kind)
+        self.reserve_input(digest, kind)
+        self.update(consumed_inputs={**(self.status.get("consumed_inputs") or {}), digest: iso()})
         return code
+
+    def reclaim_reservations(self):
+        """Give back reservations that provably never reached dispatch."""
+        inputs = dict(self.status.get("inputs") or {})
+        changed = False
+        for key, record in list(inputs.items()):
+            if record.get("state") == "reserved":
+                inputs.pop(key, None)
+                changed = True
+        if changed:
+            self.update(inputs=inputs)
 
     def check_cancel(self):
         if (self.folder / "cancel.request").exists():

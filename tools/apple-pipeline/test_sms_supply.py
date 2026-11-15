@@ -127,6 +127,20 @@ class AcquisitionIdempotencyTest(unittest.TestCase):
         self.assertEqual(first["activation"], second["activation"])
         self.assertTrue(second.get("recovered"))
 
+    def test_a_settled_order_is_never_rebought(self):
+        self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        order = self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        self.supply.otp_received(order["supply_operation"])
+        with self.assertRaisesRegex(SupplyError, "acquisition_already_settled"):
+            self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        self.assertEqual(self.call.call_count, 1, "an OTP-received order was bought again")
+
+    def test_country_cannot_change_under_one_acquisition(self):
+        self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        with self.assertRaisesRegex(SupplyError, "acquisition_country_mismatch"):
+            self.supply.purchase("job-1", "US", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
+        self.assertEqual(self.call.call_count, 1)
+
     def test_the_account_number_limit_still_applies(self):
         self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-1"}, allow=True)
         self.supply.purchase("job-1", "GB", {**self.policy, "acquisition_id": "acq-2"}, allow=True)

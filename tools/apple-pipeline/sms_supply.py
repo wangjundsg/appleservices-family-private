@@ -53,7 +53,15 @@ class Supply:
             # between "PURCHASED" and the job binding would otherwise buy again.
             if acquisition:
                 for row in rows:
-                    if row.get("acquisition_id") == acquisition and row["result"] == "PURCHASED":
+                    if row.get("acquisition_id") != acquisition:
+                        continue
+                    # Any state ends this intent: an order that already received an
+                    # OTP, is refunding, or was refunded must never re-buy.
+                    if row.get("country") and row["country"] != country:
+                        raise SupplyError("acquisition_country_mismatch")
+                    if row["result"] in {"OTP_RECEIVED", "REFUND_PENDING", "REFUNDED", "CANCELLED"}:
+                        raise SupplyError("acquisition_already_settled")
+                    if row["result"] == "PURCHASED":
                         cfg = self.provider(row["provider"])
                         return {**cfg, "activation": row["activation_id"], "phone": row["phone"][len(dial):],
                                 "phonecc": country, "expires_at": dt.datetime.fromtimestamp(
@@ -61,6 +69,8 @@ class Supply:
                                 "supply_operation": row["operation_id"], "provider": row["provider"],
                                 "can_get_another_sms": row.get("can_get_another_sms", False),
                                 "recovered": True}
+                    # Pending/unknown receipt: the caller must read it back, not retry.
+                    raise SupplyError("purchase_requires_readback")
             # Retain all purchase intents across jobs. Unknown purchase never changes provider.
             if any(row["result"] in {"PURCHASE_PENDING","PURCHASE_UNKNOWN","RECEIPT_INVALID"} for row in rows):
                 raise SupplyError("purchase_requires_readback")

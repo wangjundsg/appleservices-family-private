@@ -397,11 +397,21 @@ class BoundInputTest(unittest.TestCase):
             self.job.read_input("email")
         self.assertEqual(caught.exception.reason, "input_predates_challenge")
 
-    def test_consumed_code_is_refused(self):
+    def test_dispatched_code_is_refused(self):
         self.assertEqual(self.job.read_input("email"), "012345")
+        # A reservation alone is reclaimable; once a dispatch intent exists the code
+        # must never be sent twice.
+        _, digest = self.job.peek_input("email")
+        self.job.dispatch_input(digest)
         with self.assertRaises(pipeline.PipelineError) as caught:
             self.job.read_input("email")
         self.assertEqual(caught.exception.reason, "input_already_consumed")
+
+    def test_reservation_is_reclaimable(self):
+        self.job.read_input("email")
+        self.job.reclaim_reservations()
+        self.assertEqual(self.job.read_input("email"), "012345",
+                         "a reservation without a dispatch intent must be recoverable")
 
     def test_code_outside_the_task_is_refused(self):
         outside = Path(tempfile.mkdtemp()) / "code.txt"
