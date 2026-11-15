@@ -49,6 +49,31 @@ type deviceState struct {
 
 var deviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,48}$`)
 
+// withLock serialises access to one device record. Two processes running the
+// same device concurrently would otherwise interleave cookie snapshots and visit
+// counters, which is exactly the state a reviewer cannot audit.
+func withLock(path string, fn func() error) error {
+	lockPath := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	handle, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
+			_ = os.Remove(lockPath) // stale lock from a crashed run
+			handle, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		}
+		if err != nil {
+			return fmt.Errorf("device: %s is locked by another run", lockPath)
+		}
+	}
+	defer func() {
+		handle.Close()
+		os.Remove(lockPath)
+	}()
+	return fn()
+}
+
 // devicePath resolves the state file for one device id.
 func devicePath(dir, id string) (string, error) {
 	if !deviceIDPattern.MatchString(id) {
@@ -68,12 +93,20 @@ func loadDevice(dir, id string, now time.Time) (*deviceState, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	var raw []byte
+	var readErr error
+	lockErr := withLock(path, func() error {
+		raw, readErr = os.ReadFile(path)
+		return readErr
+	})
+	if lockErr != nil && !os.IsNotExist(lockErr) {
+		return nil, lockErr
+	}
+	if os.IsNotExist(lockErr) {
 		return &deviceState{SchemaVersion: deviceSchemaVersion, ID: id, CreatedAt: now.UTC(), LastUsedAt: now.UTC()}, nil
 	}
-	if err != nil {
-		return nil, err
+	if readErr != nil {
+		return nil, readErr
 	}
 	var device deviceState
 	if err := json.Unmarshal(raw, &device); err != nil {
@@ -101,11 +134,13 @@ func (d *deviceState) save(dir string) error {
 	if err != nil {
 		return err
 	}
-	temp := path + ".tmp"
-	if err := os.WriteFile(temp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	return withLock(path, func() error {
+		temp := path + ".tmp"
+		if err := os.WriteFile(temp, raw, 0o600); err != nil {
+			return err
+		}
+		return os.Rename(temp, path)
+	})
 }
 
 // ageDays is the receipt-friendly age of this browser profile.
@@ -174,6 +209,12 @@ func (d *deviceState) warmSession(session *Session) (int, error) {
 		total += len(event.Cookies)
 	}
 	return total, nil
+}
+
+// deviceSeedsTask reports whether the device may seed this task with cookies.
+// Only a fresh task may: a resumed task's own snapshot is newer.
+func deviceSeedsTask(st *state) bool {
+	return st.Session == nil && st.Stage == ""
 }
 
 // deviceReceipt is what a task reports about the browser it borrowed.

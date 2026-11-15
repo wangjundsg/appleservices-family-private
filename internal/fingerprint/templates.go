@@ -21,7 +21,7 @@ const (
 	iosSafariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS %s like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/%s Mobile/15E148 Safari/604.1"
 )
 
-func chromeTemplate(version string, major int, weight int) Template {
+func chromeTemplate(version string, major int, weight int, hello string) Template {
 	return Template{
 		ID:             "chrome-win-" + version,
 		Kind:           KindChrome,
@@ -40,7 +40,7 @@ func chromeTemplate(version string, major int, weight int) Template {
 		Timezones: []string{"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"},
 		Screen:    Screen{Width: 1920, Height: 1080, Scale: 1},
 		Engineering: EngineHello{
-			Name:    "HelloChrome_Auto",
+			Name:    hello,
 			Minimum: "1.6",
 		},
 	}
@@ -59,7 +59,7 @@ func firefoxTemplate(version string, major int, weight int) Template {
 		Language:       "en-US",
 		Timezones:      []string{"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"},
 		Screen:         Screen{Width: 1920, Height: 1080, Scale: 1},
-		Engineering:    EngineHello{Name: "HelloFirefox_Auto", Minimum: "1.6"},
+		Engineering:    EngineHello{Name: "HelloFirefox_120", Minimum: "1.6"},
 	}
 }
 
@@ -76,7 +76,7 @@ func macSafariTemplate(version string, major int, weight int) Template {
 		Language:       "en-US",
 		Timezones:      []string{"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"},
 		Screen:         Screen{Width: 1680, Height: 1050, Scale: 2},
-		Engineering:    EngineHello{Name: "HelloSafari_Auto", Minimum: "1.6"},
+		Engineering:    EngineHello{Name: "HelloSafari_16_0", Minimum: "1.6"},
 	}
 }
 
@@ -93,18 +93,21 @@ func iosSafariTemplate(version string, osVersion string, major int, weight int) 
 		Language:       "en-US",
 		Timezones:      []string{"America/New_York", "America/Chicago", "America/Denver"},
 		Screen:         Screen{Width: 390, Height: 844, Scale: 3},
-		Engineering:    EngineHello{Name: "HelloIOS_Auto", Minimum: "1.6"},
+		Engineering:    EngineHello{Name: "HelloIOS_14", Minimum: "1.6"},
 	}
 }
 
 // registry is the full table. Order matters only for deterministic iteration.
 var registry = []Template{
 	// Layer 1: A's declared population (contract §3).
-	chromeTemplate("150", 150, 2),
-	chromeTemplate("151", 151, 3),
-	chromeTemplate("152", 152, 5),
-	chromeTemplate("153", 153, 10),
-	chromeTemplate("154", 154, 80),
+	// Layer 1 keeps A's versions. They sit above what utls can pose as today, so
+	// selection filters them out; the pinned preset is only a placeholder for the
+	// day an engine can reach them.
+	chromeTemplate("150", 150, 2, "HelloChrome_133"),
+	chromeTemplate("151", 151, 3, "HelloChrome_133"),
+	chromeTemplate("152", 152, 5, "HelloChrome_133"),
+	chromeTemplate("153", 153, 10, "HelloChrome_133"),
+	chromeTemplate("154", 154, 80, "HelloChrome_133"),
 	firefoxTemplate("133", 133, 50),
 	firefoxTemplate("144", 144, 50),
 	macSafariTemplate("15.3", 15, 25),
@@ -115,8 +118,8 @@ var registry = []Template{
 	iosSafariTemplate("18.0", "18_0", 18, 50),
 
 	// Layer 2: engine-reachable fallbacks (same shape, older major version).
-	chromeTemplate("131", 131, 50),
-	chromeTemplate("133", 133, 50),
+	chromeTemplate("131", 131, 50, "HelloChrome_131"),
+	chromeTemplate("133", 133, 50, "HelloChrome_133"),
 	firefoxTemplate("120", 120, 100),
 	macSafariTemplate("16.0", 16, 100),
 	iosSafariTemplate("14.0", "14_0", 14, 100),

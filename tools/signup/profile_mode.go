@@ -13,6 +13,7 @@ package main
 //   - receipts report the chosen profile and the applied engine separately.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -140,8 +141,25 @@ func installProfile(st *state, session *Session, cfg profileConfig, proxy string
 // applyToSession makes the session claim the profile: identity headers, client
 // hints (Chrome only) and the engine transport.
 func applyToSession(session *Session, profile fingerprint.Profile, transport http.RoundTripper) error {
-	if profile.Kind != fingerprint.KindChrome && session.fdClientInfo != "" {
-		return errors.New("profile: fd-client-info is a Chrome artifact and cannot be paired with " + string(profile.Kind))
+	if session.fdClientInfo != "" {
+		if profile.Kind != fingerprint.KindChrome {
+			return errors.New("profile: fd-client-info is a Chrome artifact and cannot be paired with " + string(profile.Kind))
+		}
+		// A FD blob carries the UA and locale it was minted with. Once the profile
+		// changes the session identity, the old blob is a contradiction, so it is
+		// re-checked here rather than trusted from when it was supplied.
+		var fd struct {
+			U, L string
+		}
+		if err := json.Unmarshal([]byte(session.fdClientInfo), &fd); err != nil {
+			return errors.New("profile: fd-client-info is not valid JSON")
+		}
+		if fd.U != profile.UserAgent {
+			return errors.New("profile: fd-client-info was minted for a different user agent")
+		}
+		if fd.L != "" && fd.L != profile.Locale {
+			return errors.New("profile: fd-client-info was minted for a different locale")
+		}
 	}
 	session.userAgent = profile.UserAgent
 	session.locale = profile.Locale
@@ -152,6 +170,7 @@ func applyToSession(session *Session, profile fingerprint.Profile, transport htt
 		session.client = &http.Client{}
 	}
 	session.client.Transport = transport
+	session.engineApplied = true
 	return nil
 }
 

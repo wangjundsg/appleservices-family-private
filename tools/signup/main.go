@@ -228,15 +228,30 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 			st.Profile = device.Profile
 			profileReused = true
 		}
-		cookiesLoaded, err = device.warmSession(session)
-		if err != nil {
-			return fail("device_cookie_restore_failed")
+		// Device cookies only seed a *fresh* task. On resume the task snapshot is
+		// newer than the device file, and mixing them would pair a fresh scnt with
+		// stale cookies.
+		if deviceSeedsTask(st) {
+			cookiesLoaded, err = device.warmSession(session)
+			if err != nil {
+				return fail("device_cookie_restore_failed")
+			}
 		}
 	}
 	// Migration: a brand-new task with egress inputs explicitly given gets the
 	// profile engine without anyone having to remember a flag. Existing tasks
 	// (and runs that give no egress inputs) stay on the legacy path.
 	effectiveMode := *profileMode
+	// A task that was created under the profile engine keeps it. Without this a
+	// resume that omits -profile-mode silently fell back to the legacy path and
+	// the receipt still claimed the engine was applied.
+	if st.ProfileMode != "" && !visited["profile-mode"] {
+		effectiveMode = st.ProfileMode
+	}
+	// A saved profile is authoritative: never run a profiled task as legacy.
+	if st.Profile != nil {
+		effectiveMode = profileModeNew
+	}
 	if !visited["profile-mode"] && st.Profile == nil && st.ProfileMode == "" && st.Session == nil && st.Stage == "" &&
 		strings.TrimSpace(*egressCountry) != "" && strings.TrimSpace(*egressSource) != "" {
 		effectiveMode = profileModeNew
@@ -336,8 +351,14 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		if st.Human != nil {
 			telemetryPacer = pacing.New(st.Human.Pacing, nil)
 		}
-		st.Telemetry = telemetrySummary(capture, session.sendTelemetry(ctx, plan, telemetryPacer))
+		// At-most-once: the intent is persisted before the first envelope leaves,
+		// so a crash mid-replay cannot resend the batch on the next run. A failed
+		// send is recorded, not retried.
 		st.TelemetrySent = true
+		if err := writeState(*statePath, st); err != nil {
+			return fail("state_write_failed")
+		}
+		st.Telemetry = telemetrySummary(capture, session.sendTelemetry(ctx, plan, telemetryPacer))
 		if err := writeState(*statePath, st); err != nil {
 			return fail("state_write_failed")
 		}
@@ -369,7 +390,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if session.UseCurl {
 		engine = "system-curl"
 	}
-	if st.ProfileMode == profileModeNew && st.Profile != nil {
+	if session.engineApplied {
 		engine = "utls"
 	}
 	receipt := map[string]any{"ok": err == nil, "stage": st.Stage, "state": st.Status, "reason": reason, "accountExists": st.Created && st.Status == "ready", "created": st.Created, "emailVerified": st.EmailDone, "phoneVerified": st.PhoneDone, "transport": engine, "httpStatus": st.HTTPStatus, "http2Requested": session.HTTP2}

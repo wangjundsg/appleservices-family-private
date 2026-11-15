@@ -76,7 +76,7 @@ func TestCapabilitiesCoverFourFamilies(t *testing.T) {
 	if cap.Name != "utls" {
 		t.Fatalf("engine name = %q", cap.Name)
 	}
-	for _, hello := range []string{"HelloChrome_Auto", "HelloFirefox_Auto", "HelloSafari_Auto", "HelloIOS_Auto"} {
+	for _, hello := range []string{"HelloChrome_131", "HelloFirefox_120", "HelloSafari_16_0", "HelloIOS_14"} {
 		if !cap.Supports(hello) {
 			t.Fatalf("capabilities do not list %s", hello)
 		}
@@ -200,10 +200,50 @@ func TestDescribeReportsAppliedEngine(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	d := transport.Describe()
-	if d["applied"] != true || d["hello"] != "HelloFirefox_Auto" || d["http"] != "1.1" {
+	if d["applied"] != true || d["hello"] != "HelloFirefox_120" || d["http"] != "1.1" {
 		t.Fatalf("describe = %+v", d)
 	}
 	if d["h2Disabled"] != true {
 		t.Fatal("h2 must be reported as disabled, not implied")
+	}
+}
+
+// TestEngineOffersOnlyHTTP11 pins the review finding: the preset's own ALPN
+// extension advertised h2, the server picked it, and the client then spoke
+// HTTP/1.1 under an h2 label. The offer must be http/1.1 only.
+func TestEngineOffersOnlyHTTP11(t *testing.T) {
+	var offered []string
+	var negotiated string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		negotiated = r.TLS.NegotiatedProtocol
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.TLS = &tls.Config{
+		NextProtos: []string{"h2", "http/1.1"},
+		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			offered = append([]string(nil), chi.SupportedProtos...)
+			return nil, nil // keep the server's own certificate
+		},
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	p := profileFor(t, fingerprint.KindChrome)
+	transport, err := New(Options{Profile: p, Insecure: true, Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	resp, err := client.Get(srv.URL + "/probe")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(offered) != 1 || offered[0] != "http/1.1" {
+		t.Fatalf("ClientHello offered %v, want only http/1.1", offered)
+	}
+	if negotiated != "http/1.1" {
+		t.Fatalf("server negotiated %q, want http/1.1", negotiated)
 	}
 }

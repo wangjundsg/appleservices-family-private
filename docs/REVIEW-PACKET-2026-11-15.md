@@ -5,7 +5,24 @@
 
 ---
 
-## 0 结论口径（请按这个审）
+## 0 复审修复记录（针对 `0e35f50` 的 7 条意见）
+
+| # | 意见 | 处理 | 证据 |
+|---|---|---|---|
+| 1 | P1 实际协商 h2，却按 HTTP/1.1 工作 | `HelloCustom` + 重写预设 spec 的 ALPN 为 `http/1.1`；握手后断言 `NegotiatedProtocol == http/1.1`，否则失败 | `TestEngineOffersOnlyHTTP11`（ClientHello 只报 http/1.1，服务端协商 http/1.1） |
+| 2 | P1 省略参数续跑丢画像、回执仍写 utls | 模式优先取 `state.profileMode`；有 `state.profile` 时强制 new 并校验；回执的 `transport` 改为读**实际安装的传输**（`session.engineApplied`） | `TestResumeKeepsProfileModeFromState`（第二次不带任何画像参数，仍是 firefox、同一 id、transport=utls） |
+| 3 | P1 设备 cookie 覆盖任务续跑 cookie | 设备 cookie 只用于**全新任务**（`deviceSeedsTask`）；续跑以任务快照为准 | `TestDeviceOnlySeedsFreshTask` |
+| 4 | P1 画像切换后 Chrome FD 校验失效 | `applyToSession` 重新解析 FD，要求 `U == profile.UserAgent`、`L == profile.Locale`，否则拒绝 | `TestProfileRejectsForeignFD` |
+| 5 | P1 遥测可绕过 intent 打业务端点 | 捕获文件**白名单**：只允许 `POST /jslog`、`POST /v2/jslogs`，其他端点整份拒绝；发送前先落 `telemetrySent` 意图（at-most-once），失败只记录不重试 | `TestTelemetryRejectsBusinessEndpoints` |
+| 6 | P2 模板版本与 TLS 预设不精确对应 | 模板改为**按版本钉死预设**：Chrome 131→`HelloChrome_131`、133→`HelloChrome_133`、Firefox 120、Safari 16.0、iOS 14；不再使用 `Auto` 别名 | `internal/engine` 的 hello 表 + `TestCapabilitiesCoverFourFamilies` |
+| 7 | P2 「只改已有字段」不成立 | 只重写**已存在**的 `eventId`/`timestamp`；字段缺失就原样保留。回放定位为**形状参考**，不再声称是本次任务的行为证据 | `TestTelemetryDoesNotInventFields` |
+
+口径更正：
+
+- 「画像、节奏、设备三处都有版本和签名」不成立。实际是：**画像**有 schema+内容签名；**设备**有 schema 版本，本轮补了设备级锁（`withLock`，30s 陈旧锁可回收）；**节奏**只有配置字段，没有版本与签名。
+- 「Edge 普通窗口通过、Chrome 无痕失败」这条对照**同时改变了浏览器与配置状态**，只能作为线索，不足以断言浏览器历史是决定性因素；而且进入邮箱验证页也不等于建号成功。原文已按此降级。
+
+## 0.1 结论口径（请按这个审）
 
 - **已交付**：多画像配置 + utls 引擎 + 浏览器式预热 + 节奏 + jslog 回放 + 设备档案。
 - **未交付 / 未声称**：没有解决 Apple 风控；`-34607001` 仍未解释；没有伪造遥测；没有伪造 FD；没有 HTTP/2。

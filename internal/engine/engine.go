@@ -32,13 +32,18 @@ import (
 	"github.com/Laky-64/appleservices/internal/fingerprint"
 )
 
-// hellos maps the profile's engine requirement onto utls presets. A hello that
-// is not listed here cannot be built — selection filters those out first.
+// hellos maps a template's engine requirement onto a *pinned* utls preset.
+//
+// Pinned, not Auto: an Auto alias follows the library upgrade, so a template
+// frozen as "Safari 15.3" would quietly start posing as Safari 18 after a
+// dependency bump. Each entry names the exact preset the template was validated
+// against, and a template whose version has no pinned preset is never selected.
 var hellos = map[string]utls.ClientHelloID{
-	"HelloChrome_Auto":  utls.HelloChrome_Auto,
-	"HelloFirefox_Auto": utls.HelloFirefox_Auto,
-	"HelloSafari_Auto":  utls.HelloSafari_Auto,
-	"HelloIOS_Auto":     utls.HelloIOS_Auto,
+	"HelloChrome_131":  utls.HelloChrome_131,
+	"HelloChrome_133":  utls.HelloChrome_133,
+	"HelloFirefox_120": utls.HelloFirefox_120,
+	"HelloSafari_16_0": utls.HelloSafari_16_0,
+	"HelloIOS_14":      utls.HelloIOS_14,
 }
 
 // maxBrowser is what this build of utls can pose as, per kind. Selection uses
@@ -154,15 +159,40 @@ func (t *Transport) dialTLS(ctx context.Context, network, addr string) (net.Conn
 	cfg := &utls.Config{
 		ServerName:         host,
 		InsecureSkipVerify: t.insecure,
-		// The hello carries a browser-shaped ALPN offer; we only ever speak
-		// HTTP/1.1 after the handshake, so h2 is not offered.
-		NextProtos: []string{"http/1.1"},
-		MinVersion: tls.VersionTLS12,
+		MinVersion:         tls.VersionTLS12,
 	}
-	conn := utls.UClient(raw, cfg, hellos[t.hello])
+	// HelloCustom is required: ApplyPreset is ignored when the client was built
+	// with a named preset, which is why the previous code still offered h2.
+	conn := utls.UClient(raw, cfg, utls.HelloCustom)
+	// A preset carries its own ALPN extension, and it overrides Config.NextProtos.
+	// Rewrite that extension so the offer is http/1.1 only: we speak HTTP/1.1 and
+	// must never let the server pick h2 for us.
+	spec, err := utls.UTLSIdToSpec(hellos[t.hello])
+	if err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("engine: preset %s has no usable spec: %w", t.hello, err)
+	}
+	replaced := false
+	for i, ext := range spec.Extensions {
+		if _, ok := ext.(*utls.ALPNExtension); ok {
+			spec.Extensions[i] = &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}}
+			replaced = true
+		}
+	}
+	if !replaced {
+		spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+	}
+	if err := conn.ApplyPreset(&spec); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("engine: apply preset %s: %w", t.hello, err)
+	}
 	if err := conn.HandshakeContext(ctx); err != nil {
 		raw.Close()
 		return nil, fmt.Errorf("engine: handshake with %s failed: %w", t.hello, err)
+	}
+	if got := conn.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
+		raw.Close()
+		return nil, fmt.Errorf("engine: server negotiated ALPN %q, but this adapter speaks http/1.1 only", got)
 	}
 	return conn, nil
 }

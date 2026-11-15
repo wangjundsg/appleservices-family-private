@@ -77,6 +77,7 @@ type Session struct {
 	hcChallenge   string
 	fdClientInfo  string
 	profileHints  *fingerprint.ClientHints
+	engineApplied bool
 	lastWarmupURL string
 	lastRequest   string
 

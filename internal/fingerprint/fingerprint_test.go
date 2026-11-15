@@ -10,7 +10,7 @@ func utlsCap() Capability {
 	return Capability{
 		Name:    "utls",
 		Version: "1.8.2",
-		Hellos:  []string{"HelloChrome_Auto", "HelloFirefox_Auto", "HelloSafari_Auto", "HelloIOS_Auto"},
+		Hellos:  []string{"HelloChrome_131", "HelloChrome_133", "HelloFirefox_120", "HelloSafari_16_0", "HelloIOS_14"},
 		MaxBrowser: map[Kind]int{
 			KindChrome:    133,
 			KindFirefox:   120,
@@ -118,7 +118,7 @@ func TestNonChromeKindsCarryNoClientHints(t *testing.T) {
 func TestExplicitKindNeedsEngineSupport(t *testing.T) {
 	chromeOnly := Capability{
 		Name: "utls-fake", Version: "0",
-		Hellos:     []string{"HelloChrome_Auto"},
+		Hellos:     []string{"HelloChrome_131"},
 		MaxBrowser: map[Kind]int{KindChrome: 133},
 	}
 	if _, err := Select(Options{Kind: KindChrome, Timezone: "America/New_York", Region: Region{Country: "US", Source: "explicit"}, Engine: chromeOnly}); err != nil {
@@ -164,7 +164,7 @@ func TestNewerTemplatesAreFilteredByEngineCap(t *testing.T) {
 
 func TestAutoSelectionRenormalisesAroundUnsupportedKinds(t *testing.T) {
 	// An engine with Chrome only: auto must produce chrome every time.
-	cap := Capability{Name: "utls-fake", Hellos: []string{"HelloChrome_Auto"}, MaxBrowser: map[Kind]int{KindChrome: 133}}
+	cap := Capability{Name: "utls-fake", Hellos: []string{"HelloChrome_131"}, MaxBrowser: map[Kind]int{KindChrome: 133}}
 	for seed := int64(1); seed <= 20; seed++ {
 		p, err := Select(Options{Timezone: "America/New_York", Region: Region{Country: "US", Source: "explicit"}, Engine: cap, Seed: seed})
 		if err != nil {
@@ -229,7 +229,7 @@ func TestValidateRejectsTamperingAndBadInputs(t *testing.T) {
 	hintsOnFirefox.OS = "Windows"
 	hintsOnFirefox.UserAgent = firefox
 	hintsOnFirefox.BrowserVersion = "120"
-	hintsOnFirefox.Engine = EngineHello{Name: "HelloFirefox_Auto", Minimum: "1.6"}
+	hintsOnFirefox.Engine = EngineHello{Name: "HelloFirefox_120", Minimum: "1.6"}
 	hintsOnFirefox.Signature = Signature(hintsOnFirefox)
 	if err := Validate(hintsOnFirefox, utlsCap()); err == nil {
 		t.Fatal("firefox must not carry chrome client hints")
