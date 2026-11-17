@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -77,6 +78,7 @@ type Session struct {
 	hcChallenge   string
 	fdClientInfo  string
 	profileHints  *fingerprint.ClientHints
+	adiHeaders    map[string]string
 	engineApplied bool
 	lastWarmupURL string
 	lastRequest   string
@@ -157,6 +159,7 @@ func newSession(opts SessionOptions) (*Session, error) {
 		return nil, errors.New("client hints only support the configured Windows desktop Chrome profile; disable -ch-hints for other clients")
 	}
 	return &Session{
+		adiHeaders:   adiHeadersFromEnv(),
 		base:         strings.TrimSuffix(opts.Base, "/"),
 		portal:       portalURLFor(strings.TrimSuffix(opts.Base, "/")),
 		userAgent:    opts.UserAgent,
@@ -184,6 +187,19 @@ func portalURLFor(base string) string {
 
 // headers builds the widget's header set. The values that must rotate are read
 // from the session at call time, never cached in a struct.
+// adiHeaders parses the optional research hook once per session.
+func adiHeadersFromEnv() map[string]string {
+	raw := strings.TrimSpace(os.Getenv("APPLESERVICES_ADI_HEADERS"))
+	if raw == "" {
+		return nil
+	}
+	var parsed map[string]string
+	if json.Unmarshal([]byte(raw), &parsed) != nil {
+		return nil
+	}
+	return parsed
+}
+
 func (s *Session) headers(contentType string, hashcash bool, now time.Time) (http.Header, error) {
 	h := http.Header{}
 	h.Set("User-Agent", s.userAgent)
@@ -225,6 +241,12 @@ func (s *Session) headers(contentType string, hashcash bool, now time.Time) (htt
 			return nil, err
 		}
 		h.Set("X-Apple-HC", stamp)
+	}
+	// Research hook: an ADI header set may be injected to measure whether Apple
+	// treats the request as a device client. It is read from the environment once
+	// and never persisted, so a normal run is unaffected.
+	for name, value := range s.adiHeaders {
+		h.Set(name, value)
 	}
 	return h, nil
 }
