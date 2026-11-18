@@ -104,6 +104,17 @@ func renewSessionMode(begin func() (maintainedLogin, error), accountID string, r
 	return login, devices, nil
 }
 
+func validationFailure(err error) control.Result {
+	switch {
+	case errors.Is(err, appleservices.ErrValidationPasswordRequired):
+		return control.Result{Stage: "reconnect-required", Message: "当前会话缺少重新验证所需的密码，请手动连接此账号。"}
+	case errors.Is(err, gsa.ErrAccountRepairRequired):
+		return control.Result{Stage: gsa.ErrAccountRepairRequired.Error(), Message: "Apple 要求先完成账号设置。请在官方账户页面或受信任设备上完成提示，再手动连接。"}
+	default:
+		return control.Result{Stage: "account_validation_unconfirmed", Message: "账户验证未完成，已保留当前会话。"}
+	}
+}
+
 type runtimeStatus struct {
 	PID                     int       `json:"pid"`
 	Running                 bool      `json:"running"`
@@ -124,6 +135,7 @@ type runtimeStatus struct {
 	LastUnsupportedNoticeAt time.Time `json:"last_unsupported_notice_at,omitempty"`
 	PushIssue               string    `json:"push_issue,omitempty"`
 	FailureStage            string    `json:"failure_stage,omitempty"`
+	FailureReason           string    `json:"failure_reason,omitempty"`
 }
 
 func (s *runtimeStatus) setDevices(devices []appleservices.AccountDevice, name string) {

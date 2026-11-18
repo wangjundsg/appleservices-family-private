@@ -110,6 +110,13 @@ if(status.last_device_query_at&&!status.last_device_query_at.startsWith('0001')&
 if(status.refresh_count&&lastRefresh!==status.last_refresh_at){activity('登录续期成功',status.last_refresh_at);lastRefresh=status.last_refresh_at;}
 if(pending&&lastRequest!==pending.id){activity('收到新的登录请求',pending.received_at);lastRequest=pending.id;}
 if(view.message&&!running)$('sessionDescription').textContent=view.message;
+if(!running && status.failure_reason==='gsa_account_repair_required'){
+  $('sessionTitle').textContent='Apple 要求完成账号设置';
+  $('sessionDescription').textContent='请在 Apple 官方账户页面或受信任设备上完成提示，然后手动连接。';
+}else if(!running && status.state==='interrupted'){
+  $('sessionTitle').textContent='上次连接已中断';
+  $('sessionDescription').textContent='上次后台进程已经退出，登录结果尚未确认。';
+}
 scheduleAutoRefresh(view,activated);
 }
 let polling=false;async function poll(){if(polling)return;polling=true;const requested=selectedAccount;try{const view=await api('view');if(requested===selectedAccount)render(view);}catch(error){$('lastUpdated').textContent='面板连接暂时中断';}finally{polling=false;}}

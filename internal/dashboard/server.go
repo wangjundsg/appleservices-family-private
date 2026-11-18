@@ -75,6 +75,7 @@ type Status struct {
 	PushReconnectCount   int       `json:"push_reconnect_count"`
 	PushIssue            string    `json:"push_issue,omitempty"`
 	FailureStage         string    `json:"failure_stage,omitempty"`
+	FailureReason        string    `json:"failure_reason,omitempty"`
 }
 type view struct {
 	PipelineManaged      bool                    `json:"pipeline_managed,omitempty"`
@@ -310,6 +311,10 @@ func (s *Server) readStatusFrom(dir string) Status {
 	data, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
 	json.Unmarshal(data, &status)
 	if !status.Running || !s.ownsIn(status.PID, dir) {
+		if status.Running && status.State != "online" {
+			status.FailureStage, status.State = status.State, "interrupted"
+			status.VerificationRequired = false
+		}
 		status.Running = false
 		status.Authenticated = false
 		status.PushConnected = false
@@ -955,7 +960,7 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	}
 	go func() {
 		if err := command.Wait(); err != nil {
-			message := "后台异常停止，请重新连接"
+			message := "后台已停止"
 			if detail := lastProcessError(diagnostic.Name()); detail != "" {
 				message += "：" + detail
 			}
@@ -981,11 +986,17 @@ func lastProcessError(path string) string {
 		}
 		// Never forward arbitrary stderr (which can contain credentials).
 		switch {
-		case strings.Contains(line, "a provisioned device state is required"):
+		case strings.Contains(line, "gsa_account_repair_required"), strings.Contains(line, `unsupported authentication continuation "repair"`):
+			return "Apple 要求先完成账号设置，请在官方账户页面或受信任设备上完成提示后再连接。"
+		case strings.Contains(line, "verified OpenBubbles library is unavailable"):
+			return "后台找不到配置的 Windows 模块，请核对启动参数 -adi-dll。"
+		case strings.Contains(line, "library does not match the signature-verified"):
+			return "Windows 模块文件与受支持版本的校验值不符，请核对 -adi-dll 指向的文件。"
+		case strings.Contains(line, "provisioned_device_required"), strings.Contains(line, "a provisioned device state is required"):
 			return "所选目录缺少有效设备身份，请选择已有账号，或通过添加账号建立身份"
 		case strings.Contains(line, "APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required"):
 			return "请重新输入当前账号密码"
-		case strings.Contains(line, "saved login session cannot be restored"):
+		case strings.Contains(line, "accepted_checkpoint_unavailable"), strings.Contains(line, "saved login session cannot be restored"):
 			return "Apple 已保存会话失效，请输入当前账号密码重新连接"
 		case strings.Contains(line, "ec=-22406") && strings.Contains(line, "correct password"):
 			return "Apple 拒绝了当前密码，请确认使用的是这个账号的最新密码，并关闭密码管理器的旧自动填充"
@@ -1032,7 +1043,11 @@ func (s *Server) setMessage(account *Account, message string) {
 }
 
 func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
-	if appleID != "" && password != "" {
+	dir := s.config.Dir
+	if account := s.lookup(""); account != nil {
+		dir = account.Dir
+	}
+	if appleID != "" && password != "" && s.readStatusFrom(dir).FailureReason != "gsa_account_repair_required" {
 		go func() {
 			result := s.Start(ctx, credentials{AppleID: appleID, Password: password})
 			if !result.OK {
@@ -1054,7 +1069,8 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 			if s.pipelineAccount(account) {
 				continue
 			}
-			if ctx.Err() != nil || s.accountStatus(account).Running || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
+			status := s.accountStatus(account)
+			if ctx.Err() != nil || status.Running || status.FailureReason == "gsa_account_repair_required" || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
 				continue
 			}
 			result := s.startSavedAccount(ctx, account)

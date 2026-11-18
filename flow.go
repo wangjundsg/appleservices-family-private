@@ -211,12 +211,14 @@ func (l *Login) authenticate() error {
 
 func (l *Login) NeedsTwoFactor() bool { return l.needsTwoFactor }
 
+var ErrValidationPasswordRequired = errors.New("appleservices: password is required to start a new account validation challenge")
+
 // BeginAccountValidation starts a fresh password-authenticated challenge for
 // an already configured account. It is used by the dashboard when Apple asks
 // for a device code again; it never opens or drives the official client.
 func (l *Login) BeginAccountValidation() error {
 	if l.creds.Password == "" {
-		return errors.New("appleservices: password is required to start a new account validation challenge")
+		return ErrValidationPasswordRequired
 	}
 	res, err := l.backend.Login(l.creds.AppleID, l.creds.Password)
 	if err != nil {

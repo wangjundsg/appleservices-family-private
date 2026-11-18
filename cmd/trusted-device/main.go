@@ -180,6 +180,9 @@ func run() (runErr error) {
 	defer func() {
 		status.Running, status.PushConnected = false, false
 		status.Authenticated = false
+		if errors.Is(runErr, gsa.ErrAccountRepairRequired) {
+			status.FailureReason = gsa.ErrAccountRepairRequired.Error()
+		}
 		if status.State != "verification_required" {
 			if runErr != nil {
 				status.FailureStage, status.State = status.State, "failed"
@@ -545,6 +548,12 @@ func run() (runErr error) {
 		renewed, devices, err := renewSessionMode(beginRenewal, accountID, registration, !*resumeSession)
 		if err != nil {
 			status.State = "refresh_failed"
+			if errors.Is(err, gsa.ErrAccountRepairRequired) {
+				status.FailureReason = gsa.ErrAccountRepairRequired.Error()
+				status.Authenticated = false
+				_ = status.save(*dir)
+				return validationFailure(err)
+			}
 			if errors.Is(err, errVerificationRequired) {
 				status.State, status.VerificationRequired = "verification_required", true
 			}
@@ -1124,9 +1133,12 @@ func run() (runErr error) {
 		}
 		if action == "validate-account" {
 			if err := active.BeginAccountValidation(); err != nil {
-				status.State, status.VerificationRequired = "refresh_failed", true
-				_ = status.save(*dir)
-				return control.Result{Stage: "reconnect-required", Message: "当前是免密恢复会话；设备管理身份需要一次带密码重连，请重新连接此账号"}
+				result := validationFailure(err)
+				if errors.Is(err, gsa.ErrAccountRepairRequired) {
+					status.State, status.FailureReason, status.Authenticated = "refresh_failed", result.Stage, false
+					_ = status.save(*dir)
+				}
+				return result
 			}
 			if active.NeedsTwoFactor() {
 				status.State, status.Authenticated, status.VerificationRequired = "awaiting_account_validation", false, true
@@ -1330,8 +1342,14 @@ func run() (runErr error) {
 				continue
 			}
 			command.Reply <- performAction(command.Context, command.Action.Action, command.RequestID, command.Code, command.Label, command.Note)
+			if status.FailureReason == gsa.ErrAccountRepairRequired.Error() {
+				return gsa.ErrAccountRepairRequired
+			}
 		case <-refresh.C:
 			result := renew()
+			if status.FailureReason == gsa.ErrAccountRepairRequired.Error() {
+				return gsa.ErrAccountRepairRequired
+			}
 			if status.VerificationRequired {
 				return errVerificationRequired
 			}
