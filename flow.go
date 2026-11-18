@@ -261,13 +261,20 @@ func (l *Login) RequestCode(method TwoFactorMethod) error {
 	}
 }
 
+// ErrVerifiedSessionIncomplete means that the backend accepted the code but
+// the resulting account session could not be confirmed or saved.
+var ErrVerifiedSessionIncomplete = errors.New("verified_session_incomplete")
+
+// ErrVerificationCodeFormat indicates that no code was sent.
+var ErrVerificationCodeFormat = errors.New("appleservices: verification code must contain six digits")
+
 func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 	if !l.needsTwoFactor {
 		return errors.New("appleservices: no two-factor challenge is pending")
 	}
 	code = strings.TrimSpace(code)
 	if len(code) != 6 || strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-		return errors.New("appleservices: verification code must contain six digits")
+		return ErrVerificationCodeFormat
 	}
 	var err error
 	switch method {
@@ -281,6 +288,13 @@ func (l *Login) SubmitCode(method TwoFactorMethod, code string) error {
 	if err != nil {
 		return fmt.Errorf("appleservices: submit code: %w", err)
 	}
+	if err := l.finishVerification(); err != nil {
+		return fmt.Errorf("%w: %w", ErrVerifiedSessionIncomplete, err)
+	}
+	return nil
+}
+
+func (l *Login) finishVerification() error {
 	if verified, ok := l.backend.(interface{ VerifiedLoginResult() *gsa.LoginResult }); ok {
 		if result := verified.VerifiedLoginResult(); result != nil {
 			if result.NeedsTwoFactor || spdString(result.SessionPayload, "adsid") != l.adsid {

@@ -421,3 +421,32 @@ func TestIssuedVerificationPETAvoidsAnotherChallenge(t *testing.T) {
 		t.Fatal("verified header session was not checkpointed before completing iCloud login")
 	}
 }
+
+func TestAcceptedVerificationCannotBeReportedAsRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		challenged bool
+		saveErr    error
+	}{
+		{"login asks again", true, nil}, {"cannot save session", false, errors.New("private disk error")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &memoryStore{saveErr: tc.saveErr}
+			backend := &fakeBackend{results: []*gsa.LoginResult{testResult(true), testResult(tc.challenged)}}
+			login, err := BeginLogin(Credentials{"owner@example.test", "test-password"}, store, testOptions(backend, testDelegate)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := login.SubmitCode(SMS, "12"); !errors.Is(err, ErrVerificationCodeFormat) || len(backend.submits) != 0 {
+				t.Fatal("malformed input was not rejected locally")
+			}
+			err = login.SubmitCode(SMS, "123456")
+			if !errors.Is(err, ErrVerifiedSessionIncomplete) || len(backend.submits) != 1 || store.saves != 0 {
+				t.Fatalf("unexpected verification outcome: %v", err)
+			}
+			if tc.saveErr != nil && !errors.Is(err, tc.saveErr) {
+				t.Fatal("lost checkpoint error")
+			}
+		})
+	}
+}

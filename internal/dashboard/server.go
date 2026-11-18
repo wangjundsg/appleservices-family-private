@@ -986,6 +986,12 @@ func lastProcessError(path string) string {
 		}
 		// Never forward arbitrary stderr (which can contain credentials).
 		switch {
+		case strings.Contains(line, "verified_session_incomplete"):
+			return "验证码提交已获接受，后续账号会话未能确认或保存。"
+		case strings.Contains(line, "verification_blocked"):
+			return "Apple 未允许本次验证继续，请核对官方账户提示。"
+		case strings.Contains(line, "verification_unconfirmed"):
+			return "验证码提交结果未确认，已停止本次验证。"
 		case strings.Contains(line, "gsa_account_repair_required"), strings.Contains(line, `unsupported authentication continuation "repair"`):
 			return "Apple 要求先完成账号设置，请在官方账户页面或受信任设备上完成提示后再连接。"
 		case strings.Contains(line, "verified OpenBubbles library is unavailable"):
@@ -1042,12 +1048,21 @@ func (s *Server) setMessage(account *Account, message string) {
 	account.mu.Unlock()
 }
 
+// A stored terminal verification outcome requires an explicit user action.
+func verificationNeedsAttention(reason string) bool {
+	switch reason {
+	case "gsa_account_repair_required", "verified_session_incomplete", "verification_blocked", "verification_unconfirmed", "device_preparation_incomplete", "device_registration_incomplete":
+		return true
+	}
+	return false
+}
+
 func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 	dir := s.config.Dir
 	if account := s.lookup(""); account != nil {
 		dir = account.Dir
 	}
-	if appleID != "" && password != "" && s.readStatusFrom(dir).FailureReason != "gsa_account_repair_required" {
+	if appleID != "" && password != "" && !verificationNeedsAttention(s.readStatusFrom(dir).FailureReason) {
 		go func() {
 			result := s.Start(ctx, credentials{AppleID: appleID, Password: password})
 			if !result.OK {
@@ -1070,7 +1085,7 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 				continue
 			}
 			status := s.accountStatus(account)
-			if ctx.Err() != nil || status.Running || status.FailureReason == "gsa_account_repair_required" || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
+			if ctx.Err() != nil || status.Running || verificationNeedsAttention(status.FailureReason) || !acceptedCheckpointReady(account.Dir, account.AppleID) || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
 				continue
 			}
 			result := s.startSavedAccount(ctx, account)

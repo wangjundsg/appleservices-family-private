@@ -115,6 +115,28 @@ func validationFailure(err error) control.Result {
 	}
 }
 
+// Verification failures are public results. Never echo a transport error or
+// service body: both can contain the submitted code or session material.
+func verificationFailure(err error) (control.Result, bool) {
+	var failure *gsa.SecondFactorError
+	switch {
+	case errors.Is(err, appleservices.ErrVerificationCodeFormat):
+		return control.Result{Stage: "verification_input_invalid", Message: "请输入六位数字；验证码尚未提交。"}, false
+	case errors.Is(err, gsa.ErrAccountRepairRequired):
+		return validationFailure(gsa.ErrAccountRepairRequired), true
+	case errors.Is(err, appleservices.ErrVerifiedSessionIncomplete):
+		return control.Result{Stage: "verified_session_incomplete", Message: "验证码提交已获接受，后续账号会话未能确认或保存。已停止本次验证。"}, true
+	case errors.As(err, &failure):
+		stop := failure.HTTPStatus == 412 || failure.HTTPStatus == 423 || failure.HTTPStatus == 429 || failure.SecurityCodeLocked || failure.TooManyCodesValidated || failure.TooManyCodesSent
+		if stop {
+			return control.Result{Stage: "verification_blocked", HTTPStatus: failure.HTTPStatus, Message: "Apple 未允许本次验证继续，已停止提交。"}, true
+		}
+		return control.Result{Stage: "verification_unconfirmed", HTTPStatus: failure.HTTPStatus, Message: "本次验证码未取得成功回执，已停止提交。"}, true
+	default:
+		return control.Result{Stage: "verification_unconfirmed", Message: "本次验证码提交结果未确认，已停止以免重复提交。"}, true
+	}
+}
+
 type runtimeStatus struct {
 	PID                     int       `json:"pid"`
 	Running                 bool      `json:"running"`

@@ -320,6 +320,7 @@ func run() (runErr error) {
 			return err
 		}
 	}
+	verifiedHere := false
 	if login.NeedsTwoFactor() {
 		if *background && (!*guiAuth || panel == nil) {
 			status.VerificationRequired = true
@@ -369,11 +370,14 @@ func run() (runErr error) {
 							result.Message = "短信已发送"
 						}
 					case "submit-sms":
-						// The reason Apple gives is the only thing that
-						// separates an expired code from a rejected one, so it
-						// is reported instead of a fixed message.
 						if err := login.SubmitCode(factor, command.Code); err != nil {
-							result.Message = "验证码未被接受：" + err.Error()
+							var stop bool
+							result, stop = verificationFailure(err)
+							if stop {
+								status.FailureReason = result.Stage
+								command.Reply <- result
+								return errors.New(result.Stage)
+							}
 						} else {
 							result.OK = true
 							result.Message = "验证码已验证，正在完成登录"
@@ -402,6 +406,7 @@ func run() (runErr error) {
 				return err
 			}
 		}
+		verifiedHere = true
 	}
 	registration := appleservices.DeviceRegistration{Name: *name, PushToken: push.State().Token}
 	if !*listenOnly {
@@ -409,6 +414,9 @@ func run() (runErr error) {
 		_, err = generateCode(generationCtx)
 		stop()
 		if err != nil {
+			if verifiedHere {
+				status.FailureReason = "device_preparation_incomplete"
+			}
 			return fmt.Errorf("code-generation prerequisite failed before account registration: %w", err)
 		}
 	}
@@ -417,6 +425,9 @@ func run() (runErr error) {
 	// delegate retry because accountsetupcheck does not mutate registration.
 	if *registerOnly || (!*resumeSession && strings.TrimSpace(os.Getenv("APPLESERVICES_SKIP_DEVICE_REGISTRATION")) != "1") {
 		if err := login.PrepareDeviceRegistration(registration); err != nil {
+			if verifiedHere {
+				status.FailureReason = "device_registration_incomplete"
+			}
 			return err
 		}
 	}
@@ -425,6 +436,9 @@ func run() (runErr error) {
 		return nil
 	}
 	if err != nil {
+		if verifiedHere {
+			status.FailureReason = "verified_session_incomplete"
+		}
 		return err
 	}
 	var active maintainedLogin = login
@@ -455,6 +469,9 @@ func run() (runErr error) {
 		}
 	}
 	if err := active.SaveSession(); err != nil {
+		if verifiedHere {
+			status.FailureReason = "verified_session_incomplete"
+		}
 		return err
 	}
 	if *registerOnly {
@@ -1166,14 +1183,20 @@ func run() (runErr error) {
 				return control.Result{Message: "当前没有待完成的账户验证"}
 			}
 			if err := active.SubmitCode(appleservices.TrustedDevice, commandCode); err != nil {
-				return control.Result{Message: "验证码无效或已过期，请重新输入"}
+				result, stop := verificationFailure(err)
+				if stop {
+					status.FailureReason = result.Stage
+				}
+				return result
 			}
 			client, err := active.Client()
 			if err != nil || client == nil || client.ADSID != accountID {
-				return control.Result{Message: "验证码已通过，但登录会话未建立"}
+				status.FailureReason = "verified_session_incomplete"
+				return control.Result{Stage: status.FailureReason, Message: "验证码已通过，但登录会话未建立"}
 			}
 			if err := active.SaveSession(); err != nil {
-				return control.Result{Message: "验证已完成，但登录状态保存失败"}
+				status.FailureReason = "verified_session_incomplete"
+				return control.Result{Stage: status.FailureReason, Message: "验证已完成，但登录状态保存失败"}
 			}
 			status.State, status.Authenticated, status.VerificationRequired = "online", true, false
 			status.LastRefreshAt = time.Now().UTC()
@@ -1342,8 +1365,8 @@ func run() (runErr error) {
 				continue
 			}
 			command.Reply <- performAction(command.Context, command.Action.Action, command.RequestID, command.Code, command.Label, command.Note)
-			if status.FailureReason == gsa.ErrAccountRepairRequired.Error() {
-				return gsa.ErrAccountRepairRequired
+			if status.FailureReason != "" {
+				return errors.New(status.FailureReason)
 			}
 		case <-refresh.C:
 			result := renew()

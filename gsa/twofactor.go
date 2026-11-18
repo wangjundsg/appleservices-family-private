@@ -204,7 +204,7 @@ func (c *Client) SubmitTrustedDeviceCode(dsid, idmsToken, code string) error {
 		return fmt.Errorf("gsa: submit trusted-device code: %w", err)
 	}
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		return fmt.Errorf("gsa: submit trusted-device code: status %d", result.StatusCode)
+		return secondFactorResponseError("submit trusted-device code", result.StatusCode, result.Body)
 	}
 	if len(bytes.TrimSpace(result.Body)) > 0 {
 		var response map[string]any
@@ -411,7 +411,7 @@ func (c *Client) SubmitSMSCode(dsid, idmsToken, code string) error {
 		return fmt.Errorf("gsa: submit sms code: %w", err)
 	}
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		return fmt.Errorf("gsa: submit sms code: status %d", result.StatusCode)
+		return secondFactorResponseError("submit sms code", result.StatusCode, result.Body)
 	}
 	c.collectVerifiedTokens(result.Headers)
 	return nil

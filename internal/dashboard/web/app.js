@@ -113,6 +113,15 @@ if(view.message&&!running)$('sessionDescription').textContent=view.message;
 if(!running && status.failure_reason==='gsa_account_repair_required'){
   $('sessionTitle').textContent='Apple 要求完成账号设置';
   $('sessionDescription').textContent='请在 Apple 官方账户页面或受信任设备上完成提示，然后手动连接。';
+}else if(!running && status.failure_reason==='verified_session_incomplete'){
+  $('sessionTitle').textContent='验证码已接受，会话未完成';
+  $('sessionDescription').textContent='后台未能确认或保存账号会话，已停止本次验证。';
+}else if(!running && ['device_preparation_incomplete','device_registration_incomplete'].includes(status.failure_reason)){
+  $('sessionTitle').textContent='验证码已接受，设备激活未完成';
+  $('sessionDescription').textContent=status.failure_reason==='device_preparation_incomplete'?'失败发生在本机设备准备阶段。':'失败发生在设备登记阶段，登记结果未确认。';
+}else if(!running && ['verification_blocked','verification_unconfirmed'].includes(status.failure_reason)){
+  $('sessionTitle').textContent='本次验证码验证已停止';
+  $('sessionDescription').textContent=status.failure_reason==='verification_blocked'?'Apple 未允许本次验证继续，请核对官方账户提示。':'未取得验证码提交结果。';
 }else if(!running && status.state==='interrupted'){
   $('sessionTitle').textContent='上次连接已中断';
   $('sessionDescription').textContent='上次后台进程已经退出，登录结果尚未确认。';

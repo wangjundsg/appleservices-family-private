@@ -46,3 +46,14 @@ func TestRepairDiagnosticSurvivesPanelRestart(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalVerificationOutcomesInhibitAutomaticLogin(t *testing.T) {
+	for _, reason := range []string{"gsa_account_repair_required", "verification_blocked", "verification_unconfirmed", "verified_session_incomplete", "device_registration_incomplete", "device_preparation_incomplete"} {
+		if !verificationNeedsAttention(reason) {
+			t.Errorf("bootstrap allowed after %s", reason)
+		}
+	}
+	if verificationNeedsAttention("") {
+		t.Fatal("unrelated sessions cannot resume")
+	}
+}
