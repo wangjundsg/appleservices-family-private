@@ -110,6 +110,20 @@ class ProtocolAdapterBoundaryTest(unittest.TestCase):
         self.assertTrue(restored.status["number_owned"])
         self.assertEqual(restored.status["stage"], "email-sent")
 
+    def test_service_refusal_survives_pipeline_restart(self):
+        os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
+        cfg = make_config(self.folder)
+        job = pipeline.Job(self.folder, cfg)
+        job.status.update(number_owned=True, stage="create", status="queued")
+        FakeAdapter.reset({"outcome": "inconclusive", "failure": "server_rejected_34607001", "http_status": 400})
+        job.run()
+        restored = pipeline.Job(self.folder, cfg, pipeline.read(self.folder / "result.json"))
+        restored.run(resume=True)
+        self.assertEqual(restored.status["status"], "needs_review")
+        self.assertEqual(restored.status["reason"], "server_rejected_34607001")
+        self.assertEqual(restored.status["http_status"], 400)
+        self.assertEqual(FakeAdapter.calls, {"create": 1, "resume": 0, "cancel": 0})
+
     def test_waiting_pauses_the_run_loop_for_both_number_modes(self):
         os.environ["APPLESERVICES_PROTOCOL_ADAPTER"] = "test_protocol_adapter:FakeAdapter"
         for label, sms in (

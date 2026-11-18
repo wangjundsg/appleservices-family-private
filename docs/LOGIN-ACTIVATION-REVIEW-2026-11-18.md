@@ -1,5 +1,13 @@
 # 登录 / 2FA / 设备激活：问题汇总（交给修复方）
 
+## 实现复核
+
+GSA 收到 `repair` 后返回 `gsa_account_repair_required`，需要账号持有人在官方页面或受信任设备上完成提示。短信验证 POST 返回 HTTP 412 时，CLI 和流水线保留 `apple_sms_verify_precondition_failed` 并进入人工复核。代码会保留服务端提供的 `nonFTEU` 值，目前没有可以确定 412 成因的证据。
+
+密码探测返回 409 时输出 `requires_2fa`。密码认证通过后，只有已有网页会话经服务端校验、账号和 DSID 均匹配时才输出 `authenticated`，其余输出 `account_exists`。三种回执均不推进设备激活。
+
+设备恢复仍依赖同账号的 GSA 会话及已接受的 iCloud delegate 检查点。恢复入口在建立推送连接前读取检查点并检查绑定。以下为原始现场报告及当时提出的假设。
+
 日期：2026-11-18。环境：Windows，Python 3.12.10，MinGW `D:\mingw64\bin\gcc.exe`，仓库 `D:\appleservices-family-private`。
 本文只列**已复现**的问题与证据；所有结论都可用文中命令重跑。**没有真实扣费、没有批量建号；账号 3624475735@qq.com 是用户自有账号。**
 

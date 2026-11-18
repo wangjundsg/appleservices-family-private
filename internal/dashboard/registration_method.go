@@ -39,6 +39,7 @@ func frozenRegistrationMethod(jobDir string) (string, error) {
 	file := filepath.Join(jobDir, "request.json")
 	var stored struct {
 		RegistrationMethod string `json:"registrationMethod"`
+		PipelineMethod     string `json:"registration_method"`
 	}
 	if _, statErr := os.Stat(file); statErr != nil {
 		if os.IsNotExist(statErr) {
@@ -49,13 +50,13 @@ func frozenRegistrationMethod(jobDir string) (string, error) {
 	if err := readRegisterJSON(file, &stored); err != nil {
 		return "", errors.New("任务清单不可读，拒绝按新任务处理")
 	}
+	if stored.RegistrationMethod != "" && stored.PipelineMethod != "" && stored.RegistrationMethod != stored.PipelineMethod {
+		return "", errors.New("任务清单中的注册方式相互矛盾")
+	}
 	if stored.RegistrationMethod == "" {
-		return methodBrowser, nil
+		stored.RegistrationMethod = stored.PipelineMethod
 	}
-	if _, err := normalizeRegistrationMethod(stored.RegistrationMethod); err != nil {
-		return "", err
-	}
-	return stored.RegistrationMethod, nil
+	return normalizeRegistrationMethod(stored.RegistrationMethod)
 }
 
 // registrationMethodFor decides the method for a new job or a resumed one.

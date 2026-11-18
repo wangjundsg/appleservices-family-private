@@ -47,18 +47,49 @@ const (
 // It has been stable for a long time, but Bootstrap refreshes it anyway.
 const widgetKeyFallback = "af1139274f266b22b68c2a3e7ad932cb3c0bbe854e13a79af78dcc73136882c3"
 
-// ProtocolError carries the HTTP status plus a trimmed body so a failed stage
-// reads like Apple's own verdict instead of "status 400".
+// ProtocolError retains structured service codes and the observed HTTP status.
 type ProtocolError struct {
 	Stage  string
 	Method string
 	URL    string
 	Status int
-	Body   string
+	Codes  []string
 }
 
 func (e *ProtocolError) Error() string {
-	return fmt.Sprintf("%s: %s %s -> HTTP %d: %s", e.Stage, e.Method, e.URL, e.Status, e.Body)
+	return fmt.Sprintf("%s: %s -> HTTP %d", e.Stage, e.Method, e.Status)
+}
+
+// Extract codes before discarding the response. Truncating the document first
+// makes otherwise valid JSON unreadable when the service includes a long message.
+func serviceErrorCodes(body []byte) []string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return nil
+	}
+	var codes []string
+	for _, name := range []string{"errors", "service_errors", "serviceErrors", "validationErrors"} {
+		var items []struct {
+			Code json.RawMessage `json:"code"`
+		}
+		if json.Unmarshal(fields[name], &items) != nil {
+			continue
+		}
+		for _, item := range items {
+			var value string
+			if json.Unmarshal(item.Code, &value) != nil {
+				var n json.Number
+				if json.Unmarshal(item.Code, &n) != nil {
+					continue
+				}
+				value = n.String()
+			}
+			if safeErrorCode.MatchString(value) {
+				codes = append(codes, value)
+			}
+		}
+	}
+	return codes
 }
 
 // Session is one browser identity: cookies, scnt counter, session id and the
@@ -320,7 +351,7 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 	}
 	s.absorb(respHeader)
 	if status < 200 || status > 299 {
-		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
+		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Codes: serviceErrorCodes(raw)}
 	}
 	var verdict struct {
 		HasError           bool              `json:"hasError"`
@@ -330,7 +361,7 @@ func (s *Session) do(ctx context.Context, stage, method, path string, body any, 
 		ValidationErrors   []json.RawMessage `json:"validationErrors"`
 	}
 	if json.Unmarshal(raw, &verdict) == nil && (verdict.HasError || len(verdict.Errors)+len(verdict.ServiceErrors)+len(verdict.ServiceErrorsCamel)+len(verdict.ValidationErrors) > 0) {
-		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Body: clip(string(raw), 600)}
+		return nil, &ProtocolError{Stage: stage, Method: method, URL: url, Status: status, Codes: serviceErrorCodes(raw)}
 	}
 	return raw, nil
 }
@@ -417,7 +448,7 @@ func (s *Session) Bootstrap(ctx context.Context, countryISO3 string) error {
 	}
 	s.absorb(respHeader)
 	if status < 200 || status > 299 {
-		return &ProtocolError{Stage: "bootstrap", Method: http.MethodGet, URL: url, Status: status, Body: clip(string(raw), 200)}
+		return &ProtocolError{Stage: "bootstrap", Method: http.MethodGet, URL: url, Status: status, Codes: serviceErrorCodes(raw)}
 	}
 	if s.scnt == "" {
 		return errors.New("bootstrap: server returned no scnt header; the portal layout changed")

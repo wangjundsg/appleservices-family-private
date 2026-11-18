@@ -24,6 +24,7 @@ import urllib.request
 from sms_supply import Supply, SupplyError
 
 ROOT = Path(__file__).resolve().parents[2]
+PROBE_STATES = {"account_exists", "requires_2fa", "authenticated"}
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
 STAGES = ("create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
@@ -353,6 +354,11 @@ class Job:
         else:
             outcome = adapter.resume(self, inputs) or {}
         state = outcome.get("state")
+        if outcome.get("outcome") == "inconclusive" and outcome.get("failure") == "server_rejected_34607001":
+            status = outcome.get("http_status")
+            self.update(status="needs_review", reason="server_rejected_34607001",
+                        http_status=status if type(status) is int and 100 <= status <= 599 else None)
+            raise PipelineError("server_rejected_34607001", "needs_review")
         if state == "waiting_input":
             # A new stage means a new challenge: rebind the timestamp so the code
             # from the previous stage cannot answer this one.
@@ -455,7 +461,7 @@ class Job:
                             if state == "waiting_input":
                                 waiting = True
                                 self.update(status="waiting_input", reason="awaiting_sms" if code_mode else "awaiting_registration_code")
-                            if state in {"success", "account_exists", "unknown", "rate_limited", "waiting_input", "failed"}: final = event
+                            if state in PROBE_STATES or state in {"success", "unknown", "rate_limited", "waiting_input", "failed", "needs_review"}: final = event
                     if "verification code requested" in output or "Enter six-digit code" in output:
                         waiting = True
                     if re.search(r'''tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423''', output):
@@ -564,8 +570,8 @@ class Job:
         if remaining <= 0:
             code, event = self.process([str(ROOT / "bin/appleweb.exe"), "-mode", "probe", "-session",
                                        str(self.folder / "icloud-web-session.json"), "-timeout", "90s"], 95)
-            if code == 0 and event and event.get("state") == "account_exists":
-                self.update(account_created=True)
+            if code == 0 and event and event.get("state") in PROBE_STATES:
+                self.update(account_created=True, probe_state=event["state"])
                 raise PipelineError("account_exists_activation_expired", "waiting_input")
             raise PipelineError("expired_activation_account_unconfirmed", "needs_review")
         reserve_code(sms)
@@ -574,6 +580,8 @@ class Job:
                                    "-code-file", str(self.folder / "web-code.txt"), "-accept-terms", "-timeout", f"{int(remaining)}s"],
                                   remaining + 5, "file")
         if code != 0 or not event or event.get("state") != "success":
+            if event and event.get("reason") == "apple_sms_verify_precondition_failed":
+                raise PipelineError("apple_sms_verify_precondition_failed", "needs_review")
             raise PipelineError("web_login_unconfirmed", (event or {}).get("state", "unknown"))
         self.update(stage="gsa", status="queued", account_created=True, reason="web_session_confirmed")
 
@@ -581,8 +589,10 @@ class Job:
         remaining = timestamp(self.cfg["sms"]["expires_at"]) - time.time()
         if remaining <= 0: raise PipelineError("activation_expired", "waiting_input")
         reserve_code(self.cfg["sms"])
-        code, _ = self.process([str(ROOT / "bin/login.exe"), "-dir", str(self.folder), "-twofactor", "sms", "-checkpoint"],
+        code, event = self.process([str(ROOT / "bin/login.exe"), "-dir", str(self.folder), "-twofactor", "sms", "-checkpoint"],
                                remaining, "stdin")
+        if event and event.get("reason") == "gsa_account_repair_required":
+            raise PipelineError("gsa_account_repair_required", "needs_review")
         if code != 0 or not (self.folder / "icloud-accepted.json").exists():
             raise PipelineError("gsa_login_unconfirmed")
         self.update(stage="device", status="queued", reason="gsa_checkpoint_saved")
@@ -684,7 +694,8 @@ class Job:
             # The hold code explains this refusal; the job keeps the reason that
             # made it unresolved.
             extra = {}
-            if error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason:
+            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason
+                    and error.reason not in {"gsa_account_repair_required", "apple_sms_verify_precondition_failed"}):
                 extra["hold_reason"] = error.reason
                 self.update(status=error.state, reason=prior, cooldown_until=cooldown, **extra)
             else:
@@ -1132,7 +1143,7 @@ class Job:
             try:
                 code, event = self.process([str(ROOT / "bin/appleweb.exe"), "-mode", "probe", "-session",
                                            str(self.folder / "icloud-web-session.json"), "-timeout", "90s"], 95, ignore_cancel=True)
-                exists = code == 0 and event and event.get("state") == "account_exists"
+                exists = code == 0 and event and event.get("state") in PROBE_STATES
             except PipelineError:
                 exists = False
             self.update(expiry_checked=True, account_created=bool(exists), refund_deferred=False,

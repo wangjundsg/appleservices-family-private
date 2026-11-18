@@ -111,6 +111,21 @@ func waitCode(ctx context.Context, file string) (string, error) {
 
 func emit(state string) { _ = json.NewEncoder(os.Stdout).Encode(map[string]string{"state": state}) }
 
+func probeState(ctx context.Context, needs2FA bool, account, path string, check func(context.Context, appleweb.ICloudSession) bool) string {
+	if needs2FA {
+		return "requires_2fa"
+	}
+	var saved appleweb.ICloudSession
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &saved) != nil || !strings.EqualFold(saved.AppleID, account) || saved.DSID == "" {
+		return "account_exists"
+	}
+	if check(ctx, saved) {
+		return "authenticated"
+	}
+	return "account_exists"
+}
+
 func run() error {
 	mode := flag.String("mode", "login", "login, probe (no code request), or keepalive")
 	file := flag.String("session", "", "private session file")
@@ -149,7 +164,7 @@ func run() error {
 			return e
 		}
 		if *mode == "probe" {
-			emit("account_exists")
+			emit(probeState(ctx, start.Needs2FA, account, *file, appleweb.NewICloudSessionValidator().ConfirmsIdentity))
 			return nil
 		}
 		session, err = finish(ctx, f, start, *consent, func() (string, error) { return waitCode(ctx, *codeFile) }, emit)
@@ -166,6 +181,10 @@ func run() error {
 
 func main() {
 	if err := run(); err != nil {
+		if code, _, _ := appleweb.ErrorDetails(err); code == "apple_sms_verify_precondition_failed" {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"state": "needs_review", "reason": code})
+			os.Exit(3)
+		}
 		state := "unknown"
 		if strings.Contains(err.Error(), "423") || strings.Contains(err.Error(), "tooManyCodesSent") {
 			state = "rate_limited"

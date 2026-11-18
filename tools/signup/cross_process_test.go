@@ -59,7 +59,7 @@ func TestHumanDeviceTelemetryAcrossProcesses(t *testing.T) {
 	phoneCode := filepath.Join(dir, "phone.txt")
 
 	base := []string{
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1",
+		"-email", "fixture@example.test",
 		"-phone", "4155550134", "-phonecc", "US", "-stage", "all", "-json",
 		"-base", srv.URL, "-engine-insecure",
 		"-profile-mode", "new", "-profile", "chrome",

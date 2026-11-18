@@ -371,3 +371,22 @@ func TestRequestPhoneSecurityCodeRejects412WithoutPhoneDetails(t *testing.T) {
 		t.Fatal("缺少受信任手机号信息的 412 响应不应被当作短信已发送")
 	}
 }
+
+// A precondition failure on verification stops this attempt. No provider text
+// or verification input should appear in the public error.
+func TestSMSVerificationPreconditionStopsAfterOneRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = w.Write([]byte(`{"message":"private-marker"}`))
+	}))
+	defer server.Close()
+	client := &AppleAuthClient{httpClient: server.Client()}
+	session := &appleAuthSession{Endpoints: appleAuthEndpoints{Auth: server.URL}, ClientID: defaultAppleOAuthClientID, TwoFactorMethod: appleTwoFactorMethodPhone, TwoFactorPhone: json.RawMessage(`{"id":1}`)}
+	_, err := client.Submit2FA(context.Background(), appleAuthPending{Session: session}, "000123", nil)
+	code, message, retry := ErrorDetails(err)
+	if requests != 1 || code != "apple_sms_verify_precondition_failed" || retry || strings.Contains(message, "private-marker") || strings.Contains(message, "000123") || session.TwoFactorVerified {
+		t.Fatalf("requests=%d code=%q retry=%t", requests, code, retry)
+	}
+}

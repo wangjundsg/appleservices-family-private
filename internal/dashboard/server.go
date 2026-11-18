@@ -191,8 +191,11 @@ func (s *Server) listAccounts(ctx context.Context) []AccountView {
 // addAccount registers a new account in its own directory. It never reuses or
 // overwrites an existing account's directory or credentials.
 func (s *Server) addAccount(ctx context.Context, creds credentials) (control.Result, string) {
-	if strings.TrimSpace(creds.AppleID) == "" || creds.Password == "" {
-		return control.Result{Message: "请输入 Apple 账户和密码"}, ""
+	if strings.TrimSpace(creds.AppleID) == "" {
+		return control.Result{Message: "缺少必填字段 apple_id"}, ""
+	}
+	if creds.Password == "" {
+		return control.Result{Message: "缺少必填字段 password"}, ""
 	}
 	s.accountsMu.Lock()
 	requested := strings.TrimSpace(creds.AppleID)
@@ -1100,6 +1103,11 @@ func readJSON(w http.ResponseWriter, r *http.Request, value any) bool {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(value) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		if _, credentialsRequest := value.(*credentials); credentialsRequest {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "凭据格式有误。可用字段为 apple_id、password 和可选的 twofactor，值须为字符串。"})
+			return false
+		}
 		http.Error(w, "invalid input", 400)
 		return false
 	}

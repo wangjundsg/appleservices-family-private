@@ -82,6 +82,9 @@ var activationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 var registrationOTPPattern = regexp.MustCompile(`^[0-9]{6}$`)
 var registrationRatePattern = regexp.MustCompile(`tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423`)
 var registerMessages = map[string]string{
+	"gsa_account_repair_required":            "请在 Apple 官方账户页面或受信任设备上完成提示的账号设置。",
+	"apple_sms_verify_precondition_failed":   "Apple 未接受本次短信验证（HTTP 412），请到官方账户页面核对提示。",
+	"server_rejected_34607001":               "Apple 拒绝本次注册校验（-34607001），任务已停止并保留回执。",
 	"browser_preflight_failed":               "浏览器出口国家、语言或时区预检未通过，请检查 Forge 与代理配置。",
 	"registration_rejected":                  "注册表单被明确拒绝，请查看截图。",
 	"code_rate_limited":                      "Apple 限制验证码请求，已停止并进入冷却。",
@@ -613,6 +616,11 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
 		json.NewEncoder(w).Encode(map[string]string{"message": "已请求取消；未知结果先保留号码，到期后核实并结算"})
 	case parts[1] == "input" && r.Method == "POST":
+		method, err := frozenRegistrationMethod(folder)
+		if err != nil || method != methodBrowser {
+			http.Error(w, `{"message":"此接口只接受已确认浏览器任务的邮箱验证码"}`, http.StatusConflict)
+			return
+		}
 		var body struct {
 			Code string `json:"code"`
 		}
@@ -625,7 +633,7 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 		}
 		var receipt pipelineReceipt
 		_ = readRegisterJSON(filepath.Join(folder, "result.json"), &receipt)
-		if !receipt.Active || receipt.Stage != "create" {
+		if !receipt.Active || receipt.Stage != "create" || receipt.Status != "waiting_input" {
 			http.Error(w, `{"message":"当前任务没有等待注册验证码"}`, 409)
 			return
 		}

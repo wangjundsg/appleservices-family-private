@@ -41,12 +41,41 @@ func registerFixture(t *testing.T, s *Server, receipt pipelineReceipt) string {
 	if err := os.MkdirAll(folder, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for file, value := range map[string]any{"panel.json": registerMeta{StartedAt: time.Now()}, "result.json": receipt} {
+	for file, value := range map[string]any{"panel.json": registerMeta{StartedAt: time.Now()}, "result.json": receipt, "request.json": map[string]string{}} {
 		if err := writeRegisterJSON(filepath.Join(folder, file), value); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return folder
+}
+
+func TestInputRefusesUnboundProtocolCode(t *testing.T) {
+	s := registerTestServer(t)
+	dir := registerFixture(t, s, pipelineReceipt{Stage: "create", Status: "waiting_input", Active: true})
+	if err := writeRegisterJSON(filepath.Join(dir, "request.json"), map[string]string{"registrationMethod": "protocol"}); err != nil {
+		t.Fatal(err)
+	}
+	w := registerTestCall(s, "POST", "/api/register/"+testRegisterID+"/input", `{"code":"012345"}`)
+	if w.Code != 409 || strings.Contains(w.Body.String(), "012345") {
+		t.Fatal(w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "email-code.txt")); !os.IsNotExist(err) {
+		t.Fatal("unbound input written")
+	}
+}
+
+func TestAccountCredentialErrorsIdentifyExpectedFields(t *testing.T) {
+	s := registerTestServer(t)
+	for _, tc := range []struct{ input, field string }{
+		{`{"appleid":"private-marker","password":"private-marker"}`, "apple_id"},
+		{`{"password":"private-marker"}`, "apple_id"},
+		{`{"apple_id":"private-marker"}`, "password"},
+	} {
+		w := registerTestCall(s, "POST", "/api/accounts/add", tc.input)
+		if !strings.Contains(w.Body.String(), tc.field) || strings.Contains(w.Body.String(), "private-marker") {
+			t.Fatalf("invalid field diagnostic: %s", w.Body.String())
+		}
+	}
 }
 
 func TestRegisterAuthValidationAndTraversal(t *testing.T) {

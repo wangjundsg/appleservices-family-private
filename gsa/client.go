@@ -26,6 +26,21 @@ import (
 
 const anisetteMaxAge = 60 * time.Second
 
+var ErrAccountRepairRequired = errors.New("gsa_account_repair_required")
+
+func continuationRequires2FA(au string) (bool, error) {
+	switch au {
+	case "":
+		return false, nil
+	case "secondaryAuth", "trustedDeviceSecondaryAuth":
+		return true, nil
+	case "repair":
+		return false, ErrAccountRepairRequired
+	default:
+		return false, errors.New("gsa: unsupported authentication continuation")
+	}
+}
+
 type Client struct {
 	anisette              AnisetteProvider
 	transport             nethttp.RoundTripper
@@ -441,10 +456,10 @@ func (c *Client) Login(username, password string) (*LoginResult, error) {
 	}
 
 	au, _ := status["au"].(string)
-	if au != "" && au != "trustedDeviceSecondaryAuth" && au != "secondaryAuth" {
-		return nil, fmt.Errorf("gsa: unsupported authentication continuation %q", au)
+	needsTwoFactor, err := continuationRequires2FA(au)
+	if err != nil {
+		return nil, err
 	}
-	needsTwoFactor := au == "trustedDeviceSecondaryAuth" || au == "secondaryAuth"
 	c.loginPayload = sessionPayload
 
 	return &LoginResult{NeedsTwoFactor: needsTwoFactor, TwoFactorMethod: au, SessionPayload: sessionPayload}, nil

@@ -669,11 +669,14 @@ func (c *AppleAuthClient) validatePhoneSecurityCode(ctx context.Context, session
 		if session.isAppleAccountManage() {
 			flow = "apple_account"
 		}
-		fmt.Fprintf(os.Stderr, "Apple短信验证失败 flow=%s status=%d phone_id=%v\n", flow, status, phone["id"])
+		fmt.Fprintf(os.Stderr, "Apple短信验证失败 flow=%s status=%d\n", flow, status)
+		if status == http.StatusPreconditionFailed {
+			return errCode("apple_sms_verify_precondition_failed", "Apple 未接受本次短信验证（HTTP 412）。请在官方账户页面核对后续提示。", false)
+		}
 		if status == http.StatusUnauthorized {
 			return errCode("apple_2fa_failed", "Apple 拒绝了本次短信验证（HTTP 401）。请取消后重新发起登录，使用本次登录收到的新短信验证码；仍失败时可改用受信任设备验证。", true)
 		}
-		return errCode("apple_2fa_failed", "Apple 短信 2FA 验证失败："+err.Error(), true)
+		return errCode("apple_2fa_failed", fmt.Sprintf("Apple 短信验证未完成（HTTP 状态 %d）", status), true)
 	}
 	return nil
 }

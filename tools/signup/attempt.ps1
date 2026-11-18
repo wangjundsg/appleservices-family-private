@@ -105,11 +105,15 @@ function Refund {
 }
 
 function Run-Signup {
-  param([string[]]$Arguments)
+  param([string[]]$Arguments, [string]$VerificationCode)
   $previousCaptcha = $env:YESCAPTCHA_KEY
   try {
     $env:YESCAPTCHA_KEY = $CaptchaKey
-    $output = & $Binary @Arguments 2>&1 | Out-String
+    if ($PSBoundParameters.ContainsKey('VerificationCode')) {
+      $output = $VerificationCode | & $Binary @Arguments -code-stdin 2>&1 | Out-String
+    } else {
+      $output = & $Binary @Arguments 2>&1 | Out-String
+    }
     $processExit = $LASTEXITCODE
   } finally { $env:YESCAPTCHA_KEY = $previousCaptcha }
   $json = $null
@@ -124,7 +128,7 @@ function Run-Signup {
 $graphConfig = Get-Content -LiteralPath $GraphCfg -Raw | ConvertFrom-Json
 if (-not $graphConfig.mailbox -or $graphConfig.mailbox.Trim().ToLowerInvariant() -ne $Email.Trim().ToLowerInvariant()) { throw 'Graph mailbox does not match this task.' }
 $capabilities = Run-Signup @('-capabilities')
-if ($capabilities.exitCode -ne 0 -or -not $capabilities.json.sessionResume -or -not $capabilities.json.finalize) { throw 'Rebuild signup: resumable-session/finalize support is required.' }
+if ($capabilities.exitCode -ne 0 -or -not $capabilities.json.sessionResume -or -not $capabilities.json.finalize -or -not $capabilities.json.codeStdin) { throw 'Rebuild signup: sessionResume, finalize and codeStdin are required.' }
 $preflight = Run-Signup @('-email', $Email, '-phonecc', $PhoneCC, '-stage', 'preflight', '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json')
 if ($preflight.exitCode -ne 0 -or $preflight.json.stage -ne 'preflight') { throw 'Preflight did not produce a fresh registration task; no number purchased.' }
 
@@ -176,7 +180,7 @@ if (-not $emailCode) {
   Save-Receipt @{ stage = 'email'; error = 'no email code'; refund = (Refund $activation $started) }
   exit 1
 }
-$submitEmail = Run-Signup @('-email', $Email, '-stage', 'email', '-code', $emailCode, '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json')
+$submitEmail = Run-Signup @('-email', $Email, '-stage', 'email', '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json') -VerificationCode $emailCode
 if (-not $submitEmail.json -or $submitEmail.json.error) {
   Save-Receipt @{ stage = 'email-submit'; error = $(if ($submitEmail.json) { $submitEmail.json.error } else { $submitEmail.raw }); refund = (Refund $activation $started) }
   exit 1
@@ -202,7 +206,7 @@ if (-not $smsCode) {
   Save-Receipt @{ stage = 'sms'; error = 'no sms code'; refund = (Refund $activation $started) }
   exit 1
 }
-$submitSms = Run-Signup @('-email', $Email, '-phone', $national, '-phonecc', $PhoneCC, '-stage', 'phone', '-code', $smsCode, '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json')
+$submitSms = Run-Signup @('-email', $Email, '-phone', $national, '-phonecc', $PhoneCC, '-stage', 'phone', '-proxy', $proxy, '-skip-landing', '-tz', $Tz, '-locale', $Locale, '-json') -VerificationCode $smsCode
 if (-not $submitSms.json -or $submitSms.json.error) {
   Save-Receipt @{ stage = 'phone-submit'; error = $(if ($submitSms.json) { $submitSms.json.error } else { $submitSms.raw }) }
   exit 1

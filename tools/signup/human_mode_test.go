@@ -180,7 +180,7 @@ func TestHumanModeFreezesPacingAndWarmup(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "task.json")
 	args := []string{
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1",
+		"-email", "fixture@example.test",
 		"-phone", "4155550134", "-phonecc", "US", "-stage", "all", "-json",
 		"-human", "-pacing-min", "0s", "-pacing-max", "1ms", "-warmup-assets", "0",
 		"-captcha-answer", "ABCDE", "-state", path,

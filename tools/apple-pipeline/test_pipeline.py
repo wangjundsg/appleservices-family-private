@@ -206,6 +206,25 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("probe", process.call_args.args[0])
         self.assertTrue(self.job.status["account_created"])
 
+    def test_probe_records_evidence_without_advancing_activation(self):
+        self.job.cfg["sms"]["expires_at"] = p.iso(p.time.time() - 1)
+        for state in ("requires_2fa", "authenticated"):
+            with self.subTest(state=state), patch.object(self.job, "process", return_value=(0, {"state": state})):
+                with self.assertRaisesRegex(p.PipelineError, "account_exists_activation_expired"):
+                    self.job.authenticate()
+                self.assertEqual(self.job.status["probe_state"], state)
+                self.assertNotEqual(self.job.status["status"], "ready")
+
+    def test_authentication_failures_preserve_review_reason(self):
+        for stage, reason in (("gsa", "gsa_account_repair_required"), ("login", "apple_sms_verify_precondition_failed")):
+            self.job.update(stage=stage, status="queued")
+            with self.subTest(reason=reason), patch.object(p, "reserve_code"), patch.object(self.job, "process", return_value=(3, {"state": "needs_review", "reason": reason})) as child:
+                self.job.run()
+                self.job.run(resume=True)
+                child.assert_called_once()
+                result = p.read(self.root / "result.json")
+                self.assertEqual((result["status"], result["reason"]), ("needs_review", reason))
+
     def test_cancelled_unknown_checks_account_at_expiry_before_refund(self):
         self.job.cfg["sms"]["expires_at"] = p.iso(p.time.time() - 1)
         self.job.update(status="cancelled", registration_started=True, number_owned=True)

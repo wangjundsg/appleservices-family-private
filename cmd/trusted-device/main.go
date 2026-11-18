@@ -107,7 +107,7 @@ func run() (runErr error) {
 	store := fileStore{dir: *dir}
 	device, err := store.LoadDevice()
 	if err != nil || device == nil || len(device.Identifier) != 16 || (!*useNativeADI && !(anisette.State{AdiPB: device.ProvisioningBlob}).Provisioned()) {
-		return errors.New("a provisioned device state is required; complete the existing login first")
+		return errors.New("provisioned_device_required: select the target account's provisioned device directory with -dir")
 	}
 	savedPath := filepath.Join(*dir, "push.json")
 	var pushState aps.State
@@ -166,6 +166,13 @@ func run() (runErr error) {
 	}
 	os.Unsetenv("APPLESERVICES_APPLEID")
 	os.Unsetenv("APPLESERVICES_PASSWORD")
+	var accepted appleservices.RestoredICloudSession
+	if *resumeSession {
+		accepted, err = store.LoadAcceptedICloud()
+		if err != nil {
+			return errors.New("accepted_checkpoint_unavailable: restore requires the same account's GSA session and accepted iCloud delegate checkpoint in -dir. Complete login -checkpoint for this account first")
+		}
+	}
 	status := runtimeStatus{PID: os.Getpid(), Running: true, State: "starting"}
 	if err := status.save(*dir); err != nil {
 		return err
@@ -291,10 +298,6 @@ func run() (runErr error) {
 	}
 	var login *appleservices.Login
 	if *resumeSession {
-		accepted, loadErr := store.LoadAcceptedICloud()
-		if loadErr != nil {
-			return errors.New("saved login session cannot be restored; reconnect with the current password")
-		}
 		login, err = appleservices.ResumeLogin(appleID, store, accepted, options...)
 	} else {
 		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)

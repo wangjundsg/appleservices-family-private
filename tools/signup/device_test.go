@@ -127,7 +127,7 @@ func TestDeviceStateSurvivesAcrossCLIRuns(t *testing.T) {
 	statePath := filepath.Join(dir, "task-1.json")
 	deviceDir := filepath.Join(dir, "devices")
 	args := []string{
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1",
+		"-email", "fixture@example.test",
 		"-stage", "preflight", "-json",
 		"-profile-mode", "new", "-profile", "chrome",
 		"-egress-country", "US", "-egress-source", "explicit",

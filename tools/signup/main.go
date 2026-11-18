@@ -61,10 +61,13 @@ type state struct {
 func main() { os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
 
 func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
+	return runCLIWithInput(ctx, args, os.Stdin, out, diagnostic)
+}
+
+func runCLIWithInput(ctx context.Context, args []string, in io.Reader, out, diagnostic io.Writer) int {
 	fs := flag.NewFlagSet("signup", flag.ContinueOnError)
 	fs.SetOutput(diagnostic)
 	email := fs.String("email", "", "account email (required)")
-	password := fs.String("password", os.Getenv("APPLESERVICES_SIGNUP_PASSWORD"), "password; preferably supplied through environment")
 	first := fs.String("first", "James", "given name")
 	last := fs.String("last", "Carter", "family name")
 	birthday := fs.String("birthday", "1992-07-18", "birthday")
@@ -73,14 +76,14 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	phone := fs.String("phone", "", "national or international phone number")
 	phoneCC := fs.String("phonecc", "US", "phone ISO2 country")
 	stage := fs.String("stage", "preflight", "preflight|captcha|create|email|phone|finalize|verify|all")
-	code := fs.String("code", "", "current verification code")
+	codeStdin := fs.Bool("code-stdin", false, "read a single verification code from standard input for the email or phone stage")
 	statePath := fs.String("state", "", "private state path")
 	base := fs.String("base", "", "loopback server override for offline testing")
 	proxy := fs.String("proxy", "", "proxy; frozen with the session")
 	timezone := fs.String("tz", "America/New_York", "timezone")
 	locale := fs.String("locale", "en-US", "locale")
 	ua := fs.String("user-agent", "", "User-Agent")
-	key := fs.String("captcha-key", os.Getenv("YESCAPTCHA_KEY"), "captcha service key; prefer environment")
+	key := fs.String("captcha-key", "", "captcha service key; prefer YESCAPTCHA_KEY")
 	capImage := fs.String("captcha-dump", "", "private captcha image path")
 	answer := fs.String("captcha-answer", "", "answer for the saved challenge")
 	answerFile := fs.String("captcha-answer-file", "", "manual challenge answer file")
@@ -115,7 +118,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		return 2
 	}
 	if *capabilities {
-		_ = json.NewEncoder(out).Encode(map[string]any{"stateVersion": signupStateVersion, "sessionResume": true, "finalize": true})
+		_ = json.NewEncoder(out).Encode(map[string]any{"stateVersion": signupStateVersion, "sessionResume": true, "finalize": true, "codeStdin": true})
 		return 0
 	}
 	fail := func(reason string) int {
@@ -132,6 +135,20 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	allowed := map[string]bool{"preflight": true, "captcha": true, "create": true, "email": true, "phone": true, "finalize": true, "verify": true, "all": true}
 	if !allowed[*stage] || *timeout <= 0 || *codeWait < 0 {
 		return fail("invalid_stage_or_timeout")
+	}
+	if *key == "" {
+		*key = os.Getenv("YESCAPTCHA_KEY")
+	}
+	var code string
+	if *codeStdin {
+		if *stage != "email" && *stage != "phone" {
+			return fail("invalid_code_input")
+		}
+		data, err := io.ReadAll(io.LimitReader(in, 9))
+		code = strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+		if err != nil || !sixDigits.MatchString(code) {
+			return fail("invalid_code_input")
+		}
 	}
 	if *base != "" {
 		r, err := http.NewRequest("GET", *base, nil)
@@ -159,7 +176,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 	if st.Email == "" {
 		st.Version = signupStateVersion
 		st.Email = strings.TrimSpace(*email)
-		st.Password = *password
+		st.Password = os.Getenv("APPLESERVICES_SIGNUP_PASSWORD")
 		if st.Password == "" {
 			st.Password = GeneratedPassword(14)
 		}
@@ -171,7 +188,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		st.Phone = digitsOnly(*phone)
 		st.PhoneCC = strings.ToUpper(*phoneCC)
 	} else {
-		values := map[string][2]string{"password": {st.Password, *password}, "first": {st.FirstName, *first}, "last": {st.LastName, *last}, "birthday": {st.Birthday, *birthday}, "country": {st.Country, *country}, "language": {st.Language, *language}, "phonecc": {st.PhoneCC, strings.ToUpper(*phoneCC)}}
+		values := map[string][2]string{"first": {st.FirstName, *first}, "last": {st.LastName, *last}, "birthday": {st.Birthday, *birthday}, "country": {st.Country, *country}, "language": {st.Language, *language}, "phonecc": {st.PhoneCC, strings.ToUpper(*phoneCC)}}
 		for name, pair := range values {
 			if visited[name] && pair[0] != pair[1] {
 				return fail("task_identity_change_rejected")
@@ -460,7 +477,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 		}
 		return answerQuestion(ctx, c, *answer, *key, *capWait, *capImage, *answerFile)
 	}
-	err = w.run(ctx, *stage, *code)
+	err = w.run(ctx, *stage, code)
 	if err != nil {
 		if st.Failure == "" {
 			st.Failure = publicReason(err)
@@ -527,6 +544,7 @@ func runCLI(ctx context.Context, args []string, out, diagnostic io.Writer) int {
 // Anything else is reported as stage_unconfirmed: a provider body or an internal
 // message must never reach a public receipt.
 var publicReasons = map[string]bool{
+	"server_rejected_34607001":            true,
 	"bootstrap_unconfirmed":               true,
 	"bootstrap_session_missing":           true,
 	"preflight_unavailable":               true,

@@ -202,7 +202,7 @@ func TestProfileModeRunsTheStateMachineOverTheEngine(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "task.json")
 	args := []string{
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1", "-phone", "4155550134", "-phonecc", "US",
+		"-email", "fixture@example.test", "-phone", "4155550134", "-phonecc", "US",
 		"-stage", "all", "-json",
 		"-profile-mode", "new", "-profile", "chrome",
 		"-egress-country", "US", "-egress-source", "verified-egress",
@@ -279,7 +279,7 @@ func TestNewTaskDefaultsToProfileModeWithoutTheFlag(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "task.json")
 	code, receipt := invokeSignup(t, path, server.URL,
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1",
+		"-email", "fixture@example.test",
 		"-phone", "4155550134", "-phonecc", "US",
 		"-stage", "all", "-json",
 		"-egress-country", "US", "-egress-source", "explicit",
@@ -301,7 +301,7 @@ func TestNewTaskDefaultsToProfileModeWithoutTheFlag(t *testing.T) {
 	defer plain.Close()
 	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
 	code, receipt = invokeSignup(t, legacyPath, plain.URL,
-		"-email", "fixture@example.test", "-password", "Str0ng#Pass1",
+		"-email", "fixture@example.test",
 		"-phone", "4155550134", "-phonecc", "US",
 		"-stage", "all", "-json", "-captcha-answer", "ABCDE", "-state", legacyPath)
 	if code != 4 {

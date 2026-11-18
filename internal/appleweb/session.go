@@ -74,3 +74,14 @@ func (c *ICloudSessionValidator) ValidateSession(ctx context.Context, session IC
 	session.LastStatusMessage = "iCloud Web 登录态正常"
 	return session, nil
 }
+
+// ConfirmsIdentity compares the saved identity with the service's current
+// response. Both identifiers must be present in that response.
+func (c *ICloudSessionValidator) ConfirmsIdentity(ctx context.Context, session ICloudSession) bool {
+	session = normalizeICloudWebSession(session)
+	if session.AppleID == "" || session.DSID == "" || len(session.Cookies) == 0 {
+		return false
+	}
+	result, err := c.Validate(ctx, session.Cookies, session.Host)
+	return err == nil && result.DSID == session.DSID && strings.EqualFold(result.AppleID, session.AppleID)
+}

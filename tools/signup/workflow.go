@@ -86,19 +86,10 @@ func (w *workflow) once(ctx context.Context, name, next string, body any, apply 
 		var pe *ProtocolError
 		if errors.As(err, &pe) {
 			w.state.HTTPStatus = pe.Status
-			var raw map[string]json.RawMessage
-			if json.Unmarshal([]byte(pe.Body), &raw) == nil {
-				for _, field := range []string{"errors", "service_errors", "serviceErrors", "validationErrors"} {
-					var items []struct {
-						Code string `json:"code"`
-					}
-					if json.Unmarshal(raw[field], &items) == nil {
-						for _, item := range items {
-							if safeErrorCode.MatchString(item.Code) {
-								w.state.ErrorCodes = append(w.state.ErrorCodes, item.Code)
-							}
-						}
-					}
+			w.state.ErrorCodes = pe.Codes
+			for _, code := range pe.Codes {
+				if name == "validate" && code == "-34607001" {
+					w.state.Failure = "server_rejected_34607001"
 				}
 			}
 			if pe.Status == 423 || pe.Status == 429 {

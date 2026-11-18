@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,10 +11,16 @@ import (
 	"strings"
 
 	"github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/gsa"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, gsa.ErrAccountRepairRequired) {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"state": "needs_review", "reason": gsa.ErrAccountRepairRequired.Error()})
+			fmt.Fprintln(os.Stderr, "请先在 Apple 官方账户页面或受信任设备上完成提示的账号设置。")
+			os.Exit(1)
+		}
 		if err == flag.ErrHelp {
 			return
 		}

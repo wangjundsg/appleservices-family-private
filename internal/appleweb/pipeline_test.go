@@ -53,3 +53,21 @@ func TestKeepaliveSavesRotatedCookieAndPreservesBrowserIdentity(t *testing.T) {
 		t.Fatal("original checkpoint was modified before saving")
 	}
 }
+
+func TestProbeRequiresBothIdentifiersFromRemoteSession(t *testing.T) {
+	s := ICloudSession{AppleID: "owner@example.test", DSID: "123", Host: "www.icloud.com", Cookies: []SessionCookie{{Name: "fixture", Value: "fixture", Domain: ".icloud.com", Path: "/"}}}
+	for _, tc := range []struct {
+		dsid, email string
+		want        bool
+	}{
+		{"123", "owner@example.test", true}, {"123", "", false}, {"", "owner@example.test", false}, {"456", "owner@example.test", false}, {"123", "other@example.test", false},
+	} {
+		v := &ICloudSessionValidator{httpClient: &http.Client{Transport: appleAuthTestTransport(func(r *http.Request) (*http.Response, error) {
+			body, _ := json.Marshal(map[string]any{"dsInfo": map[string]string{"dsid": tc.dsid, "appleId": tc.email}})
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Request: r, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+		})}}
+		if got := v.ConfirmsIdentity(context.Background(), s); got != tc.want {
+			t.Fatalf("dsid=%q email=%q confirmed=%t", tc.dsid, tc.email, got)
+		}
+	}
+}

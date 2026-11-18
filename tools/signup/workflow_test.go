@@ -159,12 +159,21 @@ func (f *strictSignup) handler(t *testing.T) http.Handler {
 		}
 	})
 }
+func fixtureInput(args []string) *strings.Reader {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-stage" && args[i+1] == "phone" {
+			return strings.NewReader("065432\r\n")
+		}
+	}
+	return strings.NewReader("012345\n")
+}
+
 func invokeSignup(t *testing.T, path, base string, args ...string) (int, map[string]any) {
 	t.Helper()
 	var out, diagnostic bytes.Buffer
 	argv := []string{"-email", "fixture@example.test", "-state", path, "-base", base, "-skip-landing", "-json"}
 	argv = append(argv, args...)
-	code := runCLI(context.Background(), argv, &out, &diagnostic)
+	code := runCLIWithInput(context.Background(), argv, fixtureInput(args), &out, &diagnostic)
 	var receipt map[string]any
 	if json.Unmarshal(out.Bytes(), &receipt) != nil {
 		t.Fatalf("non JSON output: %s %s", out.String(), diagnostic.String())
@@ -178,7 +187,7 @@ func invokeSignup(t *testing.T, path, base string, args ...string) (int, map[str
 }
 func toPhoneVerified(t *testing.T, path, base string) {
 	t.Helper()
-	steps := [][]string{{"-stage", "create", "-phone", "4155550134", "-captcha-answer", "ABCDE"}, {"-stage", "email"}, {"-stage", "email", "-code", "012345"}, {"-stage", "phone"}, {"-stage", "phone", "-code", "065432"}}
+	steps := [][]string{{"-stage", "create", "-phone", "4155550134", "-captcha-answer", "ABCDE"}, {"-stage", "email"}, {"-stage", "email", "-code-stdin"}, {"-stage", "phone"}, {"-stage", "phone", "-code-stdin"}}
 	for _, args := range steps {
 		code, r := invokeSignup(t, path, base, args...)
 		if code != 0 {
@@ -272,7 +281,7 @@ func TestMissingEmailChallengeStopsAndProfileCannotChange(t *testing.T) {
 	if code, _ := invokeSignup(t, path, server.URL, "-stage", "email"); code == 0 {
 		t.Fatal("missing challenge accepted")
 	}
-	if code, _ := invokeSignup(t, path, server.URL, "-stage", "email", "-code", "012345"); code == 0 {
+	if code, _ := invokeSignup(t, path, server.URL, "-stage", "email", "-code-stdin"); code == 0 {
 		t.Fatal("continued with empty challenge")
 	}
 	if f.calls["PUT /account/verification"] != 0 {
@@ -340,7 +349,7 @@ func TestSeparateCLIProcessesRestoreGoAndCurlSessions(t *testing.T) {
 			server := httptest.NewServer(f.handler(t))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "job.json")
-			steps := [][]string{{"-stage", "create", "-phone", "4155550134", "-captcha-answer", "ABCDE"}, {"-stage", "email"}, {"-stage", "email", "-code", "012345"}, {"-stage", "phone"}, {"-stage", "phone", "-code", "065432"}, {"-stage", "finalize"}, {"-stage", "verify"}}
+			steps := [][]string{{"-stage", "create", "-phone", "4155550134", "-captcha-answer", "ABCDE"}, {"-stage", "email"}, {"-stage", "email", "-code-stdin"}, {"-stage", "phone"}, {"-stage", "phone", "-code-stdin"}, {"-stage", "finalize"}, {"-stage", "verify"}}
 			if curl {
 				steps[0] = append(steps[0], "-curl")
 			}
@@ -350,6 +359,7 @@ func TestSeparateCLIProcessesRestoreGoAndCurlSessions(t *testing.T) {
 				args = append(args, step...)
 				cmd := exec.CommandContext(ctx, os.Args[0], args...)
 				cmd.Env = append(os.Environ(), "SIGNUP_TEST_CHILD=1")
+				cmd.Stdin = fixtureInput(step)
 				output, err := cmd.CombinedOutput()
 				cancel()
 				if err != nil {
@@ -422,6 +432,50 @@ func TestCodeFileCannotPredateChallenge(t *testing.T) {
 	w := &workflow{state: &state{Stage: "email-sent", EmailRequestedAt: time.Now()}}
 	if _, err := w.codeFromFile(context.Background(), path); err == nil {
 		t.Fatal("stale code accepted")
+	}
+}
+
+func TestValidationRefusalRetainsStatusWithoutReplaying(t *testing.T) {
+	for _, status := range []int{200, 400} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			requests := 0
+			f := &strictSignup{}
+			inner := f.handler(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/account/validate" {
+					inner.ServeHTTP(w, r)
+					return
+				}
+				requests++
+				w.WriteHeader(status)
+				fmt.Fprintf(w, `{"message":"%s","service_errors":[{"code":-34607001}]}`, strings.Repeat("private-marker", 80))
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "job.json")
+			for attempt := 0; attempt < 2; attempt++ {
+				rc, receipt := invokeSignup(t, path, server.URL, "-stage", "create", "-phone", "4155550134", "-captcha-answer", "ABCDE")
+				field := "reason"
+				if attempt == 1 {
+					field = "failure"
+				}
+				if rc == 0 || receipt["state"] != "needs_review" || receipt[field] != "server_rejected_34607001" || receipt["httpStatus"] != float64(status) || requests != 1 {
+					t.Fatal(receipt, requests)
+				}
+			}
+		})
+	}
+}
+
+func TestCredentialArgumentsAndHelpCannotExposeSecrets(t *testing.T) {
+	const marker = "private-fixture-marker"
+	t.Setenv("APPLESERVICES_SIGNUP_PASSWORD", marker)
+	t.Setenv("YESCAPTCHA_KEY", marker)
+	for _, args := range [][]string{{"-help"}, {"-password", marker}, {"-code=" + marker}, {"-email", "owner@example.test", "-stage", "email", "-code-stdin", "-json"}} {
+		var out, diag bytes.Buffer
+		rc := runCLIWithInput(context.Background(), args, strings.NewReader(marker), &out, &diag)
+		if rc == 0 || strings.Contains(out.String()+diag.String(), marker) {
+			t.Fatal("secret input or help handling failed")
+		}
 	}
 }
 
