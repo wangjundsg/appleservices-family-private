@@ -80,6 +80,43 @@ dashboard.exe  启动成功，pid=23192，18741 监听 = True
 
 ---
 
+## 4.1 面板链路实跑（2026-11-18 15:03，决定性）
+
+按面板真实路径执行（含 Mac APS 身份引导），全部步骤成功，**只有登录被 Apple 拦下**：
+
+```text
+.api /api/accounts/add        → {"ok":true,"message":"正在连接 Apple，请稍等"}
+worker 启动日志（daemon.err.log）
+  Authenticating the APS connection ...                        ← 推送身份建立
+  Starting the verified local ADI generation module ...        ← 原生 ADI 模块启动
+  Local six-digit generation is available for the same device identity.
+  trusted-device: appleservices: login: gsa_account_repair_required   ← 失败点
+runtime.json
+  state=failed
+  failure_stage=signing_in
+  failure_reason=gsa_account_repair_required
+  pid=20780  updated_at=2026-11-18T07:03:19Z
+```
+
+生成的账号私有状态（证明前面步骤都成立）：
+
+```
+accounts/01-account/device.json          108 B
+accounts/01-account/push.json           2.5 KB
+accounts/01-account/hw_info.plist       5.6 KB
+accounts/01-account/state.plist         1.2 KB
+```
+
+**结论**：
+
+1. 设备激活的**前置全部通过**：Mac APS 推送身份已建立、原生 ADI 模块已加载、worker 正常启动；
+2. 唯一失败点是 **GSA 登录**，稳定错误码 `gsa_account_repair_required`，`failure_stage=signing_in`；
+3. 未发生：密码错误、验证码提交、设备登记尝试；
+4. 因此设备激活的验证停在「需要先解除账号的 repair 状态」这一步，**不是工具链问题**。
+
+> 注：`bin/login.exe` 仍是旧构建，抛 Apple 原始串 `unsupported authentication continuation "repair"`；
+> 面板 worker（`trusted-device-gui.exe`）已是新构建，给出稳定码 `gsa_account_repair_required`。
+
 ## 5. 复现命令（脱敏，密码走环境变量）
 
 ```powershell
