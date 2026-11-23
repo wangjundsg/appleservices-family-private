@@ -24,7 +24,8 @@ try {
     foreach ($taskName in @('login', 'appleweb', 'trusted-device', 'accountsetupcheck', 'nacexchange', 'dashboard')) {
         $taskBinary = Join-Path $taskRoot ('bin\' + $taskName + '.exe')
         if ($Build -or -not (Test-Path -LiteralPath $taskBinary)) {
-            & go build -o $taskBinary ('./cmd/' + $taskName)
+            $taskSource = if ($taskName -in @('accountsetupcheck', 'nacexchange')) { './tools/' + $taskName } else { './cmd/' + $taskName }
+            & go build -o $taskBinary $taskSource
             if ($LASTEXITCODE -ne 0) { throw ('Build failed: ' + $taskName) }
         }
     }

@@ -98,12 +98,42 @@ func TestGrandSlamStopsOnUnknownProtocol(t *testing.T) {
 	}
 }
 
+func TestGrandSlamDoesNotReplayRefusedOrUnconfirmedRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name, operation, body string
+		status                int
+	}{
+		{"forbidden", "init", "denied", 403},
+		{"not-found", "init", "missing", 404},
+		{"rate-limited", "init", "slow down", 429},
+		{"empty", "init", "", 200},
+		{"unexpected-body", "init", "<html>unavailable</html>", 200},
+		{"no-content", "init", "", 204},
+		{"complete-unavailable", "complete", "unavailable", 503},
+		{"token-unavailable", "apptokens", "unavailable", 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClient(headerProvider{})
+			requests := 0
+			c.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				if requests > 1 {
+					return plistResponse(t, map[string]any{"Response": map[string]any{"Status": map[string]any{"ec": int64(0)}}}), nil
+				}
+				return &http.Response{StatusCode: tc.status, Header: http.Header{"Retry-After": []string{"120"}}, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			_, err := c.doRequest(map[string]any{"o": tc.operation})
+			if requests != 1 || err == nil {
+				t.Fatalf("unconfirmed request replayed: requests=%d err=%v", requests, err)
+			}
+		})
+	}
+}
+
 func TestGrandSlamErrorsIdentifyStage(t *testing.T) {
-	// 429 and 5xx are dropped requests, not answers: they are resent, and only
-	// a permanent status is reported as an HTTP rejection.
-	for _, status := range []int{429, 503} {
+	for _, status := range []int{502, 503, 504} {
 		if !retryableGSAStatus(status) {
-			t.Fatalf("status %d is not treated as a dropped request", status)
+			t.Fatalf("status %d is not a temporary gateway failure", status)
 		}
 		c := NewClient(headerProvider{})
 		requests := 0
@@ -114,11 +144,11 @@ func TestGrandSlamErrorsIdentifyStage(t *testing.T) {
 		if _, err := c.doRequest(map[string]any{"o": "init"}); err == nil {
 			t.Fatal("exhausted retries were reported as success")
 		}
-		if requests != gsaRequestAttempts {
-			t.Fatalf("made %d attempts, want %d", requests, gsaRequestAttempts)
+		if requests != 3 {
+			t.Fatalf("made %d attempts, want 3", requests)
 		}
 	}
-	for _, status := range []int{400, 401, 405} {
+	for _, status := range []int{204, 400, 401, 403, 404, 405, 429, 500} {
 		c := NewClient(headerProvider{})
 		c.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("test error"))}, nil

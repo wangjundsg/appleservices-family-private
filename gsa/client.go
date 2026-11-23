@@ -114,27 +114,17 @@ func caseInsensitiveLookup(headers map[string]string, name string) string {
 	return ""
 }
 
-// gsaRequestAttempts bounds how often one GrandSlam call is resent. The edge in
-// front of gsa.apple.com drops a request it cannot route and answers with an
-// empty 200, a bare 204/403/404, or a 5xx — none of which carries an
-// application answer. Only a plist with a Response dict proves the request
-// arrived, so anything else is resent rather than reported as a rejection.
-const gsaRequestAttempts = 40
+// Only challenge initialization may retry temporary gateway failures. A refusal
+// or malformed response does not prove that a submitted proof was unprocessed.
+const gsaRequestAttempts = 3
+const gsaRetryDelay = time.Second
 
-// gsaRetryDelay paces those resends. The edge's behaviour changes on the scale
-// of minutes, so the attempts stay close together while the login is still
-// worth completing.
-const gsaRetryDelay = 400 * time.Millisecond
-
-// retryableGSAStatus reports whether a status means the request never reached
-// the application. The package's http helper shadows net/http, so the codes are
-// written out.
 func retryableGSAStatus(status int) bool {
 	switch status {
-	case 204, 403, 404, 429:
+	case 502, 503, 504:
 		return true
 	}
-	return status/100 == 5
+	return false
 }
 
 func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
@@ -172,14 +162,15 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 		}
 	}
 
+	op, _ := request["o"].(string)
 	var lastErr error
 	for attempt := 1; attempt <= gsaRequestAttempts; attempt++ {
 		resp, err := c.gsaRoundTrip(request, buf.Bytes(), headers)
 		if err == nil {
 			return resp, nil
 		}
-		var dropped *droppedRequestError
-		if !errors.As(err, &dropped) || attempt == gsaRequestAttempts {
+		var failure *AuthenticationError
+		if op != "init" || !errors.As(err, &failure) || !retryableGSAStatus(failure.HTTPStatus) || attempt == gsaRequestAttempts {
 			return nil, err
 		}
 		lastErr = err
@@ -188,19 +179,7 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 	return nil, lastErr
 }
 
-// droppedRequestError marks a response that proves the request never reached
-// the application, so the caller may resend it unchanged.
-type droppedRequestError struct {
-	status int
-	reason string
-}
-
-func (e *droppedRequestError) Error() string {
-	return "gsa: request did not reach the application (" + e.reason + ")"
-}
-
-// gsaRoundTrip performs one GrandSlam call. It reports a droppedRequestError
-// when the edge answered without forwarding the request.
+// gsaRoundTrip performs one GrandSlam call without replaying the request.
 func (c *Client) gsaRoundTrip(request map[string]any, body []byte, headers map[string]string) (map[string]any, error) {
 	result, err := http.ExecuteRequest(gsaBaseURL+"/grandslam/GsService2",
 		http.Method("POST"),
@@ -212,26 +191,22 @@ func (c *Client) gsaRoundTrip(request map[string]any, body []byte, headers map[s
 	)
 	op, _ := request["o"].(string)
 	if result != nil && result.StatusCode != 200 {
-		if retryableGSAStatus(result.StatusCode) {
-			return nil, &droppedRequestError{status: result.StatusCode, reason: fmt.Sprintf("HTTP %d", result.StatusCode)}
-		}
 		return nil, &AuthenticationError{Operation: op, HTTPStatus: result.StatusCode}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gsa: request failed: %w", err)
 	}
 	if result == nil {
-		return nil, &droppedRequestError{status: 0, reason: "no response"}
+		return nil, fmt.Errorf("gsa: %s returned no response", op)
 	}
 	if len(bytes.TrimSpace(result.Body)) == 0 {
-		return nil, &droppedRequestError{status: 200, reason: "empty 200"}
+		return nil, fmt.Errorf("gsa: %s returned empty HTTP 200", op)
 	}
 	c.responseHeaders = cloneHeaderValues(result.Headers)
 
 	var decoded map[string]any
 	if _, err := plist.Unmarshal(result.Body, &decoded); err != nil {
-		// A 200 that does not decode is an edge error page, not an answer.
-		return nil, &droppedRequestError{status: 200, reason: "undecodable 200"}
+		return nil, fmt.Errorf("gsa: %s returned invalid plist in HTTP 200", op)
 	}
 	respMap, ok := decoded["Response"].(map[string]any)
 	if !ok {

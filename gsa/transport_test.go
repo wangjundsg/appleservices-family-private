@@ -109,9 +109,7 @@ func TestGSAUsesFreshConnectionButKeepsSessionCookies(t *testing.T) {
 				}
 				return
 			}
-			// A pooled connection keeps answering 429, which is now treated as a
-			// dropped request and resent until the attempts run out. The failure
-			// must still surface rather than be mistaken for success.
+			// A pooled connection's 429 must surface without replaying the proof.
 			if err == nil {
 				t.Fatal("a permanently rejected pooled connection was reported as success")
 			}
