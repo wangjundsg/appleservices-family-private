@@ -152,6 +152,8 @@ func (c *Client) doRequest(request map[string]any) (map[string]any, error) {
 	if ci := caseInsensitiveLookup(anisetteHeaders, "X-Mme-Client-Info"); ci != "" {
 		headers["X-Mme-Client-Info"] = ci
 	}
+	// GSA requires the device authentication fields on HTTP as well as in CPD.
+	httpx.ApplyAnisette(headers, anisetteHeaders)
 	if c.nativeDevice {
 		headers["X-Apple-AK-Context-Type"] = "icloud"
 		headers["X-Apple-Client-App-Name"] = "AppleIDSettings"

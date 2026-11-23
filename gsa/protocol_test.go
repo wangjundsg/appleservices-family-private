@@ -80,6 +80,49 @@ func TestBrowserTwoFactorProfilePreservesAnisetteIdentity(t *testing.T) {
 	}
 }
 
+func TestGrandSlamCarriesAnisetteInHTTPHeadersAndCPD(t *testing.T) {
+	provider := headerProvider{
+		"X-Apple-I-MD": "test-md", "X-Apple-I-MD-M": "test-mid",
+		"X-Apple-I-MD-RINFO": "17106176", "X-Apple-I-MD-LU": "test-lu",
+		"X-Mme-Device-Id": "test-device", "X-Apple-I-SRL-NO": "test-serial",
+		"X-Apple-I-Client-Time": "2026-11-24T00:00:00Z",
+		"Authorization":         "must-not-forward", "X-Unrelated": "must-not-forward",
+	}
+	for _, operation := range []string{"init", "complete", "apptokens"} {
+		t.Run(operation, func(t *testing.T) {
+			c := NewClient(provider)
+			c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				data, _ := io.ReadAll(r.Body)
+				var envelope map[string]any
+				if _, err := plist.Unmarshal(data, &envelope); err != nil {
+					t.Fatal(err)
+				}
+				request := envelope["Request"].(map[string]any)
+				cpd := request["cpd"].(map[string]any)
+				for key, value := range provider {
+					if key == "Authorization" || key == "X-Unrelated" {
+						if r.Header.Get(key) != "" {
+							t.Errorf("forwarded unrelated HTTP header %s", key)
+						}
+						continue
+					}
+					if r.Header.Get(key) != value || cpd[key] != value {
+						t.Errorf("%s must carry the same device value in HTTP headers and CPD", key)
+					}
+				}
+				return plistResponse(t, map[string]any{"Response": map[string]any{"Status": map[string]any{"ec": int64(0)}}}), nil
+			})
+			cpd, err := c.buildCPD()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.doRequest(map[string]any{"o": operation, "cpd": cpd}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestGrandSlamStopsOnUnknownProtocol(t *testing.T) {
 	c := NewClient(headerProvider{})
 	requests := 0
