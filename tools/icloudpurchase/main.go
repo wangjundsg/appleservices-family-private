@@ -222,7 +222,7 @@ func run() error {
 				fmt.Println("signed current-bag Store authentication; physical GUID; same cookie jar")
 				commerce, err = icloud.AuthenticateSignedSkillStore(ctx, username, password, headers, *appStoreProfile, provider)
 			} else {
-				commerce, err = icloud.AuthenticateSkillStore(ctx, username, password, provider)
+				commerce, err = icloud.AuthenticateMatchedSkillStore(ctx, username, password, headers, provider)
 			}
 		} else if *appStoreProfile {
 			fmt.Println("native App Store profile; signed exact Apple bag endpoint; account Mac retained")

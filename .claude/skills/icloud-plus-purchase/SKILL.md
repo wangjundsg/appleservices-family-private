@@ -44,6 +44,10 @@ go build -o bin/icloudpurchase.exe ./tools/icloudpurchase
 
 ### 验证码时序与当前 bag 路径
 
+默认 CLI 与面板共用 `AuthenticateMatchedSkillStore`：从同一个 Apple bag 取得认证地址、SAP setup 和证书，并保留该地址及签名请求体。文末固定 `native/fast/` 示例是历史实测路径，不应覆盖当前 bag。仅调整 User-Agent 或反复重试空白 HTTP 响应不等于完成账户审核。
+
+新账户还可能缺少媒体商店首次使用初始化。一次对照中，匹配 bag 的认证返回 HTTP 200、`failureType=5005`；同账号通过官方 Apple Music 网页登录和双重认证后，网页自动完成账户转换/注册，随后同一签名认证路径取得 Store 令牌。过程中没有订阅 Apple Music。此案例只支持将首次使用初始化列为检查项，不能把所有 5005 都断定为同一原因，也不能把 iCloud 条款接受当成媒体商店初始化。应检查官方页面实际提示，沿用它返回的流程，并在完成后重新核验原生 Store 认证；不要硬编码或盲目重放账户转换接口。
+
 验证码只能提交到已经收到 Apple 2FA 应用响应的同一个 cookie 会话。不要在挑战出现前反复重启登录，也不要把多个验证码写死在命令行：提前到达的验证码可能在真正提交前失效。优先使用 `-store-code-file`，由程序在挑战阶段持续读取该文件；文件应只包含最新六位数字、限制为当前用户可读，并在提交后立即删除。程序必须输出“已进入挑战”和“已提交验证码”的阶段信息，避免把等待状态误报成密码错误。
 
 SAP 登录必须使用同一份 Store bag 返回的三元组：`authenticateAccount`、`sign-sap-setup` 和 `sign-sap-setup-cert`。不要无条件把 bag 的 legacy MZFinance 地址改写成 native/fast；需要诊断时使用 `-signed-store -matched-bag`，让认证地址和签名配置保持匹配。该模式仍使用物理 Store GUID，不能替换账号的 iCloud Mac/ADI 身份。
