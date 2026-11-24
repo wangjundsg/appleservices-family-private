@@ -11,12 +11,14 @@ import (
 
 // Only public terms metadata is returned; credentials stay in the pending session.
 type ICloudTerms struct {
-	Version string `json:"version"`
-	Title   string `json:"title"`
-	Content string `json:"content,omitempty"`
-	URL     string `json:"url"`
-	AppleID string `json:"apple_id"`
-	Host    string `json:"host"`
+	Version            string `json:"version"`
+	Title              string `json:"title"`
+	Content            string `json:"content,omitempty"`
+	URL                string `json:"url"`
+	AppleID            string `json:"apple_id"`
+	Host               string `json:"host"`
+	GCBDPrivacyTitle   string `json:"gcbd_privacy_title,omitempty"`
+	GCBDPrivacyMessage string `json:"gcbd_privacy_message,omitempty"`
 }
 
 func (c *AppleAuthClient) fetchICloudTerms(ctx context.Context, s *appleAuthSession) (ICloudTerms, error) {
@@ -24,7 +26,9 @@ func (c *AppleAuthClient) fetchICloudTerms(ctx context.Context, s *appleAuthSess
 		return ICloudTerms{}, errCode("icloud_terms_not_required", "此登录会话不需要确认 iCloud 条款", false)
 	}
 	var reply struct {
-		Terms map[string]json.RawMessage `json:"iCloudTerms"`
+		Terms              map[string]json.RawMessage `json:"iCloudTerms"`
+		GCBDPrivacyTitle   string                     `json:"gcbdPrivacyNoticeTitle"`
+		GCBDPrivacyMessage string                     `json:"gcbdPrivacyNoticeMessage"`
 	}
 	u, _ := url.Parse(s.Endpoints.Setup + "/getTerms")
 	q := u.Query()
@@ -32,7 +36,7 @@ func (c *AppleAuthClient) fetchICloudTerms(ctx context.Context, s *appleAuthSess
 	q.Set("clientMasteringNumber", "2622Build20")
 	q.Set("clientId", s.FrameID)
 	u.RawQuery = q.Encode()
-	status, _, err := c.do(ctx, s, http.MethodGet, u.String(), s.commonHeaders(nil), map[string]string{"locale": firstNonEmpty(s.TermsLocale, "zh_CN")}, &reply, false)
+	status, _, err := c.do(ctx, s, http.MethodPost, u.String(), s.commonHeaders(nil), map[string]string{"locale": firstNonEmpty(s.TermsLocale, "zh_CN")}, &reply, false)
 	if err != nil {
 		return ICloudTerms{}, errCode("icloud_terms_fetch_failed", fmt.Sprintf("获取 Apple 条款失败（HTTP %d），可重试读取；尚未提交同意", status), true)
 	}
@@ -61,6 +65,12 @@ func (c *AppleAuthClient) fetchICloudTerms(ctx context.Context, s *appleAuthSess
 				break
 			}
 		}
+	}
+	if s.GCBDPrivacyRequired {
+		if strings.TrimSpace(reply.GCBDPrivacyTitle) == "" || strings.TrimSpace(reply.GCBDPrivacyMessage) == "" {
+			return ICloudTerms{}, errCode("icloud_gcbd_terms_missing", "Apple 要求确认云上贵州隐私提示，但未返回完整提示内容，尚未提交同意", true)
+		}
+		terms.GCBDPrivacyTitle, terms.GCBDPrivacyMessage = reply.GCBDPrivacyTitle, reply.GCBDPrivacyMessage
 	}
 	s.Terms = &terms
 	return terms, nil
@@ -103,11 +113,15 @@ func (c *AppleAuthClient) acceptICloudTerms(ctx context.Context, s *appleAuthSes
 		var reply struct {
 			Success *bool `json:"success"`
 		}
-		status, _, err := c.do(ctx, s, http.MethodGet, u.String(), s.commonHeaders(nil), map[string]any{"acceptedICloudTerms": json.Number(version)}, &reply, false)
+		payload := map[string]any{"acceptedICloudTerms": json.Number(version)}
+		if s.GCBDPrivacyRequired {
+			payload["gcbdPrivacyNoticeAccepted"] = true
+		}
+		status, _, err := c.do(ctx, s, http.MethodPost, u.String(), s.commonHeaders(nil), payload, &reply, false)
 		if err != nil {
 			return ICloudSession{}, errCode("icloud_terms_accept_failed", fmt.Sprintf("提交 Apple 条款确认失败（HTTP %d），登录尚未完成", status), true)
 		}
-		if reply.Success != nil && !*reply.Success {
+		if reply.Success == nil || !*reply.Success {
 			return ICloudSession{}, errCode("icloud_terms_accept_failed", "Apple 未接受本次条款确认，登录尚未完成", true)
 		}
 		s.TermsAccepted = true

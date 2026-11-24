@@ -21,7 +21,7 @@ func TestOld2FAReportsRequiredICloudActionWithoutReplayingOTP(t *testing.T) {
 	for _, tc := range []struct {
 		name, response, code string
 	}{
-		{"terms", `{"termsUpdateNeeded":true,"trustTokens":["fixture-trust-secret"]}`, "icloud_terms_update_needed"},
+		{"terms", `{"termsUpdateNeeded":true,"showGcbdPrivacyNotice":true,"trustTokens":["fixture-trust-secret"]}`, "icloud_terms_update_needed"},
 		{"repair", `{"isRepairNeeded":true}`, "icloud_account_repair_needed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,6 +48,9 @@ func TestOld2FAReportsRequiredICloudActionWithoutReplayingOTP(t *testing.T) {
 				if code != tc.code || retryable || !strings.Contains(message, "https://www.icloud.com.cn") || strings.Contains(message, "fixture-trust-secret") {
 					t.Fatalf("missing safe account action: %v", err)
 				}
+			}
+			if tc.name == "terms" && !session.GCBDPrivacyRequired {
+				t.Fatal("lost requested GCBD privacy notice")
 			}
 			if verified != 1 || trusted != 1 || exchanged != 2 {
 				t.Fatalf("accepted stages replayed: verify=%d trust=%d exchange=%d", verified, trusted, exchanged)

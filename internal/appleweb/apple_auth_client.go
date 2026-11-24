@@ -78,6 +78,7 @@ type appleAuthSession struct {
 	TwoFactorVerified   bool
 	TrustEstablished    bool
 	TermsRequired       bool
+	GCBDPrivacyRequired bool
 	TermsLocale         string
 	Terms               *ICloudTerms
 	TermsAccepted       bool
@@ -129,10 +130,11 @@ type appleAccountInfo struct {
 		Status      string `json:"status"`
 		PcsRequired bool   `json:"pcsRequired"`
 	} `json:"webservices"`
-	HsaChallengeRequired bool  `json:"hsaChallengeRequired"`
-	TermsUpdateNeeded    bool  `json:"termsUpdateNeeded"`
-	IsRepairNeeded       bool  `json:"isRepairNeeded"`
-	Success              *bool `json:"success"`
+	HsaChallengeRequired  bool  `json:"hsaChallengeRequired"`
+	TermsUpdateNeeded     bool  `json:"termsUpdateNeeded"`
+	IsRepairNeeded        bool  `json:"isRepairNeeded"`
+	ShowGCBDPrivacyNotice bool  `json:"showGcbdPrivacyNotice"`
+	Success               *bool `json:"success"`
 }
 
 // An HTTP 200 accountLogin can still contain only a partial web session.
@@ -864,6 +866,7 @@ func (c *AppleAuthClient) authWithTokenAndValidate(ctx context.Context, session 
 		return ICloudSession{}, err
 	}
 	session.TermsRequired = account.TermsUpdateNeeded
+	session.GCBDPrivacyRequired = account.ShowGCBDPrivacyNotice
 	session.TermsLocale = firstNonEmpty(account.DSInfo.LanguageCode, "zh_CN")
 	if err := iCloudAccountActionError(account, session.Endpoints.Host); err != nil {
 		return ICloudSession{}, err
@@ -989,6 +992,10 @@ func appleSMSExchangeDiagnostic(req *http.Request, status int, session *appleAut
 		step = "trust"
 	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/setup/ws/1/accountLogin"):
 		step = "account_login"
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/setup/ws/1/getTerms"):
+		step = "terms_read"
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/setup/ws/1/repairDone"):
+		step = "terms_accept"
 	default:
 		return ""
 	}
@@ -1053,6 +1060,9 @@ func appleSMSExchangeDiagnostic(req *http.Request, status int, session *appleAut
 		appleHostForAccountCountry(session.AccountCountry), status, redirectHost, session.TwoFactorVerified, session.TrustEstablished, phoneFingerprint(sentPhone), phoneFingerprint(storedPhone), phoneFingerprint(replyPhone), flag(sentPhone["nonFTEU"]),
 		appleDebugFingerprint(req.Header.Get("scnt")), appleDebugFingerprint(session.Scnt), appleDebugFingerprint(req.Header.Get("X-Apple-ID-Session-Id")), appleDebugFingerprint(session.SessionID), req.Header.Get("Cookie") != "", format,
 		flag(security["valid"]), flag(security["securityCodeLocked"]), flag(security["tooManyCodesSent"]), flag(security["tooManyCodesValidated"]), flag(security["securityCodeCooldown"]), serviceCodes)
+	if step == "terms_read" || step == "terms_accept" || step == "account_login" {
+		diagnostic += fmt.Sprintf(" explicit_success=%s gcbd_required=%s", flag(root["success"]), flag(root["showGcbdPrivacyNotice"]))
+	}
 	if step == "account_login" {
 		account, _ := root["dsInfo"].(map[string]any)
 		services, _ := root["webservices"].(map[string]any)

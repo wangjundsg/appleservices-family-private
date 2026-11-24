@@ -20,8 +20,8 @@ func TestICloudTermsConsentContinuesVerifiedLogin(t *testing.T) {
 				switch req.URL.Path {
 				case "/setup/ws/1/getTerms":
 					reads++
-					body = `{"iCloudTerms":{"version":7,"text":"Read current terms","url":"https://evil.example/terms"},"trustTokens":["never-return-this"]}`
-					if req.Method != http.MethodGet {
+					body = `{"iCloudTerms":{"version":7,"text":"Read current terms","url":"https://evil.example/terms"},"gcbdPrivacyNoticeTitle":"Privacy title","gcbdPrivacyNoticeMessage":"Privacy message","trustTokens":["never-return-this"]}`
+					if req.Method != http.MethodPost {
 						t.Fatal("unexpected terms method")
 					}
 					cookie, e := req.Cookie("X-APPLE-WEBAUTH-REPAIR")
@@ -30,9 +30,19 @@ func TestICloudTermsConsentContinuesVerifiedLogin(t *testing.T) {
 					}
 				case "/setup/ws/1/repairDone":
 					accepts++
+					if req.Method != http.MethodPost {
+						t.Fatal("terms acceptance must use POST")
+					}
 					var payload map[string]any
 					if e := json.NewDecoder(req.Body).Decode(&payload); e != nil || payload["acceptedICloudTerms"] != float64(7) {
 						t.Fatal("wrong accepted version")
+					}
+					if host == "www.icloud.com.cn" {
+						if payload["gcbdPrivacyNoticeAccepted"] != true {
+							t.Fatal("missing requested GCBD privacy acceptance")
+						}
+					} else if _, exists := payload["gcbdPrivacyNoticeAccepted"]; exists {
+						t.Fatal("unexpected GCBD acceptance")
 					}
 					body = `{"success":true}`
 				case "/setup/ws/1/accountLogin":
@@ -49,7 +59,7 @@ func TestICloudTermsConsentContinuesVerifiedLogin(t *testing.T) {
 				}
 				return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 			})}}
-			s := &appleAuthSession{Endpoints: appleAuthEndpointsForHost(host), AppleID: "fixture@example.com", SessionToken: "fixture-token", TwoFactorVerified: true, TrustEstablished: true, TermsRequired: true, Cookies: []SessionCookie{{Name: "X-APPLE-WEBAUTH-REPAIR", Value: "fixture-repair", Domain: "." + strings.TrimPrefix(host, "www."), Path: "/"}}}
+			s := &appleAuthSession{Endpoints: appleAuthEndpointsForHost(host), AppleID: "fixture@example.com", SessionToken: "fixture-token", TwoFactorVerified: true, TrustEstablished: true, TermsRequired: true, GCBDPrivacyRequired: host == "www.icloud.com.cn", Cookies: []SessionCookie{{Name: "X-APPLE-WEBAUTH-REPAIR", Value: "fixture-repair", Domain: "." + strings.TrimPrefix(host, "www."), Path: "/"}}}
 			facade := &AuthFacade{client: c, pending: newAppleAuthPendingStore()}
 			pending, e := facade.pending.put(s)
 			if e != nil {
@@ -145,5 +155,46 @@ func TestICloudTermsExpiredSessionDoesNotMakeRequests(t *testing.T) {
 	}
 	if _, err := f.AcceptTerms(context.Background(), "expired", "7", true); err == nil {
 		t.Fatal("expired confirmation accepted")
+	}
+}
+
+func TestICloudTermsAcceptanceRequiresExplicitSuccess(t *testing.T) {
+	for _, response := range []string{`{}`, `{"success":false}`, `null`} {
+		t.Run(response, func(t *testing.T) {
+			accepts := 0
+			c := &AppleAuthClient{httpClient: &http.Client{Transport: appleAuthTestTransport(func(req *http.Request) (*http.Response, error) {
+				body := `{"iCloudTerms":{"version":7}}`
+				switch req.URL.Path {
+				case "/setup/ws/1/getTerms":
+				case "/setup/ws/1/repairDone":
+					accepts++
+					body = response
+				default:
+					t.Fatal("unconfirmed acceptance continued to account login")
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+			})}}
+			s := &appleAuthSession{Endpoints: appleAuthEndpointsForHost("www.icloud.com.cn"), TermsRequired: true, Terms: &ICloudTerms{Version: "7"}}
+			_, err := c.acceptICloudTerms(context.Background(), s, "7", true)
+			code, _, _ := ErrorDetails(err)
+			if code != "icloud_terms_accept_failed" || s.TermsAccepted || accepts != 1 {
+				t.Fatalf("code=%s accepted=%t requests=%d", code, s.TermsAccepted, accepts)
+			}
+		})
+	}
+}
+
+func TestICloudTermsRequiresRequestedGCBDNotice(t *testing.T) {
+	c := &AppleAuthClient{httpClient: &http.Client{Transport: appleAuthTestTransport(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(req.URL.Path, "getTerms") {
+			t.Fatal("must not accept missing privacy notice")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"iCloudTerms":{"version":7}}`)), Request: req}, nil
+	})}}
+	s := &appleAuthSession{Endpoints: appleAuthEndpointsForHost("www.icloud.com.cn"), TermsRequired: true, GCBDPrivacyRequired: true}
+	_, err := c.fetchICloudTerms(context.Background(), s)
+	code, _, _ := ErrorDetails(err)
+	if code != "icloud_gcbd_terms_missing" || s.Terms != nil {
+		t.Fatalf("missing notice accepted: %v", err)
 	}
 }
