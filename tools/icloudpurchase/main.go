@@ -37,7 +37,15 @@ func run() error {
 	storeSessionOut := flag.String("store-session-out", "", "new owner-only output retaining this account's Store credentials and cookies")
 	storeSessionIn := flag.String("store-session-in", "", "private Store session for this account and physical GUID")
 	storeCodeFile := flag.String("store-code-file", "", "owner-only file containing the latest live device code; reread on each challenged request")
+	giftFile := flag.String("gift-card-file", "", "owner-only file containing one US account-credit gift code; never pass a code on the command line")
+	giftCountry := flag.String("gift-card-country", "", "issuing country declared by the card owner; currently US only")
+	giftCheck := flag.Bool("gift-card-check-only", false, "read Store billing readiness, balance and gift-code preflight; no redemption or purchase")
+	confirmGift := flag.Bool("confirm-gift-card", false, "redeem the supplied account-credit card once, then attempt the separately confirmed 50GB plan")
 	flag.Parse()
+	giftMode := *giftFile != "" || *giftCountry != "" || *giftCheck || *confirmGift
+	if err := validateGiftMode(giftMode, *giftFile, *giftCountry, *giftCheck, *confirmGift, *confirmUS, *confirm, *claudeSkill, *nativeStore, *storeCheck, *cancelAutoRenew); err != nil {
+		return err
+	}
 	if *matchedBag {
 		if !*claudeSkill || !*signedStore || *appStoreProfile {
 			return fmt.Errorf("matched-bag requires claude-skill and signed-store without appstore-profile")
@@ -53,7 +61,7 @@ func run() error {
 	if *storeRetries < 0 || *storeRetries > 3 {
 		return fmt.Errorf("Store authentication retries must be between 0 and 3")
 	}
-	if ((!*confirm && !*confirmUS && !*cancelAutoRenew) || (*confirm && *confirmUS)) || *dir == "" || *acceptedFile == "" || *journalFile == "" {
+	if ((!*confirm && !*confirmUS && !*cancelAutoRenew && !*giftCheck) || (*confirm && *confirmUS)) || *dir == "" || *acceptedFile == "" || *journalFile == "" {
 		return fmt.Errorf("explicit purchase confirmation, account, accepted checkpoint and new private journal required")
 	}
 	if _, err := os.Stat(*journalFile); !os.IsNotExist(err) {
@@ -134,18 +142,18 @@ func run() error {
 	}
 	fmt.Printf("pre-purchase quota; total-bytes=%d; paid-bytes=%d\n", quota.TotalBytes, quota.PaidBytes)
 	// Do not submit any upgrade while a paid plan is already present.
-	if quota.PaidBytes != 0 && !*cancelAutoRenew {
+	if quota.PaidBytes != 0 && !*cancelAutoRenew && !*giftCheck {
 		return fmt.Errorf("existing paid capacity detected; purchase not submitted")
 	}
 	target := icloud.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}
 	expectedStoreTerms := "290399"
-	if *confirmUS {
+	if *confirmUS || *giftCheck {
 		target = icloud.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
 		expectedStoreTerms = "290571"
 	}
 	storageToken := saved.Tokens["com.apple.gs.icloud.storage.buy"]
 	var plans *icloud.StoragePlanInfo
-	if !*cancelAutoRenew {
+	if !*cancelAutoRenew && !*giftCheck {
 		plans, err = icloud.FetchStorefrontPlanInfoWithStorageToken(ctx, username, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers)
 		if err != nil {
 			return err
@@ -250,6 +258,10 @@ func run() error {
 		if *storeCheck {
 			return nil
 		}
+		if *giftCheck {
+			_, _, err := prepareGiftCard(ctx, commerce, username, *giftCountry, *giftFile, enc)
+			return err
+		}
 	}
 	// One call only. Never replay an ambiguous purchase response automatically.
 	var result *icloud.PurchaseResult
@@ -281,6 +293,19 @@ func run() error {
 		}
 		if *cancelAutoRenew {
 			return fmt.Errorf("no active iCloud+ subscription to cancel")
+		}
+		if *confirmGift {
+			if err := redeemGiftCard(ctx, commerce, username, *giftCountry, *giftFile, *dir, enc, journal); err != nil {
+				return err
+			}
+			// Refresh the exact offer after redemption; balances and eligibility can change.
+			plans, err = icloud.FetchStorefrontPlanInfoWithStorageToken(ctx, username, accepted.Session.DSID, accepted.ADSID, token, storageToken, headers)
+			if err != nil {
+				return err
+			}
+			if err := icloud.ValidatePurchaseTarget(plans, target); err != nil {
+				return err
+			}
 		}
 		result, purchaseErr = commerce.SubmitSkillPurchase(ctx, plans, target, expectedStoreTerms)
 	} else if *nativeStore {
@@ -315,9 +340,9 @@ func run() error {
 	if updated != nil {
 		status["total-bytes"], status["paid-bytes"] = updated.TotalBytes, updated.PaidBytes
 	}
-	completed := result != nil && result.State == "completed" && purchaseErr == nil && quotaErr == nil && updated.TotalBytes >= target.Bytes && updated.PaidBytes >= target.Bytes
+	completed := purchaseErr == nil && quotaErr == nil && purchaseQuotaVerified(result, updated, target)
 	if *claudeSkill {
-		completed = result != nil && result.State == "completed" && purchaseErr == nil && subscriptionErr == nil && subscription != nil && subscription.MatchesTarget(target)
+		completed = completed && subscriptionErr == nil && subscription != nil && subscription.MatchesTarget(target)
 	}
 	status["purchase-completed-and-quota-verified"] = completed
 	if err := enc.Encode(status); err != nil {
@@ -332,6 +357,10 @@ func run() error {
 		return fmt.Errorf("subscription completion not verified; do not repeat this attempt blindly")
 	}
 	return nil
+}
+
+func purchaseQuotaVerified(result *icloud.PurchaseResult, quota *icloud.StorageInfo, target icloud.PurchaseTarget) bool {
+	return result != nil && result.State == "completed" && quota != nil && quota.TotalBytes >= target.Bytes && quota.PaidBytes >= target.Bytes
 }
 
 func main() {
