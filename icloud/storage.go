@@ -131,6 +131,9 @@ func FetchAccountSettings(ctx context.Context, dsid, adsid, token string, header
 }
 
 func (e *StorageError) Error() string {
+	if storeFailurePattern.MatchString(e.AppleCode) {
+		return fmt.Sprintf("icloud: storage %s failed (HTTP %d; Apple code %s)", e.Stage, e.HTTPStatus, e.AppleCode)
+	}
 	return fmt.Sprintf("icloud: storage %s failed (HTTP %d)", e.Stage, e.HTTPStatus)
 }
 

@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestStorageErrorReportsNumericAppleCodeWithoutResponseDetails(t *testing.T) {
+	for _, tc := range []struct{ code, want string }{
+		{"5005", "icloud: storage purchase-store-authentication failed (HTTP 200; Apple code 5005)"},
+		{"-5000", "icloud: storage purchase-store-authentication failed (HTTP 200; Apple code -5000)"},
+		{"", "icloud: storage purchase-store-authentication failed (HTTP 200)"},
+		{"secret-token", "icloud: storage purchase-store-authentication failed (HTTP 200)"},
+	} {
+		err := &StorageError{Stage: "purchase-store-authentication", HTTPStatus: 200, AppleCode: tc.code, Hint: "private response"}
+		if got := err.Error(); got != tc.want {
+			t.Fatalf("unexpected safe error: %q", got)
+		}
+	}
+}
+
 func TestResolveStorageEndpointSubstitutesOnlyAppleTemplate(t *testing.T) {
 	data := map[string]any{"mme-info": map[string]any{"quota": map[string]any{
 		"storageInfoURL": "https://p01-quota.icloud.com/v1/$dsid$/$MMeAuthToken$",
