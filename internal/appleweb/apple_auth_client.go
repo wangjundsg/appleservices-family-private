@@ -663,7 +663,14 @@ func (c *AppleAuthClient) validatePhoneSecurityCode(ctx context.Context, session
 		"securityCode": map[string]string{"code": code},
 		"mode":         "sms",
 	}
-	status, _, err := c.do(ctx, session, http.MethodPost, session.Endpoints.Auth+"/verify/phone/securitycode", session.twoFactorHeaders(), body, nil, false)
+	status, data, err := c.doWithAllowedStatuses(ctx, session, http.MethodPost, session.Endpoints.Auth+"/verify/phone/securitycode", session.twoFactorHeaders(), body, nil, false, http.StatusPreconditionFailed)
+	if err == nil && status == http.StatusPreconditionFailed {
+		// A valid code can open account repair with 412; trust and account validation must still succeed.
+		if appleSMSCodeAccepted(data) {
+			return nil
+		}
+		err = errCode("apple_sms_verify_precondition_failed", "Apple 未确认本次短信验证（HTTP 412）。请在官方账户页面核对后续提示。", false)
+	}
 	if err != nil {
 		flow := "icloud_web"
 		if session.isAppleAccountManage() {
@@ -671,7 +678,7 @@ func (c *AppleAuthClient) validatePhoneSecurityCode(ctx context.Context, session
 		}
 		fmt.Fprintf(os.Stderr, "Apple短信验证失败 flow=%s status=%d\n", flow, status)
 		if status == http.StatusPreconditionFailed {
-			return errCode("apple_sms_verify_precondition_failed", "Apple 未接受本次短信验证（HTTP 412）。请在官方账户页面核对后续提示。", false)
+			return errCode("apple_sms_verify_precondition_failed", "Apple 未确认本次短信验证（HTTP 412）。请在官方账户页面核对后续提示。", false)
 		}
 		if status == http.StatusUnauthorized {
 			return errCode("apple_2fa_failed", "Apple 拒绝了本次短信验证（HTTP 401）。请取消后重新发起登录，使用本次登录收到的新短信验证码；仍失败时可改用受信任设备验证。", true)
@@ -679,6 +686,35 @@ func (c *AppleAuthClient) validatePhoneSecurityCode(ctx context.Context, session
 		return errCode("apple_2fa_failed", fmt.Sprintf("Apple 短信验证未完成（HTTP 状态 %d）", status), true)
 	}
 	return nil
+}
+
+func appleSMSCodeAccepted(data []byte) bool {
+	var reply map[string]any
+	if json.Unmarshal(data, &reply) != nil {
+		return false
+	}
+	security, _ := reply["securityCode"].(map[string]any)
+	if security == nil {
+		verification, _ := reply["phoneNumberVerification"].(map[string]any)
+		security, _ = verification["securityCode"].(map[string]any)
+	}
+	if security["valid"] != true {
+		return false
+	}
+	for _, key := range []string{"securityCodeLocked", "tooManyCodesSent", "tooManyCodesValidated", "securityCodeCooldown"} {
+		if value, present := security[key]; present && value != false {
+			return false
+		}
+	}
+	for _, key := range []string{"serviceErrors", "service_errors"} {
+		if value := reply[key]; value != nil {
+			items, ok := value.([]any)
+			if !ok || len(items) != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func appleAccountFallbackPhoneNumber(phoneNumber json.RawMessage, fallbacks ...json.RawMessage) json.RawMessage {

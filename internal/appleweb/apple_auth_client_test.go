@@ -390,3 +390,75 @@ func TestSMSVerificationPreconditionStopsAfterOneRequest(t *testing.T) {
 		t.Fatalf("requests=%d code=%q retry=%t", requests, code, retry)
 	}
 }
+
+func TestSMSVerification412ValidCodeContinuesWithoutReplay(t *testing.T) {
+	for _, response := range []string{
+		`{"securityCode":{"valid":true}}`,
+		`{"phoneNumberVerification":{"securityCode":{"valid":true,"securityCodeLocked":false}}}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			verified, trusted, exchanged := 0, 0, 0
+			client := &AppleAuthClient{httpClient: &http.Client{Transport: appleAuthTestTransport(func(req *http.Request) (*http.Response, error) {
+				status, body := http.StatusOK, `{}`
+				headers := http.Header{}
+				switch req.URL.Path {
+				case "/appleauth/auth/verify/phone/securitycode":
+					verified++
+					status, body = http.StatusPreconditionFailed, response
+					headers.Set("scnt", "fixture-next-scnt")
+				case "/appleauth/auth/2sv/trust":
+					trusted++
+					if req.Header.Get("scnt") != "fixture-next-scnt" {
+						t.Error("verification session headers were lost")
+					}
+				case "/setup/ws/1/accountLogin":
+					exchanged++
+					body = `{"termsUpdateNeeded":true}`
+				default:
+					t.Fatalf("unexpected request: %s", req.URL.Path)
+				}
+				return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+			})}}
+			session := &appleAuthSession{Endpoints: appleAuthEndpointsForHost("www.icloud.com.cn"), SessionToken: "fixture-token", TwoFactorMethod: appleTwoFactorMethodPhone}
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := client.Submit2FA(context.Background(), appleAuthPending{Session: session}, "000123", nil)
+				code, _, _ := ErrorDetails(err)
+				if code != "icloud_terms_update_needed" {
+					t.Fatalf("expected actual post-verification account requirement: %v", err)
+				}
+			}
+			if verified != 1 || trusted != 1 || exchanged != 2 {
+				t.Fatalf("verify=%d trust=%d exchange=%d", verified, trusted, exchanged)
+			}
+		})
+	}
+}
+
+func TestSMSVerification412RequiresExplicitValidCode(t *testing.T) {
+	for _, response := range []string{
+		`{}`, `null`, `invalid`, `{"securityCode":{"valid":false}}`,
+		`{"securityCode":{"valid":"true"}}`,
+		`{"securityCode":{"valid":true,"securityCodeLocked":true}}`,
+		`{"securityCode":{"valid":true,"tooManyCodesValidated":true}}`,
+		`{"securityCode":{"valid":true,"tooManyCodesSent":true}}`,
+		`{"securityCode":{"valid":true,"securityCodeCooldown":true}}`,
+		`{"securityCode":{"valid":true},"serviceErrors":[{"code":"-1"}]}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusPreconditionFailed)
+				_, _ = w.Write([]byte(response))
+			}))
+			defer server.Close()
+			client := &AppleAuthClient{httpClient: server.Client()}
+			session := &appleAuthSession{Endpoints: appleAuthEndpoints{Auth: server.URL}, TwoFactorMethod: appleTwoFactorMethodPhone}
+			_, err := client.Submit2FA(context.Background(), appleAuthPending{Session: session}, "000123", nil)
+			code, _, retry := ErrorDetails(err)
+			if code != "apple_sms_verify_precondition_failed" || retry || requests != 1 || session.TwoFactorVerified || session.TrustEstablished {
+				t.Fatalf("code=%s retry=%t requests=%d", code, retry, requests)
+			}
+		})
+	}
+}
