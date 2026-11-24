@@ -940,6 +940,8 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	defer diagnostic.Close()
 	command := exec.Command(s.config.Worker, "-native-adi", "-background", "-control-api", "-gui-auth", "-dir", dir, "-adi-dll", s.config.Library, "-python", s.config.Python)
 	command.Args = append(command.Args, "-twofactor", creds.TwoFactor)
+	// This private deployment's owner authorized automatic login/activation terms.
+	command.Args = append(command.Args, "-auto-activate")
 	if resume {
 		command.Args = append(command.Args, "-resume-session")
 	}
@@ -986,6 +988,10 @@ func lastProcessError(path string) string {
 		}
 		// Never forward arbitrary stderr (which can contain credentials).
 		switch {
+		case strings.Contains(line, "account_repair_"):
+			return "后台账号设置未完成；验证码或其他 Apple 设置仍需处理，未自动重复提交。"
+		case strings.Contains(line, "automatic_activation_"):
+			return "自动激活尚未完成；已保留登录会话和私有诊断记录，请检查当前激活步骤。"
 		case strings.Contains(line, "verified_session_incomplete"):
 			return "验证码提交已获接受，后续账号会话未能确认或保存。"
 		case strings.Contains(line, "verification_blocked"):

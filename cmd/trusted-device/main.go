@@ -63,6 +63,7 @@ func run() (runErr error) {
 	controlAPI := flag.Bool("control-api", false, "enable authenticated local dashboard control")
 	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
 	resumeSession := flag.Bool("resume-session", false, "restore the account-bound GSA and accepted iCloud sessions without a password")
+	autoActivation := flag.Bool("auto-activate", false, "owner-authorized web terms repair and device activation; may require SMS through the dashboard")
 	registerOnly := flag.Bool("register-only", false, "register this device, emit a receipt, and exit without approving requests")
 	flag.Parse()
 	if *background {
@@ -305,6 +306,17 @@ func run() (runErr error) {
 	} else {
 		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
 	}
+	if errors.Is(err, gsa.ErrAccountRepairRequired) && *autoActivation && panel != nil && *guiAuth {
+		if repairErr := runAccountRepair(ctx, appleID, password, *dir, panelCommands, &status); repairErr != nil {
+			return repairErr
+		}
+		status.State = "signing_in"
+		if err = status.save(*dir); err != nil {
+			return err
+		}
+		// Repair is attempted once. Repeated or non-terms repairs stop here.
+		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -432,6 +444,27 @@ func run() (runErr error) {
 		}
 	}
 	client, err := login.Client()
+	if err != nil && *autoActivation && !*resumeSession && !*registerOnly {
+		saved, savedErr := store.LoadSession()
+		if savedErr == nil && saved != nil && strings.EqualFold(saved.AppleID, appleID) && saved.Tokens["com.apple.gs.idms.pet"] != "" {
+			status.State = "activating_icloud"
+			if saveErr := status.save(*dir); saveErr != nil {
+				return saveErr
+			}
+			if _, statErr := os.Stat(store.acceptedPath()); os.IsNotExist(statErr) {
+				if activationErr := autoActivate(ctx, *dir, appleID, *python); activationErr != nil {
+					return activationErr
+				}
+			}
+			accepted, err = store.LoadAcceptedICloud()
+			if err == nil {
+				login, err = appleservices.ResumeLogin(appleID, store, accepted, options...)
+			}
+			if err == nil {
+				client, err = login.Client()
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
