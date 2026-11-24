@@ -76,22 +76,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.connection != nil {
 		return errors.New("aps: connection is already open")
 	}
-	connection, err := dialCourier(ctx, "1-courier.push.apple.com:5223")
-	if err != nil {
-		return errors.New("aps: courier connection failed")
-	}
 	pool, err := x509.SystemCertPool()
 	if err != nil {
 		pool = x509.NewCertPool()
 	}
 	pool.AppendCertsFromPEM([]byte(gsa.AppleRootCAPEM))
-	secure := tls.Client(connection, &tls.Config{
+	secure, err := dialCourierTLS(ctx, &tls.Config{
 		RootCAs: pool, ServerName: "courier.push.apple.com",
 		NextProtos: []string{"apns-security-v3"}, MinVersion: tls.VersionTLS12,
-	})
-	if err := secure.HandshakeContext(ctx); err != nil {
-		connection.Close()
-		return errors.New("aps: courier TLS verification or handshake failed")
+	}, dialCourier)
+	if err != nil {
+		return errors.New("aps: courier TLS connection failed after bounded recovery")
 	}
 	c.connection = secure
 	if err := c.authenticate(ctx); err != nil {

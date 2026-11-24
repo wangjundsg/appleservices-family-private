@@ -139,3 +139,16 @@ The tool sends v2 camelCase outer keys, keeps nested `client-id`, attaches NAC a
 The first command reads quota/offers with the accepted MME and does not log in or buy. The second inspects device trust separately; an expired GSA can fail while the accepted MME still reads quota. Report `trustedDevice`, serial-match boolean, `supportsVerificationCodes` and `pushDevice` independently. Actual code acceptance and push delivery require separate tests.
 
 Verified standalone activation does not fix the worker automatically. Compare fresh-session source, identity, serial override, terms cookie, registration ordering and headers when the worker returns reason 3001/3005. Do not replace a working MME merely because a later login fails. Activation and offers do not establish Store authentication or payment. For purchasing, use `.claude/skills/icloud-plus-purchase/SKILL.md`, with its physical Store GUID and separate success verification.
+
+
+## Connection recovery before authentication
+
+The normal worker now recovers bounded connection-setup failures without a temporary proxy or a pinned Apple IP:
+
+- GSA first uses the configured transport. Only an EOF/network failure before HTTP receives a connected socket can trigger recovery. It queries `https://dns.google/resolve?name=gsa.apple.com&type=A` (six-second limit) and tries at most two public IPv4 results within the request's existing deadline. This query contains only the public hostname, never account data.
+- Recovery preserves the original proxy/NO_PROXY decision, HTTP Host, TLS SNI and certificate verification. It does not retry certificate rejection, HTTP status errors, or a disconnect after a connection was handed to HTTP, because authentication may already have been submitted. A request body without a replay factory also stops.
+- APS retries only TCP/TLS establishment, at most three attempts with a ten-second limit per attempt and the caller's deadline. Device authentication starts once after TLS succeeds. Certificate rejection stops immediately.
+
+Run `go test ./gsa ./aps ./cmd/trusted-device ./internal/appleweb` for the regression checks. The credential-free live check is opt-in: set `APPLESERVICES_TEST_GSA_NETWORK=1`, then run `go test ./gsa -run '^TestGSAConnectionRecoveryLive$' -v -count=1`. It checks a normal request and an injected first-handshake EOF against GSA, with verified TLS and the expected GET 404. It never sends credentials or requests a verification code. Clear the test variable afterward.
+
+Successful connection recovery is not activation evidence. Still verify the account's online state and a fresh read-only quota response. A persistent outage, unavailable recovery DNS, or post-submission failure remains an error; do not promise recovery from every network failure or replay SMS automatically.
