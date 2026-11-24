@@ -3,14 +3,20 @@
 async page => {
   const assert = (value, message) => { if (!value) throw Error(message); };
   let paid = false, role = 'organizer';
-  const calls = [], errors = [];
+  const calls = [], errors = []; let job=null;
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     let value = {ok:true};
-    if(path==='/api/view') value={selected:'fixture-child',accounts:[{id:'fixture-child',name:'测试账号',icloud_activated:true},{id:'fixture-mother',name:'测试母号',icloud_activated:true}],status:{running:true,authenticated:true},icloud_activated:true,control_ready:true,devices:[]};
+    if(path==='/api/view') value={selected:'fixture-child',accounts:[{id:'fixture-child',name:'测试账号',icloud_activated:true},{id:'fixture-mother',name:'测试母号',icloud_activated:true,family_organizer:true}],status:{running:true,authenticated:true},icloud_activated:true,control_ready:true,devices:[],cn_family_job:job};
     else if(path==='/api/register/config') value={familyOrganizers:[]};
     else if(path==='/api/register') value={jobs:[]};
+    else if(path==='/api/cn-family-background') {
+      const body=route.request().postDataJSON();calls.push(body.step);
+      assert(body.organizer==='fixture-mother'&&body.account==='fixture-child','wrong queued binding');
+      assert(body.accept_terms&&body.auto_future&&!('password' in body),'missing consent or persisted password');
+      job={account:'fixture-child',organizer:'fixture-mother',state:'completed',step:'family-verify'};
+    }
     else if(path==='/api/cn-family') {
       const body = route.request().postDataJSON();
       calls.push(body.step);
@@ -39,7 +45,8 @@ async page => {
   await page.locator('#cnFamilyRun').click();
   await page.locator('#cnFamilyProgress').filter({hasText:'子号完成'}).waitFor();
   assert(!calls.some(x=>x.startsWith('subscription')),'member invoked commerce');
-  assert(calls.includes('family-verify'),'missing final readback');
+  assert(calls.includes('enqueue')&&!calls.includes('family-join'),'browser still owns member writes');
+  await page.reload();await page.locator('#cnFamilyProgress').filter({hasText:'子号完成'}).waitFor();
   assert(errors.length===0,errors.join('\n'));
   return {passed:true,scenarios:3};
 }

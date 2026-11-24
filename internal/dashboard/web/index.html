@@ -90,8 +90,11 @@
       <label for="cnFamilyPassword">当前账号密码</label><input id="cnFamilyPassword" type="password" autocomplete="off" placeholder="仅本次连接使用，已有会话可留空">
     </div>
     <label class="register-consent"><input id="cnFamilyTerms" type="checkbox">同意为当前账号接受国区 Apple / iCloud 条款并激活；母号关闭续费、共享储存，子号加入指定家庭。</label>
+    <label class="register-consent"><input id="cnFamilyAutoFuture" type="checkbox" checked>以后新添加的账号激活后，自动加入此母号（有空位时）。</label>
     <button class="button button-primary" id="cnFamilyRun">开始 / 继续</button>
-    <p class="cache-note" id="cnFamilyProgress" role="status">付款绑定、扫码和下单由你在场完成；这里不会自动扣款。请保持本面板打开。</p>
+    <button class="text-button" id="cnFamilyCancel">停止当前子号接续</button><button class="text-button" id="cnFamilyDisableDefault">关闭新账号自动入组</button>
+    <p class="cache-note" id="cnFamilyDefaultStatus"></p>
+    <p class="cache-note" id="cnFamilyProgress" role="status">付款绑定、扫码和下单由你在场完成；这里不会自动扣款。子号任务由后台接续，关闭网页也会继续。</p>
     <p class="cache-note">母号付款准备：<a href="https://music.apple.com/cn/" target="_blank" rel="noopener noreferrer">首次媒体商店登录</a> · <a href="https://account.apple.com/" target="_blank" rel="noopener noreferrer">管理付款方式</a>。完成后在本面板读取方案、确认购买 50GB，再继续流程。</p>
   </section>
   <section class="request-card overview-only family-card" id="familyCard">

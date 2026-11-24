@@ -14,6 +14,8 @@ import (
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
+var errFamilyCredentials = errors.New("family credentials required")
+
 type registrationFamily struct {
 	Role               string `json:"role"`
 	Region             string `json:"region,omitempty"`
@@ -239,7 +241,7 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		}
 		current, err := f.family(f.account)
 		if err != nil || current == nil {
-			return fail("family_binding_invalid")
+			return fail("family_readback_required")
 		}
 		if current.Member {
 			if current.Organizer {
@@ -255,6 +257,9 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		}
 		// This existing helper verifies the exact organizer and target on both sides.
 		if _, err = f.family(f.organizer, "-add-pool-member-dir", f.account.Dir, "-target-password-env"); err != nil {
+			if errors.Is(err, errFamilyCredentials) {
+				return fail("family_credentials_required")
+			}
 			return fail("family_readback_required")
 		}
 	case "family-join-storage":
@@ -310,8 +315,11 @@ func (s *Server) registrationFamilyAction(ctx context.Context, account *Account,
 		return map[string]any{"ok": false, "state": "unknown", "reason": "family_binding_invalid"}
 	}
 	f := registrationFamilyFlow{allowSubscription: s.config.AllowSubscription, account: account, input: input}
-	if input.Family.Role == "member" && s.readyFamilyOrganizer(input.Family.Organizer) {
-		f.organizer = s.lookup(input.Family.Organizer)
+	if input.Family.Role == "member" {
+		candidate := s.lookup(input.Family.Organizer)
+		if candidate != nil && candidate.ID != account.ID && !s.registrationInProgress(candidate) && acceptedCheckpointReady(candidate.Dir, candidate.AppleID) {
+			f.organizer = candidate
+		}
 	}
 	f.worker = func(action string) control.Result {
 		var result control.Result
@@ -324,12 +332,18 @@ func (s *Server) registrationFamilyAction(ctx context.Context, account *Account,
 		if len(extra) > 0 && extra[0] != "-verify-pool-member-dir" && extra[0] != "-join-shared-storage" {
 			var refresh control.Result
 			if s.callFor(ctx, target.Dir, "/action", control.Action{Action: "family-refresh-auth"}, &refresh) != nil || !refresh.OK {
+				if refresh.Stage == "reconnect-required" {
+					return nil, errFamilyCredentials
+				}
 				return nil, errors.New("family authentication refresh required")
 			}
 		}
 		if len(extra) > 0 && extra[0] == "-add-pool-member-dir" && input.Password == "" {
 			var result control.Result
 			if s.callFor(ctx, account.Dir, "/action", control.Action{Action: "family-add-self", Code: target.ID}, &result) != nil || !result.OK || result.Family == nil {
+				if result.Stage == "reconnect-required" {
+					return nil, errFamilyCredentials
+				}
 				return nil, errors.New("target password or membership verification required")
 			}
 			return result.Family, nil

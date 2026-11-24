@@ -78,6 +78,8 @@ type Status struct {
 	FailureReason        string    `json:"failure_reason,omitempty"`
 }
 type view struct {
+	CNFamilyJob          *cnFamilyJob            `json:"cn_family_job,omitempty"`
+	CNFamilyDefault      *cnFamilyPolicy         `json:"cn_family_default,omitempty"`
 	PipelineManaged      bool                    `json:"pipeline_managed,omitempty"`
 	PipelineState        string                  `json:"pipeline_state,omitempty"`
 	Status               Status                  `json:"status"`
@@ -284,6 +286,7 @@ func maskAccount(appleID string) string {
 func (s *Server) URL() string { return "http://" + s.listener.Addr().String() }
 func (s *Server) Serve(ctx context.Context) error {
 	go s.maintainRegistrations(ctx)
+	go s.maintainCNFamily(ctx)
 	go func() { <-ctx.Done(); s.http.Close() }()
 	err := s.http.Serve(s.listener)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -779,6 +782,10 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		account, dir = accounts[0], accounts[0].Dir
 	}
 	result := view{Status: s.readStatusFrom(dir), Devices: []control.Device{}}
+	result.CNFamilyJob = readCNFamilyJob(account)
+	policy := s.cnFamilyPolicy()
+	policy.Existing = nil
+	result.CNFamilyDefault = &policy
 	if s.pipelineAccount(account) {
 		result.PipelineManaged = true
 		var receipt pipelineReceipt
@@ -1239,6 +1246,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				result.Message = "后台停止未完成，请稍后查看"
 			}
 			json.NewEncoder(w).Encode(result)
+			return
+		case r.Method == "POST" && r.URL.Path == "/api/cn-family-background":
+			s.serveCNFamilyBackground(w, r)
 			return
 		case r.Method == "POST" && r.URL.Path == "/api/cn-family":
 			s.serveCNFamily(w, r)
