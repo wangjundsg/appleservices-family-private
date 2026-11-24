@@ -24,7 +24,7 @@ func TestFamilyHandoffCannotSkipBoundJoinReceipt(t *testing.T) {
 }
 
 func testFamilyReady(organizer bool) *control.FamilyInfo {
-	return &control.FamilyInfo{Member: true, Organizer: organizer, Self: 1, Organizers: 1, Members: 2, StorageKnown: true, StorageParticipating: true, StorageAvailable: true, StorageEnabled: true}
+	return &control.FamilyInfo{Member: true, Organizer: organizer, Self: 1, Organizers: 1, Members: 2, StorageKnown: true, StorageParticipating: true, StorageAvailable: true, StorageEnabled: true, StorageBytes: int64(registrationPlanBytes)}
 }
 
 func TestFamilyOrganizerBuysOnceThenCreatesAndShares(t *testing.T) {
@@ -44,7 +44,7 @@ func TestFamilyOrganizerBuysOnceThenCreatesAndShares(t *testing.T) {
 			return control.Result{OK: true, Storage: &icloud.StorageInfo{PaidBytes: size}}
 		case "storage-plan":
 			return control.Result{OK: true, StoragePlan: &icloud.StoragePlanInfo{Plans: []icloud.StoragePlan{{Bytes: registrationPlanBytes, Price: 600, Currency: "CNY", Period: "month", Available: true}}}}
-		case "storage-purchase":
+		case "storage-skill-purchase-cn":
 			buys++
 			paid = true
 			return control.Result{OK: true, Purchase: &icloud.PurchaseResult{State: "completed"}}
@@ -78,15 +78,15 @@ func TestFamilyOrganizerBuysOnceThenCreatesAndShares(t *testing.T) {
 		}
 		return &control.FamilyInfo{Member: created, Organizer: created, Self: 1, Organizers: 1}, nil
 	}
-	if r := f.run("subscription-plan", ""); r["purchase_action"] != "storage-purchase" {
+	if r := f.run("subscription-plan", ""); r["purchase_action"] != "storage-skill-purchase-cn" {
 		t.Fatal(r)
 	}
 	for _, action := range []string{"subscription-buy", "subscription-verify", "family-create", "family-share", "family-verify"} {
-		if r := f.run(action, "storage-purchase"); r["ok"] != true {
+		if r := f.run(action, "storage-skill-purchase-cn"); r["ok"] != true {
 			t.Fatal(action, r)
 		}
 	}
-	if r := f.run("subscription-buy", "storage-purchase"); r["ok"] != true || buys != 1 {
+	if r := f.run("subscription-buy", "storage-skill-purchase-cn"); r["ok"] != true || buys != 1 {
 		t.Fatal("existing paid plan was repurchased", r, buys)
 	}
 	var marker map[string]string
@@ -111,6 +111,10 @@ func TestFamilyMemberNeverPurchasesAndUsesBoundOrganizer(t *testing.T) {
 					t.Fatal("wrong binding", extra)
 				}
 				joined = true
+			} else if extra[0] == "-verify-pool-member-dir" {
+				if target != mother || !joined || extra[1] != member.Dir {
+					t.Fatal("wrong exact member readback")
+				}
 			} else if extra[0] == "-join-shared-storage" {
 				if target != member || !joined {
 					t.Fatal("wrong storage target")
@@ -129,7 +133,7 @@ func TestFamilyMemberNeverPurchasesAndUsesBoundOrganizer(t *testing.T) {
 		return &control.FamilyInfo{Member: joined, Self: 1, Organizers: 1}, nil
 	}
 	for _, action := range []string{"subscription-plan", "subscription-auth", "subscription-buy", "family-create", "family-share"} {
-		if f.run(action, "storage-purchase")["ok"] == true {
+		if f.run(action, "storage-skill-purchase-cn")["ok"] == true {
 			t.Fatal("member allowed organizer action", action)
 		}
 	}
@@ -148,6 +152,9 @@ func TestFamilyRejectsFullFamilyAndWrongRoleBeforeMutation(t *testing.T) {
 		if len(args) > 0 {
 			t.Fatal("full family was mutated")
 		}
+		if a == member {
+			return &control.FamilyInfo{}, nil
+		}
 		v := testFamilyReady(true)
 		v.Members = 6
 		return v, nil
@@ -164,7 +171,7 @@ func TestFamilyRejectsFullFamilyAndWrongRoleBeforeMutation(t *testing.T) {
 func TestSubscriptionGateAndOfferLimits(t *testing.T) {
 	f := registrationFamilyFlow{account: &Account{}, input: handoffInput{Family: registrationFamily{Role: "organizer", Region: "CN", AcceptSubscription: true}}}
 	f.worker = func(string) control.Result { t.Fatal("disabled subscription reached worker"); return control.Result{} }
-	if r := f.run("subscription-buy", "storage-purchase"); r["reason"] != "subscription_disabled" {
+	if r := f.run("subscription-buy", "storage-skill-purchase-cn"); r["reason"] != "subscription_disabled" {
 		t.Fatal(r)
 	}
 	for _, plan := range []icloud.StoragePlan{
@@ -189,7 +196,7 @@ func TestFamilyRequestValidationAndDefaultDisabled(t *testing.T) {
 		}
 	}
 	s := registerTestServer(t)
-	body := registerRequest{Automatic: true, PhoneCC: "GB", AcceptTerms: true, CaptchaProvider: "yes", Family: registrationFamily{Role: "organizer", Region: "CN", AcceptSubscription: true}}
+	body := registerRequest{Automatic: true, PhoneCC: "GB", AcceptTerms: true, CaptchaProvider: "yes", Family: registrationFamily{Role: "organizer", Region: "US", AcceptSubscription: true}}
 	body.Egress.Mode = "direct"
 	if _, err := s.startRegistration(body); err == nil {
 		t.Fatal("organizer admission allowed while disabled")

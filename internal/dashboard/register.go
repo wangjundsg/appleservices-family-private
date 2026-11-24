@@ -124,6 +124,8 @@ var registerMessages = map[string]string{
 	"number_purchase_rejected":               "接码平台明确拒绝购买，请检查平台状态。",
 	"purchase_budget_invalid":                "购号预算或币种配置无效，未购买号码。",
 	"purchase_country_not_allowed":           "该国家不在自动购号范围内。",
+	"subscription_payment_required":          "母号已激活，等待在场完成国区 50GB 付款；成功后续跑将关闭自动续费并开启家庭共享。",
+	"subscription_renewal_unconfirmed":       "尚未核实关闭自动续费，家庭流程已停止。",
 	"subscription_disabled":                  "自动订阅未开启，未提交购买。",
 	"subscription_offer_unsupported":         "报价不符合现有 50GB 月付限定，未提交购买。",
 	"subscription_auth_required":             "Apple Store 独立认证未完成，需要核实，未自动重复认证或购买。",
@@ -295,7 +297,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if err := validateRegistration(body); err != nil {
 		return "", err
 	}
-	if body.Family.Role == "organizer" && !s.config.AllowSubscription {
+	if body.Family.Role == "organizer" && body.Family.Region != "CN" && !s.config.AllowSubscription {
 		return "", errors.New("自动订阅尚未开启；需服务端显式 --allow-subscription，当前不会开始建号或扣费")
 	}
 	if body.Family.Role == "member" && !s.readyFamilyOrganizer(body.Family.Organizer) {
@@ -601,6 +603,8 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case parts[1] == "continue-payment" && r.Method == "POST":
+		s.resumeCNPayment(w, r, id)
 	case parts[1] == "cancel" && r.Method == "POST":
 		var receipt pipelineReceipt
 		_ = readRegisterJSON(filepath.Join(folder, "result.json"), &receipt)

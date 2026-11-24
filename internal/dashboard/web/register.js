@@ -26,11 +26,12 @@
     $('registerFamilyRegionLabel').hidden=!mother;field('familyRegion').disabled=!mother;
     $('registerOrganizerLabel').hidden=!member; field('organizer').disabled=!member; field('organizer').required=member;
     $('registerSubscriptionConsent').hidden=!mother; field('acceptSubscription').disabled=!mother;field('acceptSubscription').required=mother;
-    const familyReady=mother ? setup?.subscriptionEnabled : member ? !!field('organizer').value : true;
-    $('registerFamilyHint').textContent=mother ? (setup?.subscriptionEnabled ? '母号确认付费容量后自动新建家庭并开启储存共享。' : '自动订阅开关关闭，母号任务暂不能启动。') : member ? '成员只加入指定母号的家庭并验证共享储存，不购买订阅。' : '完成激活后停止，不执行家庭或订阅操作。';
+    const familyReady=mother ? (field('familyRegion').value==='CN'||setup?.subscriptionEnabled) : member ? !!field('organizer').value : true;
+    $('registerFamilyHint').textContent=mother ? (field('familyRegion').value==='CN'||setup?.subscriptionEnabled ? '国区母号在场付款后继续关闭续费、建组和共享；美区保留原流程。' : '自动订阅开关关闭，母号任务暂不能启动。') : member ? '成员只加入指定母号的家庭并验证共享储存，不购买订阅。' : '完成激活后停止，不执行家庭或订阅操作。';
     $('registerSubmit').disabled=submitting || (automatic && !ready) || !familyReady;
   }
   field('automatic').addEventListener('change',automaticMode);
+  field('familyRegion').addEventListener('change',automaticMode);
   field('familyRole').addEventListener('change',()=>{familySelected=true;automaticMode();});
   field('organizer').addEventListener('change',automaticMode);
   async function loadSetup() {
@@ -104,8 +105,10 @@
     $('registerDetail').textContent=detail;
     $('registerCodeForm').hidden=!(job.active && job.stage==='creating' && !job.automatic);
     $('registerRetry').hidden=!job.canRetry;
+    $('registerContinuePayment').hidden=job.active||job.stage!=='subscription'||job.state!=='waiting_input';
     $('registerCancel').hidden=['ready','cancelled'].includes(job.state);
   }
+  $('registerContinuePayment').addEventListener('click',async()=>{try{await api('/'+selected+'/continue-payment',{});notice('正在核验付款结果并继续');await refresh();}catch(error){notice(error.message);}});
   async function refresh() {
     if(polling) return; polling=true;
     try {

@@ -98,7 +98,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"state":"unknown"}`, 409)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), registrationContextKey{}, true), 195*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), registrationContextKey{}, true), 235*time.Second)
 	defer cancel()
 	account := s.handoffAccount(input)
 	if body.Action == "observe" {
@@ -124,7 +124,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 	}
 	defer s.handoffMu.Unlock()
 	mutating := body.Action == "attach" || body.Action == "start" || body.Action == "sms" || body.Action == "activate" || body.Action == "resume"
-	mutating = mutating || body.Action == "subscription-auth" || body.Action == "subscription-buy" || body.Action == "family-create" || body.Action == "family-share" || body.Action == "family-join" || body.Action == "family-join-storage"
+	mutating = mutating || body.Action == "subscription-cancel" || body.Action == "subscription-auth" || body.Action == "subscription-buy" || body.Action == "family-create" || body.Action == "family-share" || body.Action == "family-join" || body.Action == "family-join-storage"
 	receiptFile := filepath.Join(folder, "handoff-actions.json")
 	receipts := map[string]handoffReceipt{}
 	encoded, _ := json.Marshal(body)

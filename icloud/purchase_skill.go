@@ -715,7 +715,11 @@ func (s *StoreCommerceSession) ReadSkillSubscription(ctx context.Context) (*Skil
 		plan, _ := findSkillValue(detail, "latestPlan").(map[string]any)
 		info.PaidPrice, _ = plan["paidPrice"].(string)
 		info.PlanName, _ = plan["displayName"].(string)
-		info.AutoRenew, _ = findSkillValue(detail, "isAutoRenewEnabled").(bool)
+		var renewKnown bool
+		info.AutoRenew, renewKnown = findSkillValue(detail, "isAutoRenewEnabled").(bool)
+		if !renewKnown {
+			return nil, &StorageError{Stage: "purchase-skill-subscription-renewal-unknown"}
+		}
 		info.Verified50GB = info.MatchesTarget(PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}) ||
 			info.MatchesTarget(PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"})
 		return info, nil

@@ -5,6 +5,8 @@ description: Inspect and manage Apple iCloud Family Sharing membership through t
 
 # iCloud Family Sharing
 
+For the China organizer/member workflow (attended purchase, renewal cancellation, activation and joining), use [icloud-cn-family](../icloud-cn-family/SKILL.md). Its member branch never binds a payment method or purchases a separate plan.
+
 Use the account's own GSA app tokens, accepted iCloud session, diagnostic Mac identity and Apple-returned URL bag. Start with read-only discovery; family membership writes require an exact current member or invitation binding and a post-action re-read.
 
 For an eligible account with no family, creation and iCloud+ storage sharing are separate verified mutations. Create the empty family first with purchase sharing and location sharing disabled, re-read the family, then enable iCloud+ sharing only when the organizer has a live paid plan. Do not combine creation, storage sharing and invitation into one ambiguous request.

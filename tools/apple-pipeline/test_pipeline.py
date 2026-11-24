@@ -240,7 +240,7 @@ class PipelineTests(unittest.TestCase):
     def test_dashboard_handoff_uses_existing_panel_and_no_legacy_executors(self):
         self.job.cfg["handoff"]="dashboard"
         seen=[]
-        observations=iter([{"waiting_sms":True},{"gsa_verified":True},{"activated":True,"online":True}])
+        observations=iter([{}, {"waiting_sms":True},{"gsa_verified":True},{"activated":True,"online":True}])
         def panel(action, **body):
             seen.append(action)
             if action=="observe": return {"ok":True,**next(observations)}
@@ -250,7 +250,7 @@ class PipelineTests(unittest.TestCase):
              patch.object(p.time,"sleep"), patch.object(self.job,"process") as process:
             self.job.authenticate()
         process.assert_not_called()
-        self.assertEqual(seen,["attach","start","observe","sms","observe","stop","plan","activate","resume","observe"])
+        self.assertEqual(seen,["attach","observe","start","observe","sms","observe","stop","plan","activate","resume","observe"])
         self.assertEqual(self.job.status["status"],"ready")
         self.assertTrue(self.job.status["handoff_complete"])
         self.assertNotIn("002026",(self.root/"result.json").read_text())
@@ -304,6 +304,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(actions,["subscription-plan","subscription-auth","subscription-buy","subscription-verify","family-create","family-share","family-verify"])
         self.assertTrue(self.job.status["family_complete"])
 
+    def test_cn_mother_waits_without_buying_then_cancels_before_sharing(self):
+        self.job.cfg["family"]={"role":"organizer","region":"CN","acceptSubscription":True}
+        with patch.object(self.job,"panel_call",return_value={"ok":True,"purchase_action":"storage-skill-purchase-cn"}) as call:
+            with self.assertRaisesRegex(p.PipelineError,"subscription_payment_required"):self.job.complete_family()
+        self.assertEqual([c.args[0] for c in call.call_args_list],["subscription-plan"])
+        with patch.object(self.job,"panel_call",return_value={"ok":True,"existing":True}) as call:self.job.complete_family()
+        self.assertEqual([c.args[0] for c in call.call_args_list],["subscription-plan","subscription-verify","subscription-cancel","family-create","family-share","family-verify"])
+
+    def test_cn_payment_resume_does_not_relogin_or_register(self):
+        self.job.cfg["handoff"]="dashboard"
+        self.job.cfg["family"]={"role":"organizer","region":"CN","acceptSubscription":True}
+        self.job.status.update(stage="subscription",status="waiting_input",reason="subscription_payment_required",account_created=True)
+        with patch.object(self.job,"panel_call",return_value={"ok":True,"existing":True}) as call, patch.object(self.job,"settle_number"):
+            self.job.run(resume=True)
+        self.assertEqual(self.job.status["status"],"ready")
+        self.assertNotIn("start",[c.args[0] for c in call.call_args_list])
+
     def test_family_member_only_joins_and_verifies(self):
         self.job.cfg["family"]={"role":"member","organizer":"mother"}
         with patch.object(self.job,"panel_call",return_value={"ok":True}) as call:self.job.complete_family()
@@ -314,7 +331,7 @@ class PipelineTests(unittest.TestCase):
         self.job.cfg["family"]={"role":"organizer","acceptSubscription":True}
         def call(action,**body):
             if action=="subscription-buy":raise p.PipelineError("transport_result_unknown")
-            return {"ok":True,"purchase_action":"storage-purchase"}
+            return {"ok":True,"purchase_action":"storage-skill-purchase-us"}
         with patch.object(self.job,"panel_call",side_effect=call) as calls:
             for _ in range(2):
                 with self.assertRaises(p.PipelineError):self.job.complete_family()

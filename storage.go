@@ -20,6 +20,40 @@ func (l *Login) passwordForStore() string {
 	return l.creds.Password
 }
 
+// SkillStorageSubscription always establishes a fresh, account-bound Store
+// session. An expired cached Store token must not hide renewal status.
+func (l *Login) SkillStorageSubscription(ctx context.Context, cancelRenewal bool, codeProvider func() (string, error)) (*icloud.SkillSubscriptionInfo, error) {
+	l.storeCommerce = nil
+	if _, err := l.CheckSkillStoragePurchaseSession(ctx, codeProvider); err != nil {
+		return nil, err
+	}
+	sub, err := l.storeCommerce.ReadSkillSubscription(ctx)
+	if err != nil || !cancelRenewal {
+		return sub, err
+	}
+	target := PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}
+	if sub == nil || !sub.Present || !sub.MatchesTarget(target) {
+		return nil, errors.New("appleservices: current subscription is not the CN 50GB plan")
+	}
+	if sub.AutoRenew {
+		if err := l.storeCommerce.CancelSkillAutoRenew(ctx, sub); err != nil {
+			return nil, err
+		}
+		sub, err = l.storeCommerce.ReadSkillSubscription(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if sub == nil || !sub.Present || !sub.MatchesTarget(target) || sub.AutoRenew {
+		return nil, errors.New("appleservices: renewal cancellation readback incomplete")
+	}
+	quota, err := l.StorageInfo(ctx)
+	if err != nil || quota == nil || quota.PaidBytes != target.Bytes {
+		return nil, errors.New("appleservices: cancelled subscription paid capacity readback incomplete")
+	}
+	return sub, nil
+}
+
 func (l *Login) PreviewStoragePurchase(ctx context.Context) (*icloud.StoreFormInfo, error) {
 	info, err := l.StoragePlanInfo(ctx)
 	if err != nil {

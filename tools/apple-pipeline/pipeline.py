@@ -614,6 +614,12 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("stage") == "subscription"
+                    and self.status.get("reason") == "subscription_payment_required" and self.status.get("account_created")):
+                self.check_cancel()
+                self.complete_family()
+                self.update(status="ready", handoff_complete=True, reason="panel_handoff_complete", next_run_at=None)
+                return
             # Protocol admission comes first, before the legacy recovery branch can
             # clean a browser or rewrite the stage on its way past.
             protocol_action = self.protocol_action() if self.method == "protocol" else None
@@ -735,13 +741,13 @@ class Job:
         url = bridge["url"]
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1": raise PipelineError("invalid_panel_bridge", "usage")
-        self.update(heartbeat_at=iso(), heartbeat_deadline=iso(time.time()+220))
+        self.update(heartbeat_at=iso(), heartbeat_deadline=iso(time.time()+250))
         reply = json.loads(request(url, {"action":action, **body},
-                                  {"Content-Type":"application/json", "X-App-Token":bridge["token"]}, timeout=210))
+                                  {"Content-Type":"application/json", "X-App-Token":bridge["token"]}, timeout=240))
         if reply.get("state") == "rate_limited": raise PipelineError("code_rate_limited", "rate_limited")
         if reply.get("state") == "unknown":
             reason=reply.get("reason")
-            known={"family_binding_invalid","family_role_mismatch","family_action_invalid","family_readback_required","family_full","family_organizer_not_ready","subscription_disabled","subscription_auth_required","subscription_readback_required","subscription_offer_unsupported"}
+            known={"family_binding_invalid","family_role_mismatch","family_action_invalid","family_readback_required","family_full","family_organizer_not_ready","subscription_disabled","subscription_auth_required","subscription_readback_required","subscription_offer_unsupported","subscription_renewal_unconfirmed"}
             raise PipelineError(reason if reason in known else "panel_handoff_requires_readback", "needs_review")
         return reply
 
@@ -776,6 +782,11 @@ class Job:
         # The existing dashboard owns Mac identity/login/NAC; do not run the parallel CLI chain.
         try:
             self.panel_once("attach")
+            observed = self.panel_call("observe")
+            if observed.get("activated") and observed.get("online"):
+                self.complete_family()
+                self.update(status="ready", account_created=True, handoff_complete=True, reason="panel_handoff_complete", next_run_at=None)
+                return
             sms = self.cfg["sms"]
             if timestamp(sms["expires_at"]) <= time.time(): raise PipelineError("activation_expired", "needs_review")
             self.prepare_followup_sms()
@@ -822,6 +833,11 @@ class Job:
                 if state.get("failed"): break
                 time.sleep(2)
             raise PipelineError("panel_keepalive_unconfirmed", "needs_review")
+        except PipelineError as error:
+            if error.reason != "subscription_payment_required":
+                try: self.panel_call("stop")
+                except Exception: pass
+            raise
         except (Exception, KeyboardInterrupt):
             # Stop only this task's owned worker, including a GUI worker waiting for an expired OTP.
             try: self.panel_call("stop")
@@ -840,11 +856,17 @@ class Job:
             if plan.get("ok") is not True: raise PipelineError("subscription_offer_unsupported","needs_review")
             if not plan.get("existing"):
                 action=plan.get("purchase_action")
-                if action not in {"storage-purchase","storage-skill-purchase-us"}: raise PipelineError("subscription_offer_unsupported","needs_review")
+                if action == "storage-skill-purchase-cn":
+                    # Keep the account online for attended payment. Resume only
+                    # reads the current paid quota; this path never buys blindly.
+                    raise PipelineError("subscription_payment_required", "waiting_input")
+                if action not in {"storage-skill-purchase-us"}: raise PipelineError("subscription_offer_unsupported","needs_review")
                 if action=="storage-skill-purchase-us": self.panel_once("subscription-auth",plan=action)
                 self.panel_once("subscription-buy",plan=action)
             if self.panel_call("subscription-verify").get("ok") is not True:
                 raise PipelineError("subscription_readback_required","needs_review")
+            if family.get("region") == "CN":
+                self.panel_once("subscription-cancel")
             self.update(subscription_verified=True,stage="family",reason="family_creating")
             self.panel_once("family-create")
             self.panel_once("family-share")

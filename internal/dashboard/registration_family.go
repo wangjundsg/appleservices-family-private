@@ -60,7 +60,7 @@ func registrationPlanAction(plans *icloud.StoragePlanInfo) string {
 		}
 		action := ""
 		if plan.Currency == "CNY" && plan.Price == 600 {
-			action = "storage-purchase"
+			action = "storage-skill-purchase-cn"
 		}
 		if plan.Currency == "USD" && plan.Price == 99 {
 			action = "storage-skill-purchase-us"
@@ -76,7 +76,7 @@ func registrationPlanAction(plans *icloud.StoragePlanInfo) string {
 }
 
 func sharedFamilyReady(f *control.FamilyInfo) bool {
-	return f != nil && f.Member && f.Self == 1 && f.Organizers == 1 && f.StorageKnown && f.StorageParticipating && f.StorageAvailable && f.StorageEnabled
+	return f != nil && f.Member && f.Self == 1 && f.Organizers == 1 && f.StorageKnown && f.StorageParticipating && f.StorageAvailable && f.StorageEnabled && f.StorageBytes >= int64(registrationPlanBytes)
 }
 
 func (s *Server) readyFamilyOrganizer(id string) bool {
@@ -124,7 +124,7 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 	if organizerAction && (role != "organizer" || !f.input.Family.AcceptSubscription) {
 		return fail("family_role_mismatch")
 	}
-	if strings.HasPrefix(action, "subscription-") && action != "subscription-plan" && action != "subscription-verify" && !f.allowSubscription {
+	if strings.HasPrefix(action, "subscription-") && action != "subscription-plan" && action != "subscription-verify" && action != "subscription-cancel" && !f.allowSubscription {
 		return fail("subscription_disabled")
 	}
 	paid := func() bool {
@@ -157,7 +157,7 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		}
 		return map[string]any{"ok": true, "purchase_action": selected}
 	case "subscription-auth":
-		if selectedPlan != "storage-skill-purchase-us" {
+		if selectedPlan != "storage-skill-purchase-us" && selectedPlan != "storage-skill-purchase-cn" {
 			return fail("subscription_offer_unsupported")
 		}
 		if !f.worker("storage-skill-auth-local").OK {
@@ -185,6 +185,18 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 	case "subscription-verify":
 		if !paid() {
 			return fail("subscription_readback_required")
+		}
+	case "subscription-cancel":
+		if f.input.Family.Region != "CN" {
+			return fail("subscription_offer_unsupported")
+		}
+		result := f.worker("storage-cancel-auto-renew")
+		if !result.OK || result.Subscription == nil || !result.Subscription.Present || !result.Subscription.CN50GB || result.Subscription.AutoRenew {
+			failure := fail("subscription_renewal_unconfirmed")
+			if !result.OK && result.Message != "" {
+				failure["message"] = result.Message
+			}
+			return failure
 		}
 	case "family-create":
 		if !paid() {
@@ -225,12 +237,21 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		if err != nil || !sharedFamilyReady(mother) || !mother.Organizer {
 			return fail("family_organizer_not_ready")
 		}
+		current, err := f.family(f.account)
+		if err != nil || current == nil {
+			return fail("family_binding_invalid")
+		}
+		if current.Member {
+			if current.Organizer {
+				return fail("family_binding_invalid")
+			}
+			if _, err := f.family(f.organizer, "-verify-pool-member-dir", f.account.Dir); err != nil {
+				return fail("family_binding_invalid")
+			}
+			return ok
+		}
 		if mother.Members+mother.Pending+mother.Invitations >= 6 {
 			return fail("family_full")
-		}
-		current, err := f.family(f.account)
-		if err != nil || current == nil || current.Member {
-			return fail("family_binding_invalid")
 		}
 		// This existing helper verifies the exact organizer and target on both sides.
 		if _, err = f.family(f.organizer, "-add-pool-member-dir", f.account.Dir, "-target-password-env"); err != nil {
@@ -238,6 +259,9 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		}
 	case "family-join-storage":
 		if role != "member" || f.organizer == nil {
+			return fail("family_binding_invalid")
+		}
+		if _, err := f.family(f.organizer, "-verify-pool-member-dir", f.account.Dir); err != nil {
 			return fail("family_binding_invalid")
 		}
 		current, err := f.family(f.account)
@@ -258,6 +282,14 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 		if err != nil || !sharedFamilyReady(current) || current.Organizer != (role == "organizer") {
 			return fail("family_readback_required")
 		}
+		if role == "member" {
+			if f.organizer == nil {
+				return fail("family_binding_invalid")
+			}
+			if _, err := f.family(f.organizer, "-verify-pool-member-dir", f.account.Dir); err != nil {
+				return fail("family_binding_invalid")
+			}
+		}
 		if role == "organizer" {
 			if writeRegisterJSON(filepath.Join(f.account.Dir, "family-ready.json"), registrationFamilyReady{Account: f.account.ID, Region: f.input.Family.Region}) != nil {
 				return fail("family_readback_required")
@@ -270,7 +302,7 @@ func (f registrationFamilyFlow) run(action, selectedPlan string) map[string]any 
 }
 
 func (f registrationFamilyFlow) matchesRegion(action string) bool {
-	return (f.input.Family.Region == "CN" && action == "storage-purchase") || (f.input.Family.Region == "US" && action == "storage-skill-purchase-us")
+	return (f.input.Family.Region == "CN" && action == "storage-skill-purchase-cn") || (f.input.Family.Region == "US" && action == "storage-skill-purchase-us")
 }
 
 func (s *Server) registrationFamilyAction(ctx context.Context, account *Account, input handoffInput, action, plan string) map[string]any {
@@ -283,12 +315,25 @@ func (s *Server) registrationFamilyAction(ctx context.Context, account *Account,
 	}
 	f.worker = func(action string) control.Result {
 		var result control.Result
-		if s.callFor(ctx, account.Dir, "/action", control.Action{Action: action}, &result) != nil {
-			return control.Result{}
+		if err := s.callFor(ctx, account.Dir, "/action", control.Action{Action: action}, &result); err != nil {
+			return control.Result{Message: err.Error()}
 		}
 		return result
 	}
 	f.family = func(target *Account, extra ...string) (*control.FamilyInfo, error) {
+		if len(extra) > 0 && extra[0] != "-verify-pool-member-dir" && extra[0] != "-join-shared-storage" {
+			var refresh control.Result
+			if s.callFor(ctx, target.Dir, "/action", control.Action{Action: "family-refresh-auth"}, &refresh) != nil || !refresh.OK {
+				return nil, errors.New("family authentication refresh required")
+			}
+		}
+		if len(extra) > 0 && extra[0] == "-add-pool-member-dir" && input.Password == "" {
+			var result control.Result
+			if s.callFor(ctx, account.Dir, "/action", control.Action{Action: "family-add-self", Code: target.ID}, &result) != nil || !result.OK || result.Family == nil {
+				return nil, errors.New("target password or membership verification required")
+			}
+			return result.Family, nil
+		}
 		childCtx, cancel := context.WithTimeout(ctx, 150*time.Second)
 		defer cancel()
 		args := append([]string{"-dir", target.Dir, "-safe-json"}, extra...)

@@ -916,26 +916,52 @@ func run() (runErr error) {
 			}
 			return control.Result{OK: true, Message: "实时验证码已在同一 Store 会话中通过；未提交购买", StoreAuthentication: info}
 		}
-		if action == "storage-skill-purchase-us" {
+		if action == "storage-subscription" || action == "storage-cancel-auto-renew" {
+			if password == "" {
+				return control.Result{Stage: "reconnect-required", Message: "请带密码重新连接母号，以核验商店订阅和自动续费；密码只保留在进程内存"}
+			}
+			reader, ok := active.(interface {
+				SkillStorageSubscription(context.Context, bool, func() (string, error)) (*icloud.SkillSubscriptionInfo, error)
+			})
+			if !ok {
+				return control.Result{Message: "后台版本不支持订阅核验", Stage: "worker"}
+			}
+			queryCtx, done := context.WithTimeout(actionCtx, 3*time.Minute)
+			defer done()
+			sub, err := reader.SkillStorageSubscription(queryCtx, action == "storage-cancel-auto-renew", func() (string, error) { return generateCode(queryCtx) })
+			if err != nil {
+				return control.Result{Message: "订阅状态未核验；请检查商店认证，勿重复提交购买", Stage: "subscription-readback"}
+			}
+			target := appleservices.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 600, Currency: "CNY", Period: "month"}
+			return control.Result{OK: true, Stage: "subscription-verified", Message: "Apple 已返回当前订阅和续费状态", Subscription: &control.SubscriptionInfo{Present: sub.Present, AutoRenew: sub.AutoRenew, CN50GB: sub.MatchesTarget(target)}}
+		}
+		if action == "family-refresh-auth" {
+			return refreshFamilyAuthentication(actionCtx, *dir, appleID, password)
+		}
+		if action == "storage-skill-purchase-us" || action == "storage-skill-purchase-cn" {
 			buyer, ok := active.(interface {
 				SubmitSkillStoragePurchase(context.Context, appleservices.PurchaseTarget, string) (*appleservices.PurchaseResult, error)
 			})
 			if !ok {
-				return control.Result{Message: "后台版本不支持美区 iCloud+ 购买", Stage: "worker"}
+				return control.Result{Message: "后台版本不支持此 iCloud+ 购买", Stage: "worker"}
 			}
 			queryCtx, done := context.WithTimeout(actionCtx, 90*time.Second)
 			defer done()
 			target := appleservices.PurchaseTarget{Bytes: 50 * 1024 * 1024 * 1024, PriceMinor: 99, Currency: "USD", Period: "month"}
-			purchase, err := buyer.SubmitSkillStoragePurchase(queryCtx, target, "290571")
+			terms := "290571"
+			if action == "storage-skill-purchase-cn" {
+				target.PriceMinor, target.Currency, terms = 600, "CNY", "290399"
+			}
+			purchase, err := buyer.SubmitSkillStoragePurchase(queryCtx, target, terms)
 			if err != nil {
-				result := control.Result{Message: "美区购买或核验未完成；不得自动重试", Stage: "purchase"}
+				result := control.Result{Message: "购买或核验未完成；不得自动重试", Stage: "purchase"}
 				var failure *icloud.StorageError
 				if errors.As(err, &failure) {
 					result.Stage, result.HTTPStatus, result.AppleCode, result.AppleHint = failure.Stage, failure.HTTPStatus, failure.AppleCode, failure.Hint
 				}
 				return result
 			}
-			return control.Result{OK: true, Purchase: purchase, Message: "美区 50GB 订阅和付费配额均已核验", Stage: "purchase-completed"}
+			return control.Result{OK: true, Purchase: purchase, Message: "50GB 订阅和付费配额均已核验", Stage: "purchase-completed"}
 		}
 		if action == "family-info" || action == "family-add-self" || action == "family-join-storage" {
 			executable, execErr := os.Executable()
@@ -956,6 +982,9 @@ func run() (runErr error) {
 				message, stage = "已加入家庭共享的 iCloud+ 储存空间", "family-storage-joined"
 			}
 			if action == "family-add-self" {
+				if password == "" {
+					return control.Result{Message: "请带密码重新连接当前子号；密码只保留在进程内存", Stage: "reconnect-required"}
+				}
 				organizerID := strings.TrimSpace(commandCode)
 				if organizerID == "" || organizerID == filepath.Base(filepath.Clean(*dir)) || strings.IndexFunc(organizerID, func(r rune) bool {
 					return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-')
@@ -1532,6 +1561,7 @@ const familyStatusPrefix = "FAMILY_STATUS_JSON="
 
 func runFamilyHelper(ctx context.Context, helper string, args, extraEnv []string) (string, error) {
 	command := exec.CommandContext(ctx, helper, args...)
+	hideActivationProcess(command)
 	command.Env = append(os.Environ(), extraEnv...)
 	var output bytes.Buffer
 	command.Stdout = &output

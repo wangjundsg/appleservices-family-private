@@ -419,6 +419,7 @@ func run() error {
 	joinSharedStorage := flag.Bool("join-shared-storage", false, "switch this non-organizer family member to the available shared iCloud+ plan")
 	addPoolMemberDir := flag.String("add-pool-member-dir", "", "add one independently authenticated pool account through Apple's PET in-person flow")
 	removePoolMemberDir := flag.String("remove-pool-member-dir", "", "remove one current non-child pool member from this organizer's family")
+	verifyPoolMemberDir := flag.String("verify-pool-member-dir", "", "read-only: require this exact local account in the organizer family")
 	targetPasswordEnv := flag.Bool("target-password-env", false, "use and immediately clear APPLESERVICES_TARGET_PASSWORD as Apple's rawFallback credential")
 	inviteAccountDir := flag.String("invite-account-dir", "", "target pool account directory for a new organizer invitation")
 	inviteOut := flag.String("invite-out", "", "new private invite checkpoint for the target account")
@@ -470,6 +471,12 @@ func run() error {
 		return errors.New("bound account session unavailable")
 	}
 	auth := saved
+	if *gsaCheckpoint == "" {
+		fresh := filepath.Join(*dir, "family-gsa.json")
+		if info, err := os.Stat(fresh); err == nil && time.Since(info.ModTime()) >= 0 && time.Since(info.ModTime()) < 10*time.Minute {
+			*gsaCheckpoint = fresh
+		}
+	}
 	if *gsaCheckpoint != "" {
 		data, err = os.ReadFile(*gsaCheckpoint)
 		if err != nil || len(data) > 2<<20 || json.Unmarshal(data, &auth) != nil || !strings.EqualFold(auth.AppleID, saved.AppleID) || auth.DSID != saved.DSID {
@@ -1174,8 +1181,15 @@ func run() error {
 		organizers, children, me, selfOrganizer, selfMember = summarizeFamilyMembers(members)
 		fmt.Printf("bound pool member removal verified; members=%d purchase-sharing-enabled=false location-sharing-enabled=false\n", len(members))
 	}
+	if *verifyPoolMemberDir != "" {
+		var target appleservices.Session
+		data, err := os.ReadFile(filepath.Join(*verifyPoolMemberDir, "session.json"))
+		if err != nil || json.Unmarshal(data, &target) != nil || !selfOrganizer || !familyContainsAccount(details, target.AppleID) {
+			return errors.New("exact pool member is not confirmed in this organizer family")
+		}
+	}
 	if *addPoolMemberDir != "" {
-		if organizers != 1 || me != 1 || !boolValue(details["is-member-of-family"]) {
+		if organizers != 1 || me != 1 || !selfOrganizer || !boolValue(details["is-member-of-family"]) {
 			return errors.New("pool member addition requires the current self organizer")
 		}
 		var target appleservices.Session
@@ -1187,6 +1201,12 @@ func run() error {
 		targetAcceptedData, targetErr := os.ReadFile(filepath.Join(*addPoolMemberDir, "icloud-accepted.json"))
 		if targetErr != nil || json.Unmarshal(targetAcceptedData, &targetAccepted) != nil || !strings.EqualFold(targetAccepted.Session.AppleID, target.AppleID) || targetAccepted.Session.Tokens["mmeAuthToken"] == "" {
 			return errors.New("target pool account is not independently iCloud-activated")
+		}
+		if familyContainsAccount(details, target.AppleID) {
+			return errors.New("target is already in this family; use read-only verification")
+		}
+		if len(members)+len(invites)+len(pending) >= 6 {
+			return errors.New("family is full; maximum is organizer plus five members")
 		}
 		targetCredential := target.Tokens["com.apple.gs.idms.pet"]
 		credentialSource := "pet"
@@ -1270,47 +1290,6 @@ func run() error {
 			addBody[index] = 0
 		}
 		if requestErr != nil {
-			// Apple can commit addFamilyMember while its response stalls. Never
-			// replay the mutation merely because the transport timed out: use a
-			// fresh bounded organizer read-back and accept only an exact target
-			// match in current family-members.
-			confirmed := false
-			for attempt := 0; attempt < 3 && !confirmed; attempt++ {
-				verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				verifyRequest, verifyErr := newFamilyRequest(detailsURL.String(), true)
-				if verifyErr == nil {
-					verifyRequest = verifyRequest.Clone(verifyCtx)
-					verifyResponse, doErr := apiClient.Do(verifyRequest)
-					if doErr == nil {
-						verifyData, readErr := readLimited(verifyResponse)
-						if readErr == nil {
-							verified, decodeErr := decodeObject(verifyData)
-							if decodeErr == nil {
-								verifiedMembers, _ := verified["family-members"].([]any)
-								for _, rawMember := range verifiedMembers {
-									member, _ := rawMember.(map[string]any)
-									memberAppleID := stringValue(member["appleId"])
-									if memberAppleID == "" {
-										memberAppleID = stringValue(member["member-apple-id"])
-									}
-									if strings.EqualFold(memberAppleID, target.AppleID) {
-										confirmed = true
-										break
-									}
-								}
-							}
-						}
-					}
-				}
-				verifyCancel()
-				if !confirmed {
-					time.Sleep(350 * time.Millisecond)
-				}
-			}
-			if !confirmed {
-				return fmt.Errorf("PET-bound pool member transport failed and current family did not confirm the target: %w", requestErr)
-			}
-			fmt.Println("PET-bound pool member transport ended without a response; fresh organizer read-back confirmed the exact target")
 			addResponse = nil
 		}
 		if addResponse != nil {
@@ -1350,6 +1329,22 @@ func run() error {
 			}
 			fmt.Printf("PET-bound pool member addition accepted; HTTP=%d response-keys=%s purchase-sharing-enabled=false location-sharing-enabled=false\n", addResponse.StatusCode, strings.Join(sortedMapKeys(added), ","))
 		}
+		// Reconcile both a successful response and an indeterminate transport
+		// against current details, then use that snapshot for the final summary.
+		readCtx, readCancel := context.WithTimeout(context.Background(), 32*time.Second)
+		verified, verifyErr := readAddedFamilyMember(readCtx, apiClient, func() (*http.Request, error) {
+			return newFamilyRequest(detailsURL.String(), true)
+		}, target.AppleID)
+		readCancel()
+		if verifyErr != nil {
+			return verifyErr
+		}
+		details = verified
+		members, _ = details["family-members"].([]any)
+		invites, _ = details["family-invitations"].([]any)
+		pending, _ = details["pending-members"].([]any)
+		organizers, children, me, selfOrganizer, selfMember = summarizeFamilyMembers(members)
+
 	}
 	if *inviteAccountDir != "" {
 		if organizers != 1 || me != 1 || !boolValue(details["is-member-of-family"]) {

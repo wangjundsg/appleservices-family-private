@@ -453,7 +453,7 @@ func (s *Server) callFor(ctx context.Context, dir, path string, body any, result
 	request.Header.Set("Content-Type", "application/json")
 	timeout := 95 * time.Second
 	if action, ok := body.(control.Action); ok {
-		if action.Action == "storage-skill-auth-file" || action.Action == "storage-skill-auth-local" {
+		if action.Action == "storage-skill-auth-file" || action.Action == "storage-skill-auth-local" || action.Action == "storage-subscription" || action.Action == "storage-cancel-auto-renew" || action.Action == "family-refresh-auth" {
 			timeout = 3*time.Minute + 5*time.Second
 		} else if action.Action == "family-add-self" || strings.HasPrefix(action.Action, "hme-") {
 			timeout = 2*time.Minute + 5*time.Second
@@ -875,7 +875,7 @@ func (s *Server) startSavedAccount(ctx context.Context, account *Account) contro
 }
 
 func (s *Server) startInMode(ctx context.Context, dir string, creds credentials, account *Account, resume bool) control.Result {
-	if s.registrationInProgress(account) && ctx.Value(registrationContextKey{}) != true {
+	if s.registrationInProgress(account) && !s.waitingCNPayment(account) && ctx.Value(registrationContextKey{}) != true {
 		return control.Result{Message: "建号任务正在管理此账号，请先查看任务进度"}
 	}
 	if s.pipelineAccount(account) {
@@ -1083,7 +1083,7 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 		accounts := append([]*Account(nil), s.accounts...)
 		s.accountsMu.Unlock()
 		for _, account := range accounts {
-			if s.registrationInProgress(account) {
+			if s.registrationInProgress(account) && !s.waitingCNPayment(account) {
 				_ = s.stopIn(ctx, account.Dir)
 				continue
 			}
@@ -1240,6 +1240,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			json.NewEncoder(w).Encode(result)
 			return
+		case r.Method == "POST" && r.URL.Path == "/api/cn-family":
+			s.serveCNFamily(w, r)
+			return
 		case r.Method == "POST" && r.URL.Path == "/api/action":
 			var action control.Action
 			if !readJSON(w, r, &action) {
@@ -1262,7 +1265,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			var result control.Result
-			if s.registrationInProgress(selected) {
+			if s.registrationInProgress(selected) && !(s.waitingCNPayment(selected) && cnPaymentAction(action.Action)) {
 				json.NewEncoder(w).Encode(control.Result{Message: "建号任务正在管理此账号，请在任务卡片操作"})
 				return
 			}
@@ -1320,6 +1323,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/":
 		file = "index.html"
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case "/cn-family.js":
+		file = "cn-family.js"
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	case "/app.js":
 		file = "app.js"
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")

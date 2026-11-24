@@ -53,6 +53,7 @@ type Action struct {
 	Note      string `json:"note,omitempty"`
 }
 type Result struct {
+	Subscription        *SubscriptionInfo               `json:"subscription,omitempty"`
 	OK                  bool                            `json:"ok"`
 	Message             string                          `json:"message,omitempty"`
 	Code                string                          `json:"code,omitempty"`
@@ -72,6 +73,13 @@ type Result struct {
 	HideMyEmail         *icloud.HideMyEmailInfo         `json:"hide_my_email,omitempty"`
 	HMECandidate        string                          `json:"hme_candidate,omitempty"`
 	Activation          *ActivationInfo                 `json:"activation,omitempty"`
+}
+
+// SubscriptionInfo excludes Apple's private subscription identifier.
+type SubscriptionInfo struct {
+	Present   bool `json:"present"`
+	AutoRenew bool `json:"auto_renew"`
+	CN50GB    bool `json:"cn_50gb"`
 }
 
 type ActivationInfo struct {
@@ -200,7 +208,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "family-info", "family-add-self", "family-join-storage", "hme-list", "hme-accept-terms", "hme-generate", "hme-reserve", "hme-forward", "hme-reachable-start", "hme-reachable-verify", "hme-update", "hme-deactivate", "hme-reactivate", "hme-delete", "submit-pairing":
+	case "storage-subscription", "storage-cancel-auto-renew", "storage-skill-purchase-cn", "family-refresh-auth", "code", "devices", "refresh", "validate-account", "allow", "deny", "submit-sms", "resend-sms", "submit-account-code", "storage-info", "storage-plan", "storage-authenticate", "storage-skill-auth-local", "storage-skill-auth-file", "storage-skill-purchase-us", "storage-preview", "storage-purchase", "storage-probe", "storage-buy", "family-info", "family-add-self", "family-join-storage", "hme-list", "hme-accept-terms", "hme-generate", "hme-reserve", "hme-forward", "hme-reachable-start", "hme-reachable-verify", "hme-update", "hme-deactivate", "hme-reactivate", "hme-delete", "submit-pairing":
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
