@@ -15,6 +15,11 @@ func (s *Server) SetBridgeCredentials(appleID, password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bridgeCredentials = BridgeCredentials{AppleID: appleID, Password: password}
+	if password != "" {
+		_ = saveBridgeCredential(s.dir, s.bridgeCredentials)
+	} else if restored, err := loadBridgeCredential(s.dir, appleID); err == nil {
+		s.bridgeCredentials = restored
+	}
 }
 
 func (s *Server) serveBridgeCredentials(w http.ResponseWriter, _ *http.Request) {

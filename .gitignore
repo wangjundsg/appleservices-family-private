@@ -13,3 +13,7 @@ __pycache__/
 .playwright-cli/
 .cache/
 
+
+# Windows-protected bridge credentials are runtime secrets.
+**/bridge-credential.dpapi
+**/.bridge-*.tmp
