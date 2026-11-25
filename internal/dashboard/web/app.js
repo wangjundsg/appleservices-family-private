@@ -130,7 +130,7 @@ if(!running && status.failure_reason==='gsa_account_repair_required'){
 // Process, transport and server verification are separate observations.
 const checkTime=status.last_device_query_at, checked=checkTime&&!checkTime.startsWith('0001');
 $('authState').textContent=status.protected?'锁定保护':online?'设备查询已验证':'当前会话未验证';
-$('renewState').textContent=status.protected?'已暂停':status.automatic_refresh_paused?'失败后已暂停':view.worker_capability_state==='supported'?'已有会话检查':'旧后台 · 需升级';
+$('renewState').textContent=status.protected?'已暂停':status.automatic_refresh_paused?'失败后已暂停':status.check_in_flight?'正在检查已有会话':status.check_failures>0?'有限重试 '+time(status.next_check_at):view.worker_capability_state==='supported'?'已有会话检查':'旧后台 · 需升级';
 $('renewButton').hidden=!status.running||status.protected||view.worker_capability_state!=='supported';$('renewButton').textContent='检查已有会话';$('renewButton').disabled=busy||!view.control_ready;
 $('devicesButton').disabled=busy||status.protected||!status.running||!view.control_ready;
 $('sessionHint').textContent='上次设备查询成功 '+time(checkTime)+(checked?(online?' · 15 分钟内有效':' · 历史记录，当前未通过'):' · 尚未验证');

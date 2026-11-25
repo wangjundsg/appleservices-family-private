@@ -94,6 +94,10 @@ func renewSessionMode(begin func() (maintainedLogin, error), accountID string, r
 }
 
 func renewSessionObserved(begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration, register bool, observe func(string, string)) (maintainedLogin, []appleservices.AccountDevice, error) {
+	return renewSessionObservedContext(context.Background(), begin, accountID, registration, register, observe)
+}
+
+func renewSessionObservedContext(ctx context.Context, begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration, register bool, observe func(string, string)) (maintainedLogin, []appleservices.AccountDevice, error) {
 	fail := func(stage string, err error) (maintainedLogin, []appleservices.AccountDevice, error) {
 		observe(stage, "failed")
 		return nil, nil, &renewalError{stage, err}
@@ -101,6 +105,9 @@ func renewSessionObserved(begin func() (maintainedLogin, error), accountID strin
 	stage := "session_restore"
 	if register {
 		stage = "password_authentication"
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(stage, err)
 	}
 	login, err := begin()
 	if err != nil {
@@ -124,11 +131,24 @@ func renewSessionObserved(begin func() (maintainedLogin, error), accountID strin
 		}
 		observe("device_registration", "accepted")
 	}
-	devices, err := login.AccountDevices()
+	if err := ctx.Err(); err != nil {
+		return fail("device_query", err)
+	}
+	var devices []appleservices.AccountDevice
+	if contextual, ok := login.(interface {
+		AccountDevicesContext(context.Context) ([]appleservices.AccountDevice, error)
+	}); ok {
+		devices, err = contextual.AccountDevicesContext(ctx)
+	} else {
+		devices, err = login.AccountDevices()
+	}
 	if err != nil {
 		return fail("device_query", err)
 	}
 	observe("device_query", "server_verified")
+	if err := ctx.Err(); err != nil {
+		return fail("save_session", err)
+	}
 	if err := login.SaveSession(); err != nil {
 		return fail("save_session", err)
 	}
@@ -146,7 +166,18 @@ func renewalDiagnostic(err error) (stage, reason string, httpStatus int) {
 	}
 	var deviceErr *gsa.DeviceRequestError
 	var authErr *gsa.AuthenticationError
+	var transportErr *gsa.DeviceTransportError
 	switch {
+	case errors.Is(err, context.Canceled):
+		reason = "canceled"
+	case errors.As(err, &transportErr):
+		reason = "network_unclassified"
+		if transportErr.Retryable {
+			reason = "network_temporary"
+		}
+		if transportErr.Canceled {
+			reason = "canceled"
+		}
 	case errors.Is(err, accountguard.ErrBlocked):
 		reason = "account_protected"
 	case errors.Is(err, errVerificationRequired):
@@ -223,6 +254,9 @@ type runtimeStatus struct {
 	RenewalError            string        `json:"renewal_error,omitempty"`
 	RenewalHTTPStatus       int           `json:"renewal_http_status,omitempty"`
 	RenewalSteps            []renewalStep `json:"renewal_steps,omitempty"`
+	CheckInFlight           bool          `json:"check_in_flight"`
+	CheckFailures           int           `json:"check_failures"`
+	NextCheckAt             time.Time     `json:"next_check_at"`
 	AutomaticRefreshPaused  bool          `json:"automatic_refresh_paused"`
 	FailureStage            string        `json:"failure_stage,omitempty"`
 	FailureReason           string        `json:"failure_reason,omitempty"`

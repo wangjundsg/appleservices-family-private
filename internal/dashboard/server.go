@@ -85,6 +85,9 @@ type Status struct {
 	RenewalStage           string    `json:"renewal_stage,omitempty"`
 	RenewalError           string    `json:"renewal_error,omitempty"`
 	RenewalHTTPStatus      int       `json:"renewal_http_status,omitempty"`
+	NextCheckAt            time.Time `json:"next_check_at"`
+	CheckFailures          int       `json:"check_failures"`
+	CheckInFlight          bool      `json:"check_in_flight"`
 	AutomaticRefreshPaused bool      `json:"automatic_refresh_paused"`
 }
 type view struct {

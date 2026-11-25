@@ -1,6 +1,7 @@
 package appleservices
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -63,11 +64,23 @@ func (l *Login) PrepareDeviceRegistration(registration DeviceRegistration) error
 }
 
 func (l *Login) AccountDevices() ([]AccountDevice, error) {
+	return l.AccountDevicesContext(context.Background())
+}
+
+func (l *Login) AccountDevicesContext(ctx context.Context) ([]AccountDevice, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if l.client == nil || l.needsTwoFactor {
 		return nil, errors.New("appleservices: complete iCloud authentication before reading device status")
 	}
 	if l.result == nil || l.result.SessionPayload == nil || spdString(l.result.SessionPayload, "GsIdmsToken") == "" {
 		return nil, fmt.Errorf("%w: saved session predates device identity persistence", ErrDeviceIdentityRefreshRequired)
+	}
+	if backend, ok := l.backend.(interface {
+		AccountDevicesContext(context.Context, map[string]any) ([]gsa.AccountDevice, error)
+	}); ok {
+		return backend.AccountDevicesContext(ctx, l.result.SessionPayload)
 	}
 	backend, ok := l.backend.(interface {
 		AccountDevices(map[string]any) ([]gsa.AccountDevice, error)

@@ -30,9 +30,18 @@ repeated login or OTP requests to discover whether a locked account has recovere
 - A successful device query within 15 minutes, with a healthy current state, is
   reported as a recent device-service verification. This does not verify every
   Apple service, device trust, or OTP acceptance.
-- Startup no longer counts as a successful renewal. Maintenance checks the existing
-  session, never performs periodic password authentication, and pauses after a
-  failure. An explicit subsequent successful check resumes its schedule.
+- Startup alone is not success. Only a successful device query followed by a saved
+  checkpoint counts as a successful existing-session check; this does not prove
+  token expiry was extended. Maintenance never performs password authentication.
+  Temporary transport failures and plain HTTP 5xx device-query responses retry
+  after 1, 5 and 15 minutes, then pause. Explicit service error codes, 401/403/429,
+  identity changes, unknown errors and failed saves pause immediately. The retry
+  budget, deadline and pause survive restart. An interrupted in-flight check pauses
+  rather than silently replaying. Successful explicit checks resume the schedule.
+- Resume mode ignores injected passwords, skips OTP preflight and device
+  registration/activation, and preserves the account push-token binding. Failed
+  device checks never overwrite the saved session. Request cancellation reaches
+  the device-list HTTP transport; diagnostic errors contain no raw transport text.
 - Fixed diagnostic stages distinguish local session reuse, service-session access,
   device query and saving. Errors expose only an allowlisted category and numeric
   HTTP status, never arbitrary upstream text, URLs, tokens or response bodies.
@@ -72,6 +81,35 @@ inventories, account state, logs, binaries and credentials must never enter Git.
 Run the accountguard, privatefs, control, dashboard and trusted-device Go tests,
 including `-race`, plus `node --check internal/dashboard/web/app.js` and
 `git diff --check`. Test UI states with fixture data, without login, OTP or commerce.
-After deployment, verify protected workers remain absent, the unblocked worker PID
-is unchanged, locked actions and bridge exports are refused, and old capabilities
+After deployment, verify protected workers remain absent, only the authorized worker PID
+changes, locked actions and bridge exports are refused, and old capabilities
 are reported conservatively. Verify pushed branch SHA against the local commit.
+
+## Controlled existing-session diagnostic, 2026-11-25
+
+The authorized organizer worker was restarted using the same saved identity and
+session, with password injection and automatic activation disabled. Resume startup
+skipped OTP generation and registration. Its single device-service check completed
+local restoration and local service-client availability, then received HTTP 401 at
+the device-query stage. Saving was not reached. Automatic checks are paused with
+no retry deadline; the APS connection remains connected independently.
+
+Hashes of the saved session, device identity, push state and accepted iCloud
+checkpoint were unchanged. The three guarded workers stayed stopped, including
+across the dashboard update. The new worker advertises the bridge protocol but has
+no available bridge credentials; bridge readiness is false, with the unverified
+device session already sufficient to block export. Family and quota caches were
+not refreshed after the authentication refusal and remain unverified.
+
+This confirms that the existing device-management request is rejected, not why:
+HTTP 401 alone does not establish token expiry or account lock. Local restoration
+does not renew a server token, and APS connectivity does not validate the device
+management session. Obtaining newly accepted device-management credentials would
+require a separate, owner-involved authentication flow; no password login, code
+generation or repeated diagnostic request was performed during this deployment.
+
+Private rollback material retains the old panel and launch metadata, the verified
+new worker and hashes, and the four unchanged credential/identity files. Panel
+rollback must keep the protected new worker and current pause record. Never restore
+an older worker that lacks persistent check suppression, or overwrite a live
+session with a backup merely because the service returned 401.

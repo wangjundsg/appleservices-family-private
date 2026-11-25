@@ -2,6 +2,7 @@ package gsa
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -60,7 +61,11 @@ type DeviceRegistration struct {
 }
 
 func (c *Client) accountRequest(method, endpoint string, headers map[string]string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest(method, endpoint, bytes.NewReader(body))
+	return c.accountRequestContext(context.Background(), method, endpoint, headers, body)
+}
+
+func (c *Client) accountRequestContext(ctx context.Context, method, endpoint string, headers map[string]string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +76,7 @@ func (c *Client) accountRequest(method, endpoint string, headers map[string]stri
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.New("gsa: account-device request transport failed")
+		return nil, deviceTransportFailure(err)
 	}
 	defer resp.Body.Close()
 	data, readErr := readAccountResponse(resp)
@@ -104,7 +109,10 @@ func (c *Client) accountRequest(method, endpoint string, headers map[string]stri
 		}
 		return nil, failure
 	}
-	return data, readErr
+	if readErr != nil {
+		return nil, deviceTransportFailure(readErr)
+	}
+	return data, nil
 }
 
 func (c *Client) authenticatedDeviceHeaders(payload map[string]any) (map[string]string, error) {
@@ -200,6 +208,13 @@ func (c *Client) RegisterDevice(payload map[string]any, registration DeviceRegis
 }
 
 func (c *Client) AccountDevices(payload map[string]any) ([]AccountDevice, error) {
+	return c.AccountDevicesContext(context.Background(), payload)
+}
+
+func (c *Client) AccountDevicesContext(ctx context.Context, payload map[string]any) ([]AccountDevice, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, deviceTransportFailure(err)
+	}
 	headers, err := c.authenticatedDeviceHeaders(payload)
 	if err != nil {
 		return nil, err
@@ -213,7 +228,7 @@ func (c *Client) AccountDevices(payload map[string]any) ([]AccountDevice, error)
 	}
 	headers["X-Apple-Identity-Token"] = base64.StdEncoding.EncodeToString([]byte(payload["adsid"].(string) + ":" + token))
 	headers["Accept"] = "application/json"
-	data, err := c.accountRequest(http.MethodGet, deviceListURL, headers, nil)
+	data, err := c.accountRequestContext(ctx, http.MethodGet, deviceListURL, headers, nil)
 	if err != nil {
 		return nil, err
 	}

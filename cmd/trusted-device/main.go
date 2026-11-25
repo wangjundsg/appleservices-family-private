@@ -61,13 +61,19 @@ func run() (runErr error) {
 	adiLibrary := flag.String("adi-dll", "./.cache/openbubbles-store/rust_lib_bluebubbles.dll", "verified OpenBubbles 1.18.800.0 native module path")
 	python := flag.String("python", "python", "64-bit Python executable for the native ADI bridge")
 	background := flag.Bool("background", false, "keep running with closed stdin; never approve requests or log generated codes")
-	refreshEvery := flag.Duration("refresh-every", 10*time.Minute, "refresh account authentication, registration and device status at this interval")
+	refreshEvery := flag.Duration("refresh-every", 10*time.Minute, "check the existing session and device status at this interval; never authenticate with a password")
 	controlAPI := flag.Bool("control-api", false, "enable authenticated local dashboard control")
 	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
 	resumeSession := flag.Bool("resume-session", false, "restore the account-bound GSA and accepted iCloud sessions without a password")
 	autoActivation := flag.Bool("auto-activate", false, "owner-authorized web terms repair and device activation; may require SMS through the dashboard")
 	registerOnly := flag.Bool("register-only", false, "register this device, emit a receipt, and exit without approving requests")
 	flag.Parse()
+	if *resumeSession && *registerOnly {
+		return errors.New("resume-session cannot register a device")
+	}
+	if *resumeSession {
+		*autoActivation = false
+	}
 	if err := accountguard.Check(*dir); err != nil {
 		return err
 	}
@@ -175,14 +181,14 @@ func run() (runErr error) {
 	}
 	os.Unsetenv("APPLESERVICES_APPLEID")
 	os.Unsetenv("APPLESERVICES_PASSWORD")
-	var accepted appleservices.RestoredICloudSession
 	if *resumeSession {
-		accepted, err = store.LoadAcceptedICloud()
-		if err != nil {
-			return errors.New("accepted_checkpoint_unavailable: restore requires the same account's GSA session and accepted iCloud delegate checkpoint in -dir. Complete login -checkpoint for this account first")
-		}
+		password = ""
 	}
+	var accepted appleservices.RestoredICloudSession
 	status := runtimeStatus{PID: os.Getpid(), Running: true, State: "starting"}
+	if *resumeSession {
+		restoreCheckSchedule(*dir, &status)
+	}
 	if err := status.save(*dir); err != nil {
 		return err
 	}
@@ -204,6 +210,14 @@ func run() (runErr error) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
+	if *resumeSession {
+		status.RenewalMode = "saved_session_check"
+		accepted, err = store.LoadAcceptedICloud()
+		if err != nil {
+			status.finishCheck(&renewalError{"session_restore", err}, time.Now().UTC(), *refreshEvery)
+			return errors.New("accepted_checkpoint_unavailable: the saved account checkpoint could not be restored")
+		}
+	}
 	var panel *control.Server
 	var panelCommands <-chan control.Command
 	if *controlAPI {
@@ -239,6 +253,10 @@ func run() (runErr error) {
 	if err := status.save(*dir); err != nil {
 		return err
 	}
+	if *resumeSession && !bytes.Equal(pushState.Token, push.State().Token) {
+		status.finishCheck(&renewalError{"account_binding", errPushTokenChanged}, time.Now().UTC(), *refreshEvery)
+		return errPushTokenChanged
+	}
 	if !*native {
 		if err := savePush(savedPath, push.State()); err != nil {
 			return err
@@ -265,9 +283,6 @@ func run() (runErr error) {
 		serial = "AS" + strings.ToUpper(fmt.Sprintf("%x", identity[:5]))
 	}
 	options := []appleservices.Option{appleservices.WithAnisetteServers(*server), appleservices.WithDeviceSerialNumber(serial), appleservices.WithPushToken(push.State().Token)}
-	if *resumeSession && password != "" {
-		options = append(options, appleservices.WithStorePassword(password))
-	}
 	var localADI *nativeadi.Client
 	if *useNativeADI {
 		library, err := filepath.Abs(*adiLibrary)
@@ -297,7 +312,7 @@ func run() (runErr error) {
 		if os.Getenv("APPLESERVICES_REMOTE_ANISETTE") == "" {
 			options = append(options, appleservices.WithAnisette(localADI))
 		}
-		fmt.Fprintln(os.Stderr, "Local six-digit generation is available for the same device identity.")
+		fmt.Fprintln(os.Stderr, "Local ADI module initialized for the saved device identity; code generation has not been tested.")
 	}
 	generateCode := func(codeCtx context.Context) (string, error) {
 		if err := accountguard.Check(*dir); err != nil {
@@ -312,6 +327,9 @@ func run() (runErr error) {
 		return aps.CodeFromProcess(codeCtx, *codeProvider, codeRequest(device))
 	}
 	status.State = "signing_in"
+	if *resumeSession {
+		status.State = "restoring_session"
+	}
 	if err := status.save(*dir); err != nil {
 		return err
 	}
@@ -324,7 +342,7 @@ func run() (runErr error) {
 	} else {
 		login, err = appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
 	}
-	if errors.Is(err, gsa.ErrAccountRepairRequired) && *autoActivation && panel != nil && *guiAuth {
+	if errors.Is(err, gsa.ErrAccountRepairRequired) && !*resumeSession && *autoActivation && panel != nil && *guiAuth {
 		if repairErr := runAccountRepair(ctx, appleID, password, *dir, panelCommands, &status); repairErr != nil {
 			return repairErr
 		}
@@ -339,7 +357,14 @@ func run() (runErr error) {
 		return nil
 	}
 	if err != nil {
+		if *resumeSession {
+			status.finishCheck(&renewalError{"session_restore", err}, time.Now().UTC(), *refreshEvery)
+		}
 		return err
+	}
+	if *resumeSession && login.NeedsTwoFactor() {
+		status.finishCheck(&renewalError{"authentication", errVerificationRequired}, time.Now().UTC(), *refreshEvery)
+		return errVerificationRequired
 	}
 	input := bufio.NewReader(os.Stdin)
 	if login.NeedsTwoFactor() && *method == "circle" {
@@ -439,7 +464,7 @@ func run() (runErr error) {
 		verifiedHere = true
 	}
 	registration := appleservices.DeviceRegistration{Name: *name, PushToken: push.State().Token}
-	if !*listenOnly {
+	if !*listenOnly && !*resumeSession {
 		generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
 		_, err = generateCode(generationCtx)
 		stop()
@@ -490,6 +515,9 @@ func run() (runErr error) {
 		if verifiedHere {
 			status.FailureReason = "verified_session_incomplete"
 		}
+		if *resumeSession {
+			status.finishCheck(&renewalError{"service_session", err}, time.Now().UTC(), *refreshEvery)
+		}
 		return err
 	}
 	var active maintainedLogin = login
@@ -498,54 +526,96 @@ func run() (runErr error) {
 	if ctx.Err() != nil {
 		return nil
 	}
-	fmt.Println("Apple accepted the registration request. Waiting for real AuthKit delivery; trusted-device reception is not yet verified.")
-	devices, err := active.AccountDevices()
+	if *resumeSession {
+		fmt.Println("Saved session restored locally. Server validity and trusted-device delivery are not yet verified.")
+	} else {
+		fmt.Println("Apple accepted the registration request. Trusted-device delivery is not yet verified.")
+	}
+	refresh := time.NewTimer(time.Hour)
+	refresh.Stop()
+	defer refresh.Stop()
+	// Password authentication is never a maintenance or retry operation.
+	beginRenewal := func() (maintainedLogin, error) {
+		if err := accountguard.Check(*dir); err != nil {
+			return nil, err
+		}
+		return active, nil
+	}
+	renew := func(checkCtx context.Context, explicit bool) control.Result {
+		if !explicit && !status.checkDue(time.Now()) {
+			status.State, status.Authenticated = "session_unverified", false
+			if status.CheckFailures > 0 || status.AutomaticRefreshPaused {
+				status.State = "refresh_failed"
+			}
+			if err := status.save(*dir); err != nil {
+				refresh.Stop()
+				return control.Result{Stage: "schedule_save_failed", Message: "无法保存检查状态"}
+			}
+			resetCheckTimer(ctx, refresh, &status)
+			return control.Result{Stage: "check_deferred", Message: "保留已有检查暂停状态或重试时间"}
+		}
+		if checkCtx.Err() != nil {
+			return control.Result{Stage: "canceled", Message: "检查已取消"}
+		}
+		status.LastAttemptAt = time.Now().UTC()
+		status.CheckInFlight = true
+		status.RenewalMode = "saved_session_check"
+		status.RenewalSteps = nil
+		if err := status.save(*dir); err != nil {
+			status.CheckInFlight = false
+			status.AutomaticRefreshPaused = true
+			refresh.Stop()
+			return control.Result{Stage: "schedule_save_failed", Message: "无法保存检查计划，未发送请求"}
+		}
+		requestCtx, done := context.WithTimeout(checkCtx, 45*time.Second)
+		renewed, devices, checkErr := renewSessionObservedContext(requestCtx, beginRenewal, accountID, registration, false, func(stage, result string) {
+			status.RenewalSteps = append(status.RenewalSteps, renewalStep{stage, result})
+		})
+		done()
+		status.finishCheck(checkErr, time.Now().UTC(), *refreshEvery)
+		if checkErr == nil {
+			active = renewed
+			status.LastRefreshAt = time.Now().UTC()
+			status.RefreshCount++
+			status.setDevices(devices, *name)
+			if panel != nil {
+				panel.SetDevices(panelDevices(devices, *name))
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Existing-session check failed: stage=%s category=%s http=%d paused=%t.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus, status.AutomaticRefreshPaused)
+			if errors.Is(checkErr, gsa.ErrAccountRepairRequired) {
+				status.FailureReason = gsa.ErrAccountRepairRequired.Error()
+			}
+			if errors.Is(checkErr, errVerificationRequired) {
+				status.State, status.VerificationRequired = "verification_required", true
+			}
+		}
+		if err := status.save(*dir); err != nil {
+			status.AutomaticRefreshPaused = true
+			refresh.Stop()
+			return control.Result{Stage: "schedule_save_failed", Message: "无法保存检查结果，自动检查已暂停"}
+		}
+		resetCheckTimer(ctx, refresh, &status)
+		if checkErr != nil {
+			if !status.AutomaticRefreshPaused {
+				return control.Result{Stage: "check_retry_scheduled", Message: "原会话检查遇到临时故障，已安排有限重试"}
+			}
+			return control.Result{Stage: "check_paused", Message: "原会话检查未通过，自动检查已暂停；未重新登录"}
+		}
+		return control.Result{OK: true, Message: "已有会话设备查询通过；未执行密码登录或确认令牌延期"}
+	}
+	renew(ctx, false)
 	if ctx.Err() != nil {
 		return nil
 	}
-	if err != nil {
-		status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = renewalDiagnostic(&renewalError{stage: "device_query", err: err})
-		fmt.Fprintf(os.Stderr, "Initial device check failed: stage=%s category=%s http=%d.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus)
-	} else {
-		status.setDevices(devices, *name)
-		if panel != nil {
-			panel.SetDevices(panelDevices(devices, *name))
-		}
-		for _, entry := range devices {
-			if entry.Name == *name {
-				fmt.Println("An entry with the announced name is visible in the account device list; this alone does not prove trust.")
-				if entry.IsTrustedDevice != nil {
-					fmt.Printf("Account-reported trusted status: %t.\n", *entry.IsTrustedDevice)
-				}
-			}
-		}
-	}
-	if err := active.SaveSession(); err != nil {
-		if verifiedHere {
-			status.FailureReason = "verified_session_incomplete"
-		}
-		return err
-	}
 	if *registerOnly {
-		// Registration acceptance does not prove trusted-device notification delivery.
 		fmt.Println(`{"state":"success","registration_accepted":true,"trust_verified":false}`)
 		return nil
-	}
-	status.Authenticated, status.State = true, "online"
-	if err != nil {
-		status.State = "device_query_failed"
-	}
-	// Startup is not a renewal. Device-query success has its own timestamp.
-	if err != nil {
-		status.Authenticated = false
 	}
 	if panel != nil {
 		panel.SetReady(!*listenOnly)
 	}
-	if err := status.save(*dir); err != nil {
-		return err
-	}
-	fmt.Printf("Existing-session checks are scheduled every %s; failed checks pause automatically.\n", *refreshEvery)
+	fmt.Printf("Existing-session checks run every %s after success; only temporary device-query failures receive bounded retries.\n", *refreshEvery)
 	if *background {
 		fmt.Println("Background mode: closed stdin does not stop reception; requests are never approved automatically.")
 	}
@@ -604,63 +674,6 @@ func run() (runErr error) {
 				}
 			}
 		}()
-	}
-	refresh := time.NewTicker(*refreshEvery)
-	defer refresh.Stop()
-	if status.State == "device_query_failed" {
-		refresh.Stop()
-		status.AutomaticRefreshPaused = true
-		status.RenewalStage = "device_query"
-		_ = status.save(*dir)
-	}
-	// Maintenance checks the existing session only. Password authentication is
-	// exclusively an explicit login/validation operation, never a periodic retry.
-	beginRenewal := func() (maintainedLogin, error) {
-		if err := accountguard.Check(*dir); err != nil {
-			return nil, err
-		}
-		return active, nil
-	}
-	renew := func() control.Result {
-		status.LastAttemptAt = time.Now().UTC()
-		status.RenewalMode = "saved_session_check"
-		status.RenewalSteps = nil
-		renewed, devices, err := renewSessionObserved(beginRenewal, accountID, registration, false, func(stage, result string) {
-			status.RenewalSteps = append(status.RenewalSteps, renewalStep{stage, result})
-		})
-		if err != nil {
-			status.State, status.Authenticated = "refresh_failed", false
-			status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = renewalDiagnostic(err)
-			status.AutomaticRefreshPaused = true
-			// A failed check requires explicit inspection; do not loop on a 401.
-			refresh.Stop()
-			if errors.Is(err, gsa.ErrAccountRepairRequired) {
-				status.FailureReason = gsa.ErrAccountRepairRequired.Error()
-				status.Authenticated = false
-				_ = status.save(*dir)
-				return validationFailure(err)
-			}
-			if errors.Is(err, errVerificationRequired) {
-				status.State, status.VerificationRequired = "verification_required", true
-			}
-			status.save(*dir)
-			return control.Result{Message: "续登录失败，请检查登录状态"}
-		}
-		active = renewed
-		status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = "complete", "", 0
-		status.AutomaticRefreshPaused = false
-		refresh.Reset(*refreshEvery)
-		status.State, status.Authenticated = "online", true
-		status.LastRefreshAt = time.Now().UTC()
-		status.RefreshCount++
-		status.setDevices(devices, *name)
-		if panel != nil {
-			panel.SetDevices(panelDevices(devices, *name))
-		}
-		if err := status.save(*dir); err != nil {
-			return control.Result{Message: "无法保存登录状态"}
-		}
-		return control.Result{OK: true, Message: "登录已续期，设备列表已更新"}
 	}
 	var hmeClient *icloud.HideMyEmailClient
 	var accountManagementClient *icloud.AppleAccountClient
@@ -1250,7 +1263,7 @@ func run() (runErr error) {
 			return control.Result{OK: true, Purchase: purchase, Message: "Apple 返回后续认证或确认步骤，订阅尚未完成", Stage: "purchase-handoff"}
 		}
 		if action == "refresh" {
-			return renew()
+			return renew(actionCtx, true)
 		}
 		if action == "validate-account" {
 			if err := active.BeginAccountValidation(); err != nil {
@@ -1310,18 +1323,7 @@ func run() (runErr error) {
 			return control.Result{OK: true, Message: "Apple 账户验证已完成"}
 		}
 		if action == "devices" {
-			devices, err := active.AccountDevices()
-			if err != nil {
-				return deviceListFailure(err)
-			}
-			status.setDevices(devices, *name)
-			if panel != nil {
-				panel.SetDevices(panelDevices(devices, *name))
-			}
-			if active.SaveSession() != nil || status.save(*dir) != nil {
-				return control.Result{Message: "无法保存登录状态"}
-			}
-			return control.Result{OK: true, Message: fmt.Sprintf("已更新 %d 台设备", len(devices))}
+			return renew(actionCtx, true)
 		}
 		if action != "code" && action != "allow" && action != "deny" {
 			return control.Result{Message: "当前无需短信验证码"}
@@ -1477,7 +1479,7 @@ func run() (runErr error) {
 				return errors.New(status.FailureReason)
 			}
 		case <-refresh.C:
-			result := renew()
+			result := renew(ctx, false)
 			if status.FailureReason == gsa.ErrAccountRepairRequired.Error() {
 				return gsa.ErrAccountRepairRequired
 			}
@@ -1487,7 +1489,7 @@ func run() (runErr error) {
 			if result.OK {
 				fmt.Printf("Existing-session check succeeded. Device query: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
 			} else {
-				fmt.Fprintf(os.Stderr, "Saved-session check failed: stage=%s category=%s http=%d; automatic checks paused.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus)
+				fmt.Fprintf(os.Stderr, "Saved-session check failed: stage=%s category=%s http=%d paused=%t.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus, status.AutomaticRefreshPaused)
 			}
 		case event := <-events:
 			if event.Unsupported {
