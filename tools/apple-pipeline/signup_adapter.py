@@ -13,6 +13,7 @@ Rules from the integration plan §8:
 from __future__ import annotations
 
 import json
+import datetime as dt
 import os
 import re
 import subprocess
@@ -151,6 +152,17 @@ class SignupAdapter:
                     continue
         return code, receipt
 
+    def _saved_state(self, context, reason):
+        try:
+            saved=json.loads(Path(context.state_path).read_text(encoding="utf-8-sig"))
+            if (not isinstance(saved,dict) or not isinstance(saved.get("email"),str)
+                    or saved["email"].strip().lower()!=context.account.strip().lower()
+                    or saved.get("registrationMethod")!="protocol"):
+                raise ValueError()
+            return saved
+        except (OSError,ValueError):
+            raise AdapterError(reason,"reconcile") from None
+
     def _outcome(self, context: ExecutorContext, code: int, receipt: Mapping[str, Any]) -> dict:
         for field, expected, reason in (("job_id", context.job_id, "outcome_job_mismatch"),
                                         ("account", context.account, "outcome_account_mismatch"),
@@ -161,17 +173,33 @@ class SignupAdapter:
                 "run_id": context.run_id, "action": context.action,
                 "executor_revision": receipt.get("revision") or ""}
         if code == 4:
+            saved=self._saved_state(context,"waiting_evidence_unconfirmed")
+            stage=receipt.get("stage")
+            operation,field={"email-sent":("email-send","emailRequestedAt"),
+                             "phone-sent":("phone-send","phoneRequestedAt")}.get(stage,(None,None))
+            try:
+                sent_at=saved[field]
+                sent=dt.datetime.fromisoformat(sent_at.replace("Z","+00:00"))
+                confirmed=(operation and saved.get("stage")==stage and saved.get("status")=="waiting_input"
+                    and saved.get("operations",{}).get(operation,{}).get("Status")=="succeeded"
+                    and sent.tzinfo is not None and 0<=time.time()-sent.timestamp()<=86400)
+                verification=saved.get("verificationId","")
+                if not isinstance(verification,str) or len(verification)>2048:confirmed=False
+                if stage=="email-sent" and (not isinstance(verification,str) or not verification):confirmed=False
+            except (KeyError,ValueError,TypeError,AttributeError):
+                confirmed=False
+            if not confirmed:raise AdapterError("waiting_evidence_unconfirmed","reconcile")
             return {**base, "outcome": "waiting_input", "state": "waiting_input", "stage": receipt.get("stage") or "",
                     "registration_phase": receipt.get("stage") or "",
                     "challenge": receipt.get("challenge") or {},
-                    "verification_id": receipt.get("verificationId") or ""}
+                    "verification_id": verification, "sent_at":sent_at}
         if code == 0 and receipt.get("accountExists") is True:
+            saved=self._saved_state(context,"creation_evidence_unconfirmed")
             try:
-                saved = json.loads(Path(context.state_path).read_text(encoding="utf-8-sig"))
                 confirmed = (saved.get("email", "").strip().lower() == context.account.strip().lower()
                              and saved.get("registrationMethod") == "protocol" and saved.get("created") is True
                              and saved.get("status") == "ready"
-                             and saved.get("operations", {}).get("finalize", {}).get("status") == "succeeded")
+                             and saved.get("operations", {}).get("finalize", {}).get("Status") == "succeeded")
             except (OSError, ValueError, AttributeError):
                 confirmed = False
             if not confirmed or receipt.get("ok") is not True or receipt.get("state") != "ready":

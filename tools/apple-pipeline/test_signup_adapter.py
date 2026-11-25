@@ -48,7 +48,16 @@ class AdapterContractTest(unittest.TestCase):
     def adapter(self, body: str) -> sa.SignupAdapter:
         return sa.SignupAdapter(binary=str(script(self.folder / "fake-signup.py", body)))
 
+    def waiting_state(self, **changes):
+        saved={'email':'fixture@example.test','registrationMethod':'protocol','stage':'email-sent','status':'waiting_input',
+               'emailRequestedAt':pipeline.iso(pipeline.time.time()-5),'verificationId':'fixture-verification',
+               'operations':{'email-send':{'Digest':'fixture','Status':'succeeded'}},**changes}
+        state=self.folder/'protocol'/'state.json';state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps(saved),encoding='utf8')
+        return saved
+
     def test_exit_four_is_waiting_input(self):
+        saved=self.waiting_state()
         adapter = self.adapter(
             """
             import json
@@ -58,6 +67,8 @@ class AdapterContractTest(unittest.TestCase):
         outcome = adapter.create(FakeJob(self.folder))
         self.assertEqual(outcome["outcome"], "waiting_input")
         self.assertEqual(outcome["registration_phase"], "email-sent")
+        self.assertEqual(outcome['sent_at'],saved['emailRequestedAt'])
+        self.assertEqual(outcome['verification_id'],'fixture-verification')
 
     def test_exit_zero_with_bound_evidence_is_registered(self):
         adapter = self.adapter(
@@ -65,7 +76,7 @@ class AdapterContractTest(unittest.TestCase):
             import json,sys,pathlib
             p=pathlib.Path(sys.argv[sys.argv.index('-state')+1]);p.parent.mkdir(parents=True,exist_ok=True)
             p.write_text(json.dumps({'email':'fixture@example.test','created':True,'status':'ready',
-                'registrationMethod':'protocol','operations':{'finalize':{'status':'succeeded'}}}))
+                'registrationMethod':'protocol','operations':{'finalize':{'Digest':'fixture','Status':'succeeded'}}}))
             print(json.dumps({"ok": True, "accountExists": True, "state":"ready", "evidenceRef": "e-1"}))
             """)
         outcome = adapter.create(FakeJob(self.folder))
@@ -118,6 +129,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "creation_evidence_unconfirmed")
 
     def test_cli_contract_and_password_transport(self):
+        self.waiting_state()
         adapter = self.adapter('''
             import json,sys,os
             args=sys.argv
@@ -137,6 +149,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(outcome.get('stage'),'email-sent')
 
     def test_actual_adapter_waiting_reaches_pipeline_without_new_resource_requests(self):
+        saved=self.waiting_state()
         adapter=self.adapter('''
             import json
             print(json.dumps({'state':'waiting_input','stage':'email-sent'}))
@@ -152,6 +165,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(job.status['status'],'waiting_input')
         self.assertEqual(job.status['challenge']['kind'],'email')
         self.assertFalse(job.status['account_created'])
+        self.assertEqual(job.status['challenge']['sent_at'],saved['emailRequestedAt'])
 
     def test_account_or_finalize_mismatch_cannot_be_registered(self):
         adapter=self.adapter('import json;print(json.dumps({"ok":True,"accountExists":True,"state":"ready"}))')
@@ -160,9 +174,17 @@ class AdapterContractTest(unittest.TestCase):
         state.parent.mkdir(parents=True,exist_ok=True)
         for change in ({'email':'foreign@example.test'},{'created':False},{'operations':{}},{'status':'unknown'}):
             saved={'email':job.cfg['email'],'registrationMethod':'protocol','created':True,'status':'ready',
-                   'operations':{'finalize':{'status':'succeeded'}},**change}
+                   'operations':{'finalize':{'Status':'succeeded'}},**change}
             state.write_text(json.dumps(saved),encoding='utf8')
             with self.assertRaises(sa.AdapterError):adapter.create(job)
+
+    def test_waiting_cannot_use_foreign_unsent_or_invalid_time_evidence(self):
+        adapter=self.adapter('import json;print(json.dumps({"stage":"email-sent"}));raise SystemExit(4)')
+        for change in ({'email':'foreign@example.test'},{'operations':{}},{'stage':'phone-sent'},
+                       {'emailRequestedAt':pipeline.iso(pipeline.time.time()+60)},
+                       {'emailRequestedAt':'2026-11-26T01:00:00'},{'verificationId':None}):
+            self.waiting_state(**change)
+            with self.assertRaises(sa.AdapterError):adapter.create(FakeJob(self.folder))
 
     def test_missing_password_cannot_generate_a_different_account_password(self):
         job=FakeJob(self.folder);job.cfg.pop('password')

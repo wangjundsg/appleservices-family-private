@@ -378,7 +378,7 @@ class Job:
                     or rotated):
                 # Sending a code for a new stage is a new challenge: it gets its own
                 # identity and is bound to this job and stage.
-                challenge = self.open_challenge(kind or stage_now, source_id=outcome.get("verification_id", ""))
+                challenge = self.open_challenge(kind or stage_now, source_id=outcome.get("verification_id", ""),sent_at=outcome.get("sent_at"))
                 challenge["stage"] = stage_now
                 challenge["job_id"] = self.cfg["job_id"]
                 self.update(challenge=challenge, challenge_at=challenge["sent_at"], challenge_stage=stage_now)
@@ -1006,16 +1006,22 @@ class Job:
                         refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
         return True
 
-    def open_challenge(self, kind, source_id=""):
+    def open_challenge(self, kind, source_id="", sent_at=None):
         """Start a challenge with an identity of its own.
 
         Re-sending a code for the same stage must still be a new challenge, so the
         identity cannot be the stage name plus a timestamp.
         """
+        if sent_at is not None:
+            try:
+                age=time.time()-timestamp(sent_at)
+                if not 0<=age<=86400: raise ValueError()
+            except (ValueError,TypeError,AttributeError):
+                raise PipelineError("challenge_send_time_invalid","needs_review") from None
         challenge = {
             "id": hashlib.sha256(f"{self.cfg['job_id']}:{kind}:{time.time_ns()}".encode()).hexdigest()[:32],
             "kind": kind,
-            "sent_at": iso(),
+            "sent_at": sent_at if sent_at is not None else iso(),
             "status": "open",
             "source_id": source_id,
         }
