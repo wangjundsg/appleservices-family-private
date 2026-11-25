@@ -38,11 +38,12 @@
 
 | 环境变量 | 启动脚本可读取的已有本机私密文件 |
 |---|---|
-| `GRIZZLY_API_KEY` | `.cache/grizzly.key` |
-| `HERO_API_KEY` | `.cache/apple-os-ab/hero.key` |
+| `SMS_API_KEY` / `GRIZZLY_API_KEY` | `.cache/grizzly.key` |
+| `SMS_API_KEY_HERO` / `HERO_API_KEY` | `.cache/apple-os-ab/hero.key` |
 | `YESCAPTCHA_KEY` | `.cache/yescaptcha.key` |
 
 已设置的环境变量优先；脚本只将文件内容加载到新面板进程环境，不打印值，不传命令行。
+同一供应商的自动/手动变量由启动器统一；任一显式值优先于文件，两项显式值不一致时拒绝启动，避免两个入口使用不同账户。
 依赖 Node、Python 3.10+、`.tools/js/node_modules/playwright-core`、本机 Apple APS 服务和运行中的 Forge。
 
 ## 面板使用

@@ -43,19 +43,13 @@ try {
 
 # Load existing private key files only into this child's server environment.
 # No credentials enter arguments, console output or version control.
-$taskKeys = @{
-    GRIZZLY_API_KEY = '.cache\grizzly.key'
-    HERO_API_KEY = '.cache\apple-os-ab\hero.key'
-    YESCAPTCHA_KEY = '.cache\yescaptcha.key'
-}
+. (Join-Path $PSScriptRoot 'provider-environment.ps1')
+$taskKeys = Get-AppleProviderEnvironment -Root $taskRoot
 $taskPrevious = @{}
 try {
     foreach ($taskKey in $taskKeys.Keys) {
         $taskPrevious[$taskKey] = [Environment]::GetEnvironmentVariable($taskKey, 'Process')
-        $taskFile = Join-Path $taskRoot $taskKeys[$taskKey]
-        if (-not $taskPrevious[$taskKey] -and (Test-Path -LiteralPath $taskFile)) {
-            [Environment]::SetEnvironmentVariable($taskKey, [IO.File]::ReadAllText($taskFile).Trim(), 'Process')
-        }
+        [Environment]::SetEnvironmentVariable($taskKey, $taskKeys[$taskKey], 'Process')
     }
     $taskArgs = @('-repo', ('"' + $taskRoot + '"'), '-dir', ('"' + $taskState + '"'), '-python', ('"' + $Python + '"'), '-port', $Port)
     if ($AllowPurchase) { $taskArgs += '--allow-purchase' }
