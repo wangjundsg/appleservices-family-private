@@ -872,7 +872,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		if s.callFor(ctx, dir, "/view", nil, &live) == nil && json.Unmarshal(live.Status, &result.Status) == nil {
 			result.Devices = live.Devices
 			result.Pending = live.Pending
-			result.CodeReady = live.CodeReady
+			result.CodeReady = live.CodeReady && slices.Contains(live.Capabilities, control.LocalCodeCapability)
 			result.HideMyEmailAvailable = slices.Contains(live.Capabilities, "hide-my-email")
 			result.ControlReady = true
 			result.WorkerCapabilityState = "upgrade_required"
@@ -882,7 +882,7 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 		}
 	}
 	result.Status = normalizeHealth(dir, result.Status)
-	result.CodeReady = result.CodeReady && result.Status.SessionVerified && result.WorkerCapabilityState == "supported"
+	result.CodeReady = result.CodeReady && result.Status.Running && !result.Status.Protected && result.WorkerCapabilityState == "supported"
 	if !control.PendingFresh(result.Pending, time.Now()) || result.Status.Protected {
 		result.Pending = nil
 	}
@@ -1365,6 +1365,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				cacheSafeActionResult(selected, &result)
 				json.NewEncoder(w).Encode(result)
 				return
+			}
+			if action.Action == "code" {
+				var live control.View
+				if s.callFor(r.Context(), dir, "/view", nil, &live) != nil || !slices.Contains(live.Capabilities, control.LocalCodeCapability) || !live.CodeReady {
+					json.NewEncoder(w).Encode(control.Result{Stage: "code_provider_unavailable", Message: "本机验证码模块未就绪或后台版本不支持独立生成"})
+					return
+				}
 			}
 			if action.Action == "allow" || action.Action == "deny" {
 				var live control.View

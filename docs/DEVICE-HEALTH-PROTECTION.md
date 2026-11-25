@@ -38,7 +38,7 @@ repeated login or OTP requests to discover whether a locked account has recovere
   identity changes, unknown errors and failed saves pause immediately. The retry
   budget, deadline and pause survive restart. An interrupted in-flight check pauses
   rather than silently replaying. Successful explicit checks resume the schedule.
-- Resume mode ignores injected passwords, skips OTP preflight and device
+- Resume mode ignores injected passwords, skips the worker's OTP preflight and device
   registration/activation, and preserves the account push-token binding. Failed
   device checks never overwrite the saved session. Request cancellation reaches
   the device-list HTTP transport; diagnostic errors contain no raw transport text.
@@ -89,7 +89,9 @@ are reported conservatively. Verify pushed branch SHA against the local commit.
 
 The authorized organizer worker was restarted using the same saved identity and
 session, with password injection and automatic activation disabled. Resume startup
-skipped OTP generation and registration. Its single device-service check completed
+skipped the worker's OTP preflight and registration. The native ADI helper still
+performs its own local generation preflight when initialized; this does not submit
+a code to an account login. Its single device-service check completed
 local restoration and local service-client availability, then received HTTP 401 at
 the device-query stage. Saving was not reached. Automatic checks are paused with
 no retry deadline; the APS connection remains connected independently.
@@ -106,10 +108,34 @@ HTTP 401 alone does not establish token expiry or account lock. Local restoratio
 does not renew a server token, and APS connectivity does not validate the device
 management session. Obtaining newly accepted device-management credentials would
 require a separate, owner-involved authentication flow; no password login, code
-generation or repeated diagnostic request was performed during this deployment.
+submission or repeated diagnostic request was performed during this deployment.
 
 Private rollback material retains the old panel and launch metadata, the verified
 new worker and hashes, and the four unchanged credential/identity files. Panel
 rollback must keep the protected new worker and current pause record. Never restore
 an older worker that lacks persistent check suppression, or overwrite a live
 session with a backup merely because the service returned 401.
+
+## Independent manual code generation, 2026-11-26
+
+The health change incorrectly gated manual code generation on device-list
+authentication in the control view, dashboard view, UI and worker action. These
+are separate capabilities. Workers now advertise `local-code-generation` only
+through the new protocol; `code_ready` requires an initialized provider, a running
+worker and an unprotected account. Older workers cannot promise the independent
+capability. Dashboard action dispatch checks that capability as well as the view.
+
+The manual code action calls only the existing local provider. It checks protection
+before generation and before returning the result, honors cancellation, validates
+six digits and returns sanitized errors. It does not authenticate, send SMS, query
+devices, change session health or persist the code. Sign-in approval and bridge
+readiness retain their separate checks. Generating a code is not proof that Apple
+will accept it.
+
+Regression tests cover degraded device health, provider readiness/failure, legacy
+workers, protected accounts, and the production UI render/action functions with
+an isolated DOM fixture (`node internal/dashboard/code_ui_test.cjs`). A controlled
+deployment preserved the organizer's saved session and identity, its 401 pause,
+and the three stopped guards. One manual generation through the dashboard API
+succeeded; only its success and format were inspected, without logging the code
+or submitting it to a login. The device-query attempt timestamp did not change.

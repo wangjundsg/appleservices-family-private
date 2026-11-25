@@ -1331,6 +1331,9 @@ func run() (runErr error) {
 		if *listenOnly {
 			return control.Result{Message: "观察模式不能生成验证码或批准登录"}
 		}
+		if action == "code" {
+			return localCodeResult(actionCtx, *dir, generateCode)
+		}
 		pendingMu.Lock()
 		transaction := pending
 		kind := pendingKind

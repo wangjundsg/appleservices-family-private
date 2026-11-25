@@ -53,6 +53,7 @@ func TestControlDeliversCodeOnlyToRequestAndRemovesCapability(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "runtime.json"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	server.SetReady(true)
 	received := make(chan string, 1)
 	go func() {
 		command := <-server.Commands

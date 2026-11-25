@@ -40,6 +40,9 @@ type Pending struct {
 	PairingID  string    `json:"pairing_id,omitempty"`
 	ReceivedAt time.Time `json:"received_at"`
 }
+
+const LocalCodeCapability = "local-code-generation"
+
 type View struct {
 	Status                 json.RawMessage `json:"status"`
 	Devices                []Device        `json:"devices"`
@@ -190,6 +193,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" && r.URL.Path == "/view" {
 		data, err := os.ReadFile(filepath.Join(s.dir, "runtime.json"))
 		var status struct {
+			Running           bool      `json:"running"`
 			PID               int       `json:"pid"`
 			State             string    `json:"state"`
 			Authenticated     bool      `json:"authenticated"`
@@ -204,7 +208,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.pending = nil
 		}
 		allowed := accountguard.Check(s.dir) == nil
-		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready && allowed && SessionFresh(status.State, status.Authenticated, status.LastDeviceQueryAt, time.Now()), Capabilities: []string{"hide-my-email", "health-v2", "mail-bridge-credentials", "expiring-requests"}, BridgeCredentialsReady: allowed && s.ready && s.bridgeCredentials.AppleID != "" && s.bridgeCredentials.Password != ""}
+		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready && allowed && status.Running, Capabilities: []string{"hide-my-email", "health-v2", "mail-bridge-credentials", "expiring-requests", LocalCodeCapability}, BridgeCredentialsReady: allowed && s.ready && s.bridgeCredentials.AppleID != "" && s.bridgeCredentials.Password != ""}
 		if !allowed {
 			view.Pending = nil
 		}
@@ -237,6 +241,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
+	}
+	if action.Action == "code" {
+		s.mu.Lock()
+		ready := s.ready
+		s.mu.Unlock()
+		if !ready {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(Result{Stage: "code_provider_unavailable", Message: "本机验证码模块尚未就绪"})
+			return
+		}
 	}
 	if action.Action == "allow" || action.Action == "deny" {
 		valid := s.RequestFresh(action.RequestID)
