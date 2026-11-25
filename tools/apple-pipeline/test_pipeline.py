@@ -281,6 +281,35 @@ class PipelineTests(unittest.TestCase):
                 with self.assertRaises(p.PipelineError):self.job.prepare_followup_sms()
             self.assertEqual(call.call_count,1)
 
+    def test_protocol_creation_prepares_followup_without_browser_sms_file(self):
+        self.job.method='protocol'
+        with patch.object(p,'sms_call',return_value='ACCESS_RETRY_GET') as call:
+            self.job.prepare_followup_sms()
+            call.assert_not_called()
+            self.job.update(account_created=True)
+            self.job.prepare_followup_sms()
+            self.job.prepare_followup_sms()
+        call.assert_called_once_with(self.job.cfg['sms'],action='setStatus',status='3',id='test-activation')
+        self.assertEqual(self.job.status['followup_sms'],'ready')
+
+    def test_protocol_followup_unknown_is_not_retried(self):
+        self.job.method='protocol'
+        self.job.update(account_created=True)
+        with patch.object(p,'sms_call',side_effect=p.PipelineError('transport_result_unknown')) as call:
+            for _ in range(2):
+                with self.assertRaises(p.PipelineError):self.job.prepare_followup_sms()
+        self.assertEqual(call.call_count,1)
+
+    def test_protocol_login_does_not_reuse_manual_registration_sms(self):
+        self.job.method='protocol'
+        self.job.update(account_created=True)
+        target=self.job._input_path('phone')
+        target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_text('000123')
+        with patch.object(p,'sms_call',side_effect=['STATUS_OK:000123','STATUS_OK:000456']):
+            self.assertEqual(self.job.next_code(),'')
+            self.assertEqual(self.job.next_code(),'000456')
+
     def test_safe_number_replacement_stops_after_second_failure(self):
         self.job.cfg["sms"].update(auto_purchase=True,max_price="1.10",max_total="2.20",currency="USD")
         with patch.object(self.job,"create",side_effect=p.PipelineError("number_cannot_receive_followup","failed")) as create, \

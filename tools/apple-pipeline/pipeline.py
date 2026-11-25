@@ -415,6 +415,9 @@ class Job:
         used = read(previous) if previous.exists() else []
         created = self.folder / "create-sms.txt"
         if created.exists(): used.append(created.read_text().strip())
+        if self.method=="protocol" and self.status.get("account_created"):
+            created=self._input_path("phone")
+            if created.exists(): used.append(created.read_text(encoding="utf-8-sig").strip())
         code = sms_call(self.cfg["sms"], action="getStatus", id=self.cfg["sms"]["activation"])
         if not re.fullmatch(r"STATUS_OK:\d{6}", code): return ""
         if self.cfg["sms"].get("supply_operation"):
@@ -778,7 +781,7 @@ class Job:
         return reply
 
     def prepare_followup_sms(self):
-        if not (self.folder / "create-sms.txt").exists(): return
+        if not (self.folder / "create-sms.txt").exists() and not (self.method=="protocol" and self.status.get("account_created")): return
         if self.status.get("followup_sms") == "ready": return
         if self.status.get("followup_sms"):
             raise PipelineError("followup_sms_requires_readback", "needs_review")
