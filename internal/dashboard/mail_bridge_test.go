@@ -1,9 +1,15 @@
 package dashboard
 
 import (
+	"encoding/json"
+	appleservices "github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/internal/control"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMailBridgeRejectsUnauthenticatedAndUnreadyAccount(t *testing.T) {
@@ -30,5 +36,56 @@ func TestMailBridgeRejectsUnauthenticatedAndUnreadyAccount(t *testing.T) {
 		if strings.Contains(w.Body.String(), "password") {
 			t.Fatal("listing/error exposed credential field")
 		}
+	}
+}
+
+func TestMailBridgeOnlyExportsReadyFamilyAccounts(t *testing.T) {
+	dir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &Account{ID: "01-account", AppleID: "ready@example.test", Dir: dir}
+	s := &Server{config: Config{Worker: executable}, accounts: []*Account{account}}
+	saved := appleservices.Session{AppleID: account.AppleID, DSID: "fixture-gsa"}
+	accepted := acceptedICloudCheckpoint{Session: appleservices.Session{AppleID: account.AppleID, DSID: "fixture-icloud", Tokens: map[string]string{"mmeAuthToken": "fixture"}}, ADSID: saved.DSID, ServiceData: map[string]any{}}
+	write := func(name string, value any) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("session.json", saved)
+	write("icloud-accepted.json", accepted)
+	write("runtime.json", Status{PID: os.Getpid(), Running: true, Authenticated: true})
+	family := &control.FamilyInfo{Member: true, Self: 1, Organizers: 1, StorageKnown: true, StorageParticipating: true, StorageAvailable: true, StorageEnabled: true, StorageBytes: 50 << 30}
+	if _, err := writeFamilyCache(account, family); err != nil {
+		t.Fatal(err)
+	}
+	if !s.mailBridgeReady(account) {
+		t.Fatal("ready account not eligible")
+	}
+	family.StorageParticipating = false
+	if _, err := writeFamilyCache(account, family); err != nil {
+		t.Fatal(err)
+	}
+	if s.mailBridgeReady(account) {
+		t.Fatal("account without sharing exported")
+	}
+	family.StorageParticipating = true
+	write("family-status.json", familyCacheRecord{Version: familyCacheVersion, AccountID: account.ID, CheckedAt: time.Now().Add(-time.Hour), Family: *family})
+	if s.mailBridgeReady(account) {
+		t.Fatal("stale cache without completed receipt exported")
+	}
+	if _, err := writeFamilyCache(account, family); err != nil {
+		t.Fatal(err)
+	}
+	write("runtime.json", Status{PID: os.Getpid(), Running: true, Authenticated: false})
+	if s.mailBridgeReady(account) {
+		t.Fatal("unauthenticated device exported")
 	}
 }
