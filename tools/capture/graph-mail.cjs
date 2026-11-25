@@ -18,8 +18,7 @@
 // Security: the code itself is never returned to a log. Callers get it in memory
 // and are expected to log only the message id and the elapsed time, the same
 // contract account-flow.codeLogEntry implements for the temp-mail path. A rotated
-// refresh token is written back to the token file (mode 0600) because Microsoft
-// invalidates the old one.
+// refresh token, when returned, is written back to the token file (mode 0600).
 //
 // Usage (CLI, for verification only):
 //   node tools/capture/graph-mail.cjs --file .cache/apple-run/graph.json --list
@@ -67,9 +66,7 @@ function readTokenFile(file) {
   };
 }
 
-// persistRotation keeps the file usable after the first exchange: Microsoft
-// returns a new refresh token and retires the old one, so losing it means the
-// next run has to be handed a fresh credential by a human.
+// Keep the latest returned refresh token; do not infer the old token's validity.
 function persistRotation(cfg, nextToken) {
   if (!nextToken || nextToken === cfg.refresh_token) return false;
   const body = JSON.parse(fs.readFileSync(cfg.file, "utf8"));
@@ -122,9 +119,8 @@ async function exchangeToken(cfg, fetchImpl = globalThis.fetch) {
 }
 
 // listMessages returns the newest messages, normalised to the shape the mail
-// picker understands. Recipient matching reads the RFC822 header Graph returns
-// in `internetMessageHeaders` when asked, but toRecipients is enough here: Apple
-// always mails the Apple ID address itself.
+// picker understands. Forwarded mail is supported only when To/Cc preserves
+// the target address. A body mention or the destination inbox is not evidence.
 async function listMessages(cfg, token, { top = 25, fetchImpl = globalThis.fetch } = {}) {
   const url = `${GRAPH}/me/messages?$top=${top}&$select=${SELECT}&$orderby=receivedDateTime desc`;
   const res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -204,20 +200,20 @@ function isYearish(digits) {
 // mailbox, Apple as sender, code semantics in the subject or -- for a localised
 // mail -- in the body) and then the newest-wins rule: a second mail invalidates
 // the first code.
-function pickCode(messages, { mailbox, since = 0, senderDomains = ["apple.com"] } = {}) {
-  const address = String(mailbox || "").toLowerCase();
+function pickCode(messages, { mailbox, since = 0, until = Date.now(), excluded = [], senderDomains = ["apple.com"] } = {}) {
+  const address = String(mailbox || "").trim().toLowerCase();
   const allowed = (Array.isArray(senderDomains) && senderDomains.length ? senderDomains : ["apple.com"]).map((d) =>
     String(d || "").toLowerCase().trim(),
   );
-  let best = null;
+  const candidates = [];
   for (const m of Array.isArray(messages) ? messages : []) {
     const received = Date.parse(m.receivedDateTime);
     if (!Number.isFinite(received)) continue;
-    if (since && received < since) continue;
-    if (!address || !m.to.includes(address)) continue;
+    if (received <= since || received > until || excluded.includes(m.id)) continue;
+    if (!m.id || !address || !m.to?.some(to => String(to).trim().toLowerCase() === address)) continue;
     const domain = (m.from.split("@")[1] || "").toLowerCase();
     const appleSender = allowed.some((d) => domain === d || domain.endsWith(`.${d}`));
-    if (!appleSender && !/apple/i.test(domain)) continue;
+    if (!appleSender) continue;
     // Two ways in, because Apple localises both the subject and the body: a
     // subject that reads like a code mail in any known locale, or an apple.com
     // sender whose body carries the hint. A subject-only English test skipped a
@@ -226,14 +222,17 @@ function pickCode(messages, { mailbox, since = 0, senderDomains = ["apple.com"] 
     const subjectHit = flow.VERIFICATION_SUBJECT.test(m.subject) || CODE_HINTS.test(m.subject);
     const bodyHit = appleSender && (CODE_HINTS.test(m.body) || CODE_HINTS.test(m.bodyPreview));
     if (!subjectHit && !bodyHit) continue;
-    const code = codeFromText(m.body) || codeFromText(m.bodyPreview);
-    if (!code) continue;
-    if (!best || received > best.received) best = { code, messageId: m.id, received, subject: m.subject, from: m.from };
+    candidates.push({ ...m, received });
   }
+  candidates.sort((a, b) => b.received - a.received);
+  const best = candidates[0];
   if (!best) return null;
+  if (candidates.some(m => m.id !== best.id && m.received === best.received)) throw Error('code_ambiguous');
+  const codes = [...new Set(stripTags(best.body || best.bodyPreview).match(/(?<!\d)\d{6}(?!\d)/g) || [])];
+  if (codes.length !== 1) throw Error(codes.length ? 'code_ambiguous' : 'code_unrecognized');
   return {
-    code: best.code,
-    messageId: best.messageId,
+    code: codes[0],
+    messageId: best.id,
     received: new Date(best.received).toISOString(),
     subject: best.subject,
     from: best.from,
@@ -248,10 +247,13 @@ async function pollCode({
   file,
   since = 0,
   mailbox = "",
+  recipient = "",
+  until,
+  excluded = [],
   senderDomains,
   intervalMs = POLL_INTERVAL_MS,
   timeoutMs = POLL_TIMEOUT_MS,
-  clockSkewMs = 90_000,
+  clockSkewMs = 0,
   fetchImpl = globalThis.fetch,
   onTick = () => {},
 } = {}) {
@@ -262,15 +264,17 @@ async function pollCode({
   } catch (e) {
     return { ok: false, error: String(e && e.message ? e.message : e), elapsedMs: 0 };
   }
-  const target = String(mailbox || cfg.mailbox).toLowerCase();
+  if (mailbox && String(mailbox).trim().toLowerCase() !== cfg.mailbox) {
+    return { ok: false, error: 'graph_mailbox_mismatch', elapsedMs: Date.now() - started };
+  }
+  const target = String(recipient || mailbox || cfg.mailbox).trim().toLowerCase();
   const tok = await exchangeToken(cfg, fetchImpl);
   if (!tok.ok) return { ok: false, error: `token: ${tok.error}`, elapsedMs: Date.now() - started };
 
   let rounds = 0;
   let lastError = "";
   let seen = 0;
-  // `since` is the moment the form was submitted; a mail that arrives a second
-  // earlier is still this run's code, so the window is nudged back.
+  // Unified callers require zero skew and record since before requesting mail.
   const floor = since ? since - clockSkewMs : 0;
   while (Date.now() - started < timeoutMs) {
     rounds += 1;
@@ -285,7 +289,12 @@ async function pollCode({
       }
     } else {
       seen = list.messages.length;
-      const hit = pickCode(list.messages, { mailbox: target, since: floor, senderDomains });
+      let hit;
+      try {
+        hit = pickCode(list.messages, { mailbox: target, since: floor, until, excluded, senderDomains });
+      } catch (error) {
+        return { ok: false, error: error.message, rounds, elapsedMs: Date.now() - started };
+      }
       onTick({ round: rounds, messages: seen, hit: Boolean(hit) });
       if (hit) {
         return {

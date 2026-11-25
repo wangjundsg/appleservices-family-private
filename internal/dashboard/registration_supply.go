@@ -68,6 +68,20 @@ func (s *Server) prepareAutomaticRegistration(body *registerRequest, settings re
 		used[normalizedRegistrationEmail(account.AppleID)] = true
 	}
 	s.accountsMu.Unlock()
+	// Legacy runs have no safe release receipt; even an unknown result retains ownership.
+	var legacyUsage map[string]string
+	if err := readRegisterJSON(filepath.Join(s.config.RepoRoot, ".cache", "mailbox-usage.json"), &legacyUsage); err != nil {
+		if !os.IsNotExist(err) {
+			return errors.New("旧邮箱占用记录损坏，请先核实")
+		}
+	} else {
+		if legacyUsage == nil {
+			return errors.New("旧邮箱占用记录损坏，请先核实")
+		}
+		for email := range legacyUsage {
+			used[normalizedRegistrationEmail(email)] = true
+		}
+	}
 	files, err := filepath.Glob(filepath.Join(s.registerRoot(), "reg-*", "request.json"))
 	if err != nil {
 		return errors.New("无法读取邮箱占用记录")

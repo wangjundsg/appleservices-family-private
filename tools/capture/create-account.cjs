@@ -67,8 +67,7 @@ const privateInput = lifecycle.readInput(process.env.APPLESERVICES_CREATE_INPUT)
 let leaseDeadline = Infinity;
 const lib = require("./capture-lib.cjs");
 const mech = require("./flow-mechanics.cjs");
-const graphMail = require("./graph-mail.cjs");
-const codePool = require("./code-pool.cjs");
+const mailReader = require("./mail-reader.cjs");
 const preflight = require("./preflight.cjs");
 const refund = require("./refund.cjs");
 const { chromium } = require("D:/appleservices-family-private/.tools/js/node_modules/playwright-core");
@@ -300,7 +299,8 @@ const codePoolConfig = String(arg("code-pool-config", ""));
 const usedEmailMessages = [];
 let emailRequestedAt = Date.now();
 async function poolEmailCode(timeoutMs) {
-  const hit = await codePool.pollCode({file:codePoolConfig, mailbox:email, since:emailRequestedAt,
+  const hit = await mailReader.readCode({reader:'outlook', file:codePoolConfig, mailbox:email,
+    recipient:email, source:'registration', since:emailRequestedAt,
     timeoutMs:Math.max(0,Math.min(timeoutMs,leaseDeadline-Date.now())), excluded:usedEmailMessages});
   if (hit) usedEmailMessages.push(hit.messageId);
   return hit;
@@ -323,22 +323,19 @@ async function manualEmailCode(timeoutMs = 600000) {
 // code value itself never reaches run.jsonl (review A2): only whether it
 // arrived, how long the wait took and the id of the message it came from.
 async function graphEmailCode(since, timeoutMs = 180000) {
-  const hit = await graphMail.pollCode({
+  const hit = await mailReader.readCode({
+    reader: 'graph',
     file: graphTokenFile,
     since,
     mailbox: email,
-    senderDomains,
-    intervalMs: 5000,
+    recipient: email,
+    source: 'registration',
+    excluded: usedEmailMessages,
     timeoutMs: Math.max(0, Math.min(timeoutMs, leaseDeadline - Date.now())),
     onTick: ({ round, messages, hit: found }) => note("graph-poll", { round, messages, found }),
   });
-  if (!hit.ok) {
-    note("graph-poll-failed", { error: clip(hit.error || "", 160), elapsed_ms: hit.elapsedMs || 0 });
-    return null;
-  }
-  // The message id is opaque and long; the prefix identifies it next to the
-  // elapsed time without turning the log line into a blob.
-  return { code: hit.code, messageId: `graph:${String(hit.messageId || "").slice(0, 24)}`, created_at: hit.received };
+  if (hit) usedEmailMessages.push(hit.messageId);
+  return hit;
 }
 
 async function latestEmailCode(since) {

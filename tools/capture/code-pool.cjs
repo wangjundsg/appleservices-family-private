@@ -21,24 +21,29 @@ function validateHit(value, {mailbox, since, until, excluded}) {
       excluded.includes(value.message_id) || !Number.isFinite(received) || received <= since || received > until) throw Error('code_pool_response_invalid');
   return {code:value.code, messageId:value.message_id, created_at:value.received_at};
 }
-async function pollCode({file, mailbox, since, timeoutMs, excluded=[], fetchImpl=fetch}) {
+async function pollCode({file, mailbox, since, until:fixedUntil, timeoutMs, excluded=[],
+  recipient=mailbox, source='registration', platform='apple', fetchImpl=fetch}) {
+  if (recipient !== mailbox || source !== 'registration' || platform !== 'apple') throw Error('code_pool_contract_unsupported');
   const cfg = config(file), deadline = Date.now()+timeoutMs;
   while (Date.now() < deadline) {
     const cooling=(notBefore.get(file)||0)-Date.now();
     if(cooling>0) { await sleep(Math.min(cooling,Math.max(0,deadline-Date.now()))); continue; }
-    const until = Date.now(), remaining = deadline-Date.now();
+    const until = fixedUntil ?? Date.now(), remaining = deadline-Date.now();
     let response;
     try {
       response = await fetchImpl(new URL('/api/v1/code',cfg.baseUrl), {
         method:'POST', redirect:'error', signal:AbortSignal.timeout(Math.max(1,Math.min(30000,remaining))),
         headers:{'Content-Type':'application/json',Authorization:'Bearer '+cfg.apiToken},
-        body:JSON.stringify({mailbox,since:new Date(since).toISOString(),until:new Date(until).toISOString(),wait_seconds:0,exclude_message_ids:excluded}),
+        body:JSON.stringify({mailbox,recipient,source,platform,since:new Date(since).toISOString(),until:new Date(until).toISOString(),wait_seconds:0,exclude_message_ids:excluded}),
       });
     } catch { notBefore.set(file,Date.now()+4000); continue; }
     let value; try { value = await response.json(); } catch { throw Error('code_pool_response_invalid'); }
     if (response.ok && value.ok) return validateHit(value,{mailbox,since,until,excluded});
     const temporary = (response.ok && value.error === 'no_code_yet') || (value.retryable === true && [408,409,429,502,503].includes(response.status));
-    if (!temporary) throw Error('code_pool_read_rejected');
+    if (!temporary) {
+      const code = typeof value.error === 'string' && /^[a-z][a-z0-9_]{1,80}$/.test(value.error) ? value.error : 'code_pool_response_invalid';
+      throw Object.assign(Error('code_pool_read_rejected'), {code,status:response.status,retryable:false});
+    }
     const retryAfter=Number(value.retry_after_seconds || 0);
     if (!Number.isFinite(retryAfter) || retryAfter<0) throw Error('code_pool_response_invalid');
     const delay = Math.max(4000, retryAfter*1000);

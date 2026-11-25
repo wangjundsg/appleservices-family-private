@@ -263,3 +263,44 @@ test("pollCode gives up with a reason that names the inbox size", async () => {
   assert.equal(hit.ok, false);
   assert.match(hit.error, /no matching mail/);
 });
+
+test('strict matching rejects lookalike sender, excluded IDs and window boundaries', () => {
+  const since = Date.parse('2026-11-13T00:59:00Z');
+  const until = Date.parse('2026-11-13T01:01:00Z');
+  const message = plainMail({subject:'Verify your email', body:'002026'});
+  const options = {mailbox:MAILBOX, since, until, excluded:[]};
+  assert.equal(graph.pickCode([message], options).code, '002026');
+  for (const change of [{from:'code@evilapple.com'}, {receivedDateTime:new Date(since).toISOString()},
+    {receivedDateTime:new Date(until+1).toISOString()}]) {
+    assert.equal(graph.pickCode([{...message, ...change}], options), null);
+  }
+  assert.equal(graph.pickCode([message], {...options, excluded:[message.id]}), null);
+});
+
+test('latest verification mail cannot fall back to an old code or guess among candidates', () => {
+  const old = plainMail({id:'old', subject:'Verify your email', body:'111111'});
+  const latest = {...old, id:'latest', receivedDateTime:'2026-11-13T01:01:00Z'};
+  assert.throws(() => graph.pickCode([old, {...latest, body:'No code'}], {mailbox:MAILBOX}), /code_unrecognized/);
+  assert.throws(() => graph.pickCode([old, {...latest, body:'002026 333333'}], {mailbox:MAILBOX}), /code_ambiguous/);
+  assert.throws(() => graph.pickCode([old, {...old,id:'same-time'}], {mailbox:MAILBOX}), /code_ambiguous/);
+});
+
+test('forwarding polls the real inbox but matches only the explicit target recipient', async () => {
+  const file = tokenFile();
+  const recipient = 'alias@icloud.com';
+  const hit = await graph.pollCode({file, mailbox:MAILBOX, recipient,
+    since:Date.parse('2026-11-13T00:59:00Z'), until:Date.parse('2026-11-13T01:01:00Z'),
+    excluded:['used'], intervalMs:1, timeoutMs:100,
+    fetchImpl:stubFetch({pages:[[graphMail({id:'wrong',to:[MAILBOX]}),
+      graphMail({id:'used',to:[recipient]}),graphMail({id:'target',to:[recipient]})]]})});
+  assert.equal(hit.messageId,'target');
+  const mismatch = await graph.pollCode({file,mailbox:'other@hotmail.com',recipient,
+    fetchImpl:async()=>assert.fail('wrong inbox must not exchange tokens')});
+  assert.equal(mismatch.error,'graph_mailbox_mismatch');
+});
+
+test('polling defaults to the exact challenge time without a backwards allowance', async () => {
+  const hit = await graph.pollCode({file:tokenFile(), since:Date.parse('2026-11-13T01:00:30Z'),
+    intervalMs:1, timeoutMs:15, fetchImpl:stubFetch({pages:[[graphMail()]]})});
+  assert.equal(hit.ok,false);
+});

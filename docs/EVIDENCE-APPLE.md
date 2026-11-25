@@ -84,10 +84,10 @@ bin/*.exe                     登录/条款/保活程序
 | 现象 | 根因 |
 | --- | --- |
 | Continue 一直灰、日志出现 `click-timeout` | 密码缺特殊字符 |
-| 提交后 iframe 消失 | 是成功，不是失败（`likely_success`） |
+| 提交后 iframe 消失 | 结果待核实（`likely_success`），不能单独证明账号已创建，不重放提交 |
 | 界面国家码变成 US，但号码是英国 | 控件水合重置，需填完读回 |
 | 两次图形码被拒后紧接着硬拒 | 验证码质量拖累，换手工/换服务 |
-| `423 tooManyCodesSent` | 2FA 取码太频繁，等 15~60 分钟 |
+| HTTP 423 / `tooManyCodesSent` | 先核对请求阶段、状态与响应布尔字段；423 本身不证明根因，也没有固定恢复时间。停止重复发码/登录，保留原任务待核实 |
 | 退号返回 `EARLY_CANCEL_DENIED` | 120 秒冷却，挂账后 sweep |
 | 邮箱收不到苹果的信 | 域名问题：`outlook.com` 被拒；`qq.com`/`hotmail.com` 可用 |
 

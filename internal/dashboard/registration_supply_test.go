@@ -99,6 +99,7 @@ func TestMailboxSelectionChecksAuthorizationAndLocalReservation(t *testing.T) {
 			{"address": "blocked@hotmail.com", "reader": "graph", "status": "ok", "authorization_status": "invalid"},
 			{"address": "unsupported@outlook.com", "reader": "graph", "status": "ok", "authorization_status": "ready"},
 			{"address": "used@hotmail.com", "reader": "graph", "status": "ok", "authorization_status": "ready"},
+			{"address": "legacy@hotmail.com", "reader": "graph", "status": "ok", "authorization_status": "ready"},
 			{"address": "ready@hotmail.com", "reader": "graph", "status": "ok", "authorization_status": "ready"},
 		})
 	}))
@@ -107,6 +108,7 @@ func TestMailboxSelectionChecksAuthorizationAndLocalReservation(t *testing.T) {
 	_ = writeRegisterJSON(client, map[string]string{"baseUrl": pool.URL, "apiToken": "fixture"})
 	folder := registerFixture(t, s, pipelineReceipt{Status: "failed"})
 	_ = writeRegisterJSON(filepath.Join(folder, "request.json"), map[string]string{"email": "USED@hotmail.com"})
+	_ = writeRegisterJSON(filepath.Join(s.config.RepoRoot, ".cache", "mailbox-usage.json"), map[string]string{"LEGACY@hotmail.com": "2026-11-14T00:00:00Z"})
 	body := registerRequest{}
 	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client}); err != nil {
 		t.Fatal(err)
@@ -118,6 +120,21 @@ func TestMailboxSelectionChecksAuthorizationAndLocalReservation(t *testing.T) {
 	s.accounts = append(s.accounts, &Account{AppleID: "used@hotmail.com"})
 	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client}); err == nil {
 		t.Fatal("reused occupied mailbox")
+	}
+}
+
+func TestMailboxSelectionStopsOnCorruptLegacyUsage(t *testing.T) {
+	s := registerTestServer(t)
+	t.Setenv("SMS_API_KEY", "fixture-only")
+	client := filepath.Join(s.config.RepoRoot, "client.json")
+	_ = writeRegisterJSON(client, map[string]string{"baseUrl": "http://127.0.0.1:1", "apiToken": "fixture"})
+	file := filepath.Join(s.config.RepoRoot, ".cache", "mailbox-usage.json")
+	_ = os.MkdirAll(filepath.Dir(file), 0700)
+	for _, contents := range []string{"broken", "null", "[]"} {
+		_ = os.WriteFile(file, []byte(contents), 0600)
+		if err := s.prepareAutomaticRegistration(&registerRequest{}, registerSettings{CodePoolConfig: client}); err == nil || !strings.Contains(err.Error(), "旧邮箱占用") {
+			t.Fatal("corrupt legacy usage did not stop before network access", err)
+		}
 	}
 }
 
