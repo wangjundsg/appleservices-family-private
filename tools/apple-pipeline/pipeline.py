@@ -104,8 +104,16 @@ def job_path(job):
     return STATE / job
 
 
+def account_country(cfg):
+    country = cfg.get("account_country", "US")
+    if not isinstance(country, str) or country not in COUNTRIES:
+        raise PipelineError("unsupported_account_country", "usage")
+    return COUNTRIES[country]
+
+
 def validate(cfg):
     job_path(cfg.get("job_id"))
+    account_country(cfg)
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", cfg.get("email", "")):
         raise PipelineError("email_required", "usage")
     if cfg["email"].rsplit("@", 1)[1].lower() in {"outlook.com", "icloud.com"}:
@@ -491,6 +499,7 @@ class Job:
                 thread.join(timeout=2)
 
     def create(self):
+        country = account_country(self.cfg)
         self.number()
         sms, roxy = self.cfg["sms"], self.cfg["roxy"]
         if sms.get("auto_purchase") and not sms.get("can_get_another_sms"):
@@ -509,7 +518,7 @@ class Job:
             if not str(port).isdigit() or not 0 < int(port) < 65536:
                 raise PipelineError("browser_port_missing")
             inp = {"email": self.cfg["email"], "password": self.cfg["password"], "phone": str(sms["phone"]),
-                   "country": COUNTRIES[self.cfg.get("account_country") or sms["phonecc"]],
+                   "country": country,
                    "phonecc": sms["phonecc"], "activation": str(sms["activation"]), "hero-key": sms["key"],
                    "sms-api": sms.get("api", "https://api.grizzlysms.com/stubs/handler_api.php"),
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],

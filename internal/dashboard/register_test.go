@@ -198,6 +198,13 @@ func TestRegisterRunsExistingPipelineWithoutSecretArguments(t *testing.T) {
 		JobID string `json:"jobId"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &answer)
+	var manifest map[string]any
+	if err := readRegisterJSON(filepath.Join(s.registerFolder(answer.JobID), "request.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest["account_country"] != "US" {
+		t.Fatal("ordinary registration did not retain the US account region")
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for s.registerView(answer.JobID)["exitCode"].(*int) == nil && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)

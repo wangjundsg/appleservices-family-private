@@ -431,6 +431,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		}
 	}
 	manifest := map[string]any{"job_id": id, "email": body.Email, "password": body.Password, "accept_terms": true,
+		"account_country":     "US",
 		"registration_method": method,
 		"registrationMethod":  method,
 		"family":              body.Family,

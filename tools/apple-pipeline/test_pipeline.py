@@ -357,4 +357,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(data["country"],"USA")
         self.assertEqual(data["phonecc"],"GB")
 
+    def test_default_account_region_is_us_with_foreign_phone(self):
+        with patch.object(self.job,"forge",return_value={"dirId":"fixture-browser","debuggingPort":12345}),patch.object(self.job,"process",return_value=(0,{})),patch.object(self.job,"cleanup_browser"):
+            self.job.create()
+        data=p.read(self.root/"create-input.json")
+        self.assertEqual(data["country"],"USA")
+        self.assertEqual(data["phonecc"],"GB")
+
+    def test_invalid_account_region_stops_before_number_or_browser(self):
+        self.job.cfg["account_country"]="not-a-region"
+        with self.assertRaisesRegex(p.PipelineError,"unsupported_account_country"):
+            p.validate(self.job.cfg)
+        with patch.object(self.job,"number") as number,patch.object(self.job,"forge") as forge:
+            with self.assertRaisesRegex(p.PipelineError,"unsupported_account_country"):
+                self.job.create()
+        number.assert_not_called()
+        forge.assert_not_called()
+
 if __name__ == "__main__": unittest.main()
