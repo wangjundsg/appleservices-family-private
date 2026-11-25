@@ -410,7 +410,7 @@ class Job:
         if key != self.status.get("number_ref"):
             self.update(number_owned=True, number_ref=key, refund_attempts=0, refund_pending=False, refund_confirmed=False, refund_after=None)
 
-    def next_code(self):
+    def next_code(self, before_consume=None):
         previous = self.folder / "used-codes.json"
         used = read(previous) if previous.exists() else []
         created = self.folder / "create-sms.txt"
@@ -421,6 +421,7 @@ class Job:
             self.supply().otp_received(self.cfg["sms"]["supply_operation"])
         code = code.split(":")[1]
         if code in used: return ""
+        if before_consume is not None: before_consume(code)
         atomic(previous, used + [code])
         return code
 
@@ -914,8 +915,84 @@ class Job:
         except PipelineError as error:
             if error.reason in {"input_not_ready", "input_path_missing", "input_empty",
                                 "input_predates_challenge", "input_malformed"}:
+                if (self.cfg.get("protocol") or {}).get("auto_codes") is True and self.fetch_protocol_input(kind):
+                    code, _ = self._parse_input(kind)
+                    return {kind:code}
                 return {}  # keep waiting; nothing was consumed
             raise
+
+    def fetch_protocol_input(self, kind):
+        """One bounded read for this challenge; never send/resend a verification code."""
+        challenge=self.active_challenge(kind) or {}
+        identity=challenge.get("id","")
+        if (self.method!="protocol" or self.challenge_kind_for(self.status.get("stage"))!=kind
+                or challenge.get("job_id")!=self.cfg["job_id"] or not isinstance(identity,str)
+                or not re.fullmatch(r"[a-f0-9]{32}",identity)):
+            raise PipelineError("automatic_input_binding_invalid","needs_review")
+        try: since=timestamp(challenge.get("sent_at") or "")
+        except (ValueError,TypeError,AttributeError):
+            raise PipelineError("challenge_send_time_invalid","needs_review") from None
+        if not 0<=time.time()-since<=86400: raise PipelineError("challenge_send_time_invalid","needs_review")
+        self.check_cancel()
+        target=self._input_path(kind)
+        result=self.folder/"auto-codes"/(identity+".json")
+        result.parent.mkdir(parents=True,exist_ok=True)
+        seen_path=self.folder/"seen-protocol-mail.json"
+        seen=[]
+        if kind=="email":
+            try: seen=read(seen_path) if seen_path.exists() else []
+            except (OSError,ValueError): raise PipelineError("mail_exclusions_invalid","needs_review") from None
+            if not isinstance(seen,list) or len(seen)>=100 or any(not isinstance(x,str) or not x or len(x)>2048 for x in seen):
+                raise PipelineError("mail_exclusions_invalid","needs_review")
+        if not result.exists():
+            if kind=="email":
+                source=self.cfg.get("code_pool_config") or self.cfg.get("graph_token_file")
+                if not source:return False
+                request={"reader":"outlook" if self.cfg.get("code_pool_config") else "graph","file":source,
+                         "mailbox":self.cfg["email"],"since":since*1000,"excluded":seen,
+                         "challenge_id":identity,"output":str(result.resolve())}
+                try:
+                    process=subprocess.run(["node",str(ROOT/"tools/capture/protocol-mail.cjs")],input=json.dumps(request),
+                        text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,cwd=ROOT,timeout=35)
+                    reply=json.loads(process.stdout)
+                except (OSError,ValueError,subprocess.TimeoutExpired):
+                    raise PipelineError("protocol_mail_read_failed","needs_review") from None
+                if process.returncode!=0 or not isinstance(reply,dict) or type(reply.get("found")) is not bool:
+                    raise PipelineError("protocol_mail_read_failed","needs_review")
+                if reply.get("found") is not True:return False
+            else:
+                if not self.cfg["sms"].get("activation"):raise PipelineError("automatic_input_binding_invalid","needs_review")
+                code=self.next_code(before_consume=lambda code:atomic(result,{"challenge_id":identity,"code":code,
+                    "activation":str(self.cfg["sms"]["activation"])}))
+                if not code:return False
+        self.check_cancel()
+        try: saved=read(result)
+        except (OSError,ValueError): raise PipelineError("automatic_input_binding_invalid","needs_review") from None
+        if not isinstance(saved,dict) or saved.get("challenge_id")!=identity or not isinstance(saved.get("code"),str) or not re.fullmatch(r"[0-9]{6}",saved["code"]):
+            raise PipelineError("automatic_input_binding_invalid","needs_review")
+        if kind=="email":
+            try: received=timestamp(saved.get("received_at") or "")
+            except (ValueError,TypeError,AttributeError):
+                raise PipelineError("automatic_input_binding_invalid","needs_review") from None
+            if not since<received<=time.time()+60 or not isinstance(saved.get("message_id"),str) or not saved["message_id"] or len(saved["message_id"])>2048:
+                raise PipelineError("automatic_input_binding_invalid","needs_review")
+            if saved["message_id"] not in seen:atomic(seen_path,seen+[saved["message_id"]])
+        elif saved.get("activation")!=str(self.cfg["sms"].get("activation")):
+            raise PipelineError("automatic_input_binding_invalid","needs_review")
+        # A manual code may have arrived while the mailbox call was pending.
+        try:
+            self._parse_input(kind)
+            return True
+        except PipelineError as error:
+            if error.reason not in {"input_not_ready","input_empty","input_predates_challenge","input_malformed"}:raise
+        target.parent.mkdir(parents=True,exist_ok=True)
+        temporary=target.with_name(target.name+"."+secrets.token_hex(8)+".tmp")
+        try:
+            with open(temporary,"x",encoding="utf8") as stream:
+                os.chmod(temporary,0o600);stream.write(saved["code"]);stream.flush();os.fsync(stream.fileno())
+            os.replace(temporary,target)
+        finally:temporary.unlink(missing_ok=True)
+        return True
 
     def policy_view(self):
         """The facts the decision table needs, and nothing else."""
@@ -1074,17 +1151,20 @@ class Job:
         """
         return self._parse_input(kind)
 
-    def _parse_input(self, kind):
-        """Shared validation: path, freshness, shape, binding. No side effects."""
+    def _input_path(self, kind):
         key = {"email": "emailCode", "phone": "phoneCode"}.get(kind)
         if key is None:
             raise PipelineError("unknown_input_kind", "usage")
         raw = (self.cfg.get("protocol") or {}).get(key) or self.cfg.get(key)
-        if not raw:
-            raise PipelineError("input_path_missing", "usage")
+        if not raw:raw=self.folder/"protocol"/(kind+"-code.txt")
         path = Path(raw).resolve()
         if self.folder.resolve() not in path.parents:
             raise PipelineError("input_outside_task", "usage")
+        return path
+
+    def _parse_input(self, kind):
+        """Shared validation: path, freshness, shape, binding. No side effects."""
+        path=self._input_path(kind)
         if not path.is_file():
             raise PipelineError("input_not_ready", "waiting_input")
         challenge = self.active_challenge(kind) or {}
