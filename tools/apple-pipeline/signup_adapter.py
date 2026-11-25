@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -119,7 +120,7 @@ class SignupAdapter:
         self.binary = binary or os.environ.get("APPLESERVICES_SIGNUP_BIN") or "bin/signup.exe"
 
     # -- process ----------------------------------------------------------
-    def _run(self, context: ExecutorContext, args: list[str]) -> tuple[int, dict]:
+    def _run(self, context: ExecutorContext, args: list[str], password: str) -> tuple[int, dict]:
         path = Path(self.binary)
         if not path.is_file():
             raise AdapterError("protocol_adapter_missing")
@@ -127,6 +128,8 @@ class SignupAdapter:
         command = ([sys.executable, str(path)] if path.suffix == ".py" else [str(path)]) + args
         env = dict(os.environ)
         env.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)  # never re-enter
+        env.pop("YESCAPTCHA_KEY", None)  # a site challenge requires user interaction
+        env["APPLESERVICES_SIGNUP_PASSWORD"] = password
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                                    env=env)
@@ -141,46 +144,77 @@ class SignupAdapter:
             line = line.strip()
             if line.startswith("{"):
                 try:
-                    receipt = json.loads(line)
+                    candidate = json.loads(line)
+                    if isinstance(candidate, dict):
+                        receipt = candidate
                 except ValueError:
                     continue
         return code, receipt
 
     def _outcome(self, context: ExecutorContext, code: int, receipt: Mapping[str, Any]) -> dict:
+        for field, expected, reason in (("job_id", context.job_id, "outcome_job_mismatch"),
+                                        ("account", context.account, "outcome_account_mismatch"),
+                                        ("run_id", context.run_id, "outcome_run_mismatch")):
+            if field in receipt and receipt[field] != expected:
+                raise AdapterError(reason, "reconcile")
         base = {"schema": OUTCOME_SCHEMA, "job_id": context.job_id, "account": context.account,
                 "run_id": context.run_id, "action": context.action,
                 "executor_revision": receipt.get("revision") or ""}
         if code == 4:
-            return {**base, "outcome": "waiting_input",
+            return {**base, "outcome": "waiting_input", "state": "waiting_input", "stage": receipt.get("stage") or "",
                     "registration_phase": receipt.get("stage") or "",
                     "challenge": receipt.get("challenge") or {},
                     "verification_id": receipt.get("verificationId") or ""}
         if code == 0 and receipt.get("accountExists") is True:
-            return {**base, "outcome": "registered", "evidence_ref": receipt.get("evidenceRef") or ""}
+            try:
+                saved = json.loads(Path(context.state_path).read_text(encoding="utf-8-sig"))
+                confirmed = (saved.get("email", "").strip().lower() == context.account.strip().lower()
+                             and saved.get("registrationMethod") == "protocol" and saved.get("created") is True
+                             and saved.get("status") == "ready"
+                             and saved.get("operations", {}).get("finalize", {}).get("status") == "succeeded")
+            except (OSError, ValueError, AttributeError):
+                confirmed = False
+            if not confirmed or receipt.get("ok") is not True or receipt.get("state") != "ready":
+                raise AdapterError("creation_evidence_unconfirmed", "reconcile")
+            return {**base, "outcome": "registered", "state": "ready", "evidence_ref": receipt.get("evidenceRef") or ""}
         if code == 0 and receipt.get("accountExists") is False:
             return {**base, "outcome": "not_applied", "failure": receipt.get("reason") or ""}
-        return {**base, "outcome": "inconclusive",
-                "failure": receipt.get("reason") or f"executor_exit_{code}",
+        reason = receipt.get("reason")
+        reason = reason if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{1,80}", reason) else f"executor_exit_{code}"
+        return {**base, "outcome": "inconclusive", "status": "needs_review", "reason": reason,
+                "failure": reason,
                 "http_status": receipt.get("httpStatus")}
 
-    def _invoke(self, context: ExecutorContext, args: list[str]) -> dict:
-        code, receipt = self._run(context, args)
+    def _invoke(self, context: ExecutorContext, args: list[str], password: str) -> dict:
+        if not isinstance(password, str) or not password:
+            raise AdapterError("protocol_password_required")
+        code, receipt = self._run(context, args, password)
         return validate_outcome(self._outcome(context, code, receipt), context)
 
     # -- adapter API ------------------------------------------------------
     def create(self, job) -> dict:
-        context = ExecutorContext.from_job(job)
-        return self._invoke(context, ["-registration-method", "protocol", "-stage", "all",
-                                      "-state", context.state_path, "-json"])
+        context = replace(ExecutorContext.from_job(job), action="create")
+        return self._invoke(context, self._arguments(job, context), job.cfg.get("password"))
+
+    def _arguments(self, job, context):
+        sms = job.cfg.get("sms") or {}
+        countries = {"US": "USA", "CN": "CHN"}
+        country = countries.get(job.cfg.get("account_country") or "US")
+        if not country:
+            raise AdapterError("protocol_account_country_unsupported")
+        args = ["-registration-method", "protocol", "-stage", "all", "-state", context.state_path, "-json",
+                "-email", context.account, "-country", country, "-phone", str(sms.get("phone") or ""),
+                "-phonecc", str(sms.get("phonecc") or ""), "-device-dir", context.device_dir,
+                "-captcha-dump", context.captcha_path, "-email-code-file", context.email_code_path,
+                "-phone-code-file", context.phone_code_path]
+        for key in ("first", "last", "birthday"):
+            if job.cfg.get(key):
+                args += ["-" + key, str(job.cfg[key])]
+        return args
 
     def resume(self, job, inputs=None) -> dict:
-        context = ExecutorContext.from_job(job)
-        args = ["-registration-method", "protocol", "-stage", "all",
-                "-state", context.state_path, "-json"]
-        for kind, path in (("email", context.email_code_path), ("phone", context.phone_code_path)):
-            if inputs and kind in inputs:
-                args += [f"-{kind}-code-file", str(path)]
-        return self._invoke(context, args)
+        context = replace(ExecutorContext.from_job(job), action="resume")
+        return self._invoke(context, self._arguments(job, context), job.cfg.get("password"))
 
     def cancel(self, job) -> dict:
         context = ExecutorContext.from_job(job)

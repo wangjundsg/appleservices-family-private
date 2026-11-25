@@ -14,15 +14,18 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import signup_adapter as sa
+import pipeline
 
 
 class FakeJob:
     def __init__(self, folder: Path, **status):
         self.folder = folder
         self.method = "protocol"
-        self.cfg = {"job_id": "reg-1", "email": "fixture@example.test",
+        self.cfg = {"job_id": "reg-1", "email": "fixture@example.test", "password": "Fixture-only123!",
+                    "account_country": "US", "sms": {"phone": "7700900123", "phonecc": "GB"},
                     "protocol": {"emailCode": str(folder / "email-code.txt"),
                                  "phoneCode": str(folder / "phone-code.txt")}}
         self.status = {"job_id": "reg-1", "stage": "create", "status": "queued",
@@ -59,11 +62,15 @@ class AdapterContractTest(unittest.TestCase):
     def test_exit_zero_with_bound_evidence_is_registered(self):
         adapter = self.adapter(
             """
-            import json
-            print(json.dumps({"ok": True, "accountExists": True, "evidenceRef": "e-1"}))
+            import json,sys,pathlib
+            p=pathlib.Path(sys.argv[sys.argv.index('-state')+1]);p.parent.mkdir(parents=True,exist_ok=True)
+            p.write_text(json.dumps({'email':'fixture@example.test','created':True,'status':'ready',
+                'registrationMethod':'protocol','operations':{'finalize':{'status':'succeeded'}}}))
+            print(json.dumps({"ok": True, "accountExists": True, "state":"ready", "evidenceRef": "e-1"}))
             """)
         outcome = adapter.create(FakeJob(self.folder))
         self.assertEqual(outcome["outcome"], "registered")
+        self.assertEqual(outcome["state"], "ready")
 
     def test_other_exit_is_inconclusive(self):
         adapter = self.adapter(
@@ -100,13 +107,68 @@ class AdapterContractTest(unittest.TestCase):
             import json
             print(json.dumps({"ok": True, "accountExists": True, "job_id": "another-job"}))
             """)
-        # The adapter stamps the receipt with its own binding, so a receipt cannot
-        # claim another task: validate_outcome must reject a mismatched one.
-        context = sa.ExecutorContext.from_job(FakeJob(self.folder))
         with self.assertRaises(sa.AdapterError) as caught:
-            sa.validate_outcome({"schema": 1, "job_id": "another-job", "account": "x@y.z",
-                                 "run_id": context.run_id, "outcome": "registered"}, context)
+            adapter.create(FakeJob(self.folder))
         self.assertEqual(caught.exception.reason, "outcome_job_mismatch")
+
+    def test_success_without_private_creation_evidence_stops(self):
+        adapter = self.adapter('import json;print(json.dumps({"ok":True,"accountExists":True,"state":"ready"}))')
+        with self.assertRaises(sa.AdapterError) as caught:
+            adapter.create(FakeJob(self.folder))
+        self.assertEqual(caught.exception.reason, "creation_evidence_unconfirmed")
+
+    def test_cli_contract_and_password_transport(self):
+        adapter = self.adapter('''
+            import json,sys,os
+            args=sys.argv
+            assert args[args.index('-email')+1]=='fixture@example.test'
+            assert args[args.index('-country')+1]=='USA'
+            assert args[args.index('-phonecc')+1]=='GB'
+            assert args[args.index('-phone')+1]=='7700900123'
+            assert os.environ['APPLESERVICES_SIGNUP_PASSWORD']=='Fixture-only123!'
+            assert 'Fixture-only123!' not in args
+            assert not os.environ.get('YESCAPTCHA_KEY')
+            assert '-device-dir' in args and '-email-code-file' in args
+            print(json.dumps({'state':'waiting_input','stage':'email-sent'}))
+            raise SystemExit(4)
+        ''')
+        outcome=adapter.create(FakeJob(self.folder))
+        self.assertEqual(outcome.get('state'),'waiting_input')
+        self.assertEqual(outcome.get('stage'),'email-sent')
+
+    def test_actual_adapter_waiting_reaches_pipeline_without_new_resource_requests(self):
+        adapter=self.adapter('''
+            import json
+            print(json.dumps({'state':'waiting_input','stage':'email-sent'}))
+            raise SystemExit(4)
+        ''')
+        cfg=FakeJob(self.folder).cfg
+        cfg['registration_method']='protocol'
+        job=pipeline.Job(self.folder,cfg)
+        job.status['number_owned']=True
+        with patch.object(pipeline.adapter_registry,'resolve',return_value=adapter), patch.object(job,'number') as number:
+            self.assertTrue(job.protocol_step(action='create'))
+        number.assert_not_called()
+        self.assertEqual(job.status['status'],'waiting_input')
+        self.assertEqual(job.status['challenge']['kind'],'email')
+        self.assertFalse(job.status['account_created'])
+
+    def test_account_or_finalize_mismatch_cannot_be_registered(self):
+        adapter=self.adapter('import json;print(json.dumps({"ok":True,"accountExists":True,"state":"ready"}))')
+        job=FakeJob(self.folder)
+        state=Path(sa.ExecutorContext.from_job(job).state_path)
+        state.parent.mkdir(parents=True,exist_ok=True)
+        for change in ({'email':'foreign@example.test'},{'created':False},{'operations':{}},{'status':'unknown'}):
+            saved={'email':job.cfg['email'],'registrationMethod':'protocol','created':True,'status':'ready',
+                   'operations':{'finalize':{'status':'succeeded'}},**change}
+            state.write_text(json.dumps(saved),encoding='utf8')
+            with self.assertRaises(sa.AdapterError):adapter.create(job)
+
+    def test_missing_password_cannot_generate_a_different_account_password(self):
+        job=FakeJob(self.folder);job.cfg.pop('password')
+        with self.assertRaises(sa.AdapterError) as caught:
+            self.adapter('raise SystemExit(99)').create(job)
+        self.assertEqual(caught.exception.reason,'protocol_password_required')
 
     def test_unsupported_schema_is_rejected(self):
         context = sa.ExecutorContext.from_job(FakeJob(self.folder))
