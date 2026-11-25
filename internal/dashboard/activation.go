@@ -13,6 +13,7 @@ import (
 	"time"
 
 	appleservices "github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -165,6 +166,9 @@ func installAcceptedCheckpoint(source, destination string) error {
 }
 
 func (s *Server) activationAction(parent context.Context, account *Account, accept bool, approvedTuple string) control.Result {
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		return protectedResult()
+	}
 	if account == nil || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
 		return control.Result{Message: "请先完成账号密码与验证码验证", Stage: "activation-session"}
 	}

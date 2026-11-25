@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/accountguard"
 )
 
 type cnFamilyJob struct {
@@ -45,6 +47,9 @@ func saveCNFamilyJob(account *Account, job *cnFamilyJob) error {
 
 // Authorization and account-directory IDs only. Passwords remain in worker memory.
 func (s *Server) queueCNFamily(account *Account, organizer string, future bool) map[string]any {
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		return map[string]any{"ok": false, "reason": "account_protected", "message": accountguard.Message}
+	}
 	mother := s.lookup(organizer)
 	if account == nil || mother == nil || mother.ID == account.ID || s.registrationInProgress(mother) || !acceptedCheckpointReady(mother.Dir, mother.AppleID) {
 		return map[string]any{"ok": false, "reason": "family_organizer_not_ready"}
@@ -138,7 +143,7 @@ func (s *Server) runCNFamilyJobs(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if s.registrationInProgress(account) || s.pipelineAccount(account) {
+		if accountguard.Check(account.Dir) != nil || s.registrationInProgress(account) || s.pipelineAccount(account) {
 			continue
 		}
 		job := readCNFamilyJob(account)

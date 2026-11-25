@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -24,6 +25,10 @@ func (s *Server) serveCNFamily(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account := s.lookup(body.Account)
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		json.NewEncoder(w).Encode(protectedResult())
+		return
+	}
 	family := registrationFamily{Role: body.Role, Region: "CN", Organizer: body.Organizer, AcceptSubscription: body.Role == "organizer"}
 	respond := func(value any) {
 		if result, ok := value.(map[string]any); ok {

@@ -12,7 +12,9 @@ import (
 	"github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/gsa"
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
+	"github.com/Laky-64/appleservices/internal/privatefs"
 )
 
 var errVerificationRequired = errors.New("account verification is required; complete it in the dashboard")
@@ -74,34 +76,93 @@ func renewSession(begin func() (maintainedLogin, error), accountID string, regis
 	return renewSessionMode(begin, accountID, registration, true)
 }
 
+type renewalError struct {
+	stage string
+	err   error
+}
+
+func (e *renewalError) Error() string { return "session check failed at " + e.stage }
+func (e *renewalError) Unwrap() error { return e.err }
+
+type renewalStep struct {
+	Stage  string `json:"stage"`
+	Result string `json:"result"`
+}
+
 func renewSessionMode(begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration, register bool) (maintainedLogin, []appleservices.AccountDevice, error) {
+	return renewSessionObserved(begin, accountID, registration, register, func(string, string) {})
+}
+
+func renewSessionObserved(begin func() (maintainedLogin, error), accountID string, registration appleservices.DeviceRegistration, register bool, observe func(string, string)) (maintainedLogin, []appleservices.AccountDevice, error) {
+	fail := func(stage string, err error) (maintainedLogin, []appleservices.AccountDevice, error) {
+		observe(stage, "failed")
+		return nil, nil, &renewalError{stage, err}
+	}
+	stage := "session_restore"
+	if register {
+		stage = "password_authentication"
+	}
 	login, err := begin()
 	if err != nil {
-		return nil, nil, err
+		return fail(stage, err)
 	}
+	observe(stage, "completed")
 	if login.NeedsTwoFactor() {
-		return nil, nil, errVerificationRequired
+		return fail("authentication", errVerificationRequired)
 	}
 	client, err := login.Client()
 	if err != nil {
-		return nil, nil, err
+		return fail("service_session", err)
 	}
 	if client == nil || client.ADSID != accountID {
-		return nil, nil, errors.New("session renewal returned a different account")
+		return fail("account_binding", errors.New("account mismatch"))
 	}
+	observe("service_session", "available")
 	if register {
 		if err := login.RegisterDevice(registration); err != nil {
-			return nil, nil, err
+			return fail("device_registration", err)
 		}
+		observe("device_registration", "accepted")
 	}
 	devices, err := login.AccountDevices()
 	if err != nil {
-		return nil, nil, err
+		return fail("device_query", err)
 	}
+	observe("device_query", "server_verified")
 	if err := login.SaveSession(); err != nil {
-		return nil, nil, err
+		return fail("save_session", err)
 	}
+	observe("save_session", "saved")
 	return login, devices, nil
+}
+
+// Only fixed categories and numeric status are public; never emit Apple bodies,
+// transport URLs, credentials, tokens or arbitrary error text.
+func renewalDiagnostic(err error) (stage, reason string, httpStatus int) {
+	stage, reason = "unknown", "unconfirmed"
+	var step *renewalError
+	if errors.As(err, &step) {
+		stage = step.stage
+	}
+	var deviceErr *gsa.DeviceRequestError
+	var authErr *gsa.AuthenticationError
+	switch {
+	case errors.Is(err, accountguard.ErrBlocked):
+		reason = "account_protected"
+	case errors.Is(err, errVerificationRequired):
+		reason = "verification_required"
+	case errors.Is(err, appleservices.ErrDeviceIdentityRefreshRequired):
+		reason = "device_identity_missing"
+	case errors.Is(err, gsa.ErrAccountRepairRequired):
+		reason = "account_repair_required"
+	case errors.As(err, &deviceErr):
+		reason = "device_request_rejected"
+		httpStatus = deviceErr.HTTPStatus
+	case errors.As(err, &authErr):
+		reason = "authentication_rejected"
+		httpStatus = authErr.HTTPStatus
+	}
+	return
 }
 
 func validationFailure(err error) control.Result {
@@ -138,26 +199,33 @@ func verificationFailure(err error) (control.Result, bool) {
 }
 
 type runtimeStatus struct {
-	PID                     int       `json:"pid"`
-	Running                 bool      `json:"running"`
-	PushConnected           bool      `json:"push_connected"`
-	Authenticated           bool      `json:"authenticated"`
-	VerificationRequired    bool      `json:"verification_required"`
-	State                   string    `json:"state"`
-	UpdatedAt               time.Time `json:"updated_at"`
-	LastRefreshAt           time.Time `json:"last_refresh_at"`
-	LastDeviceQueryAt       time.Time `json:"last_device_query_at"`
-	DeviceCount             int       `json:"device_count"`
-	InstallationVisible     bool      `json:"installation_visible"`
-	RefreshCount            int       `json:"refresh_count"`
-	PairingUnsupported      bool      `json:"pairing_unsupported"`
-	PairingState            string    `json:"pairing_state,omitempty"`
-	PushReconnectCount      int       `json:"push_reconnect_count"`
-	UnsupportedNoticeCount  int       `json:"unsupported_notice_count"`
-	LastUnsupportedNoticeAt time.Time `json:"last_unsupported_notice_at,omitempty"`
-	PushIssue               string    `json:"push_issue,omitempty"`
-	FailureStage            string    `json:"failure_stage,omitempty"`
-	FailureReason           string    `json:"failure_reason,omitempty"`
+	PID                     int           `json:"pid"`
+	Running                 bool          `json:"running"`
+	PushConnected           bool          `json:"push_connected"`
+	Authenticated           bool          `json:"authenticated"`
+	VerificationRequired    bool          `json:"verification_required"`
+	State                   string        `json:"state"`
+	UpdatedAt               time.Time     `json:"updated_at"`
+	LastRefreshAt           time.Time     `json:"last_refresh_at"`
+	LastDeviceQueryAt       time.Time     `json:"last_device_query_at"`
+	DeviceCount             int           `json:"device_count"`
+	InstallationVisible     bool          `json:"installation_visible"`
+	RefreshCount            int           `json:"refresh_count"`
+	PairingUnsupported      bool          `json:"pairing_unsupported"`
+	PairingState            string        `json:"pairing_state,omitempty"`
+	PushReconnectCount      int           `json:"push_reconnect_count"`
+	UnsupportedNoticeCount  int           `json:"unsupported_notice_count"`
+	LastUnsupportedNoticeAt time.Time     `json:"last_unsupported_notice_at,omitempty"`
+	PushIssue               string        `json:"push_issue,omitempty"`
+	LastAttemptAt           time.Time     `json:"last_attempt_at"`
+	RenewalMode             string        `json:"renewal_mode,omitempty"`
+	RenewalStage            string        `json:"renewal_stage,omitempty"`
+	RenewalError            string        `json:"renewal_error,omitempty"`
+	RenewalHTTPStatus       int           `json:"renewal_http_status,omitempty"`
+	RenewalSteps            []renewalStep `json:"renewal_steps,omitempty"`
+	AutomaticRefreshPaused  bool          `json:"automatic_refresh_paused"`
+	FailureStage            string        `json:"failure_stage,omitempty"`
+	FailureReason           string        `json:"failure_reason,omitempty"`
 }
 
 func (s *runtimeStatus) setDevices(devices []appleservices.AccountDevice, name string) {
@@ -170,6 +238,9 @@ func (s *runtimeStatus) setDevices(devices []appleservices.AccountDevice, name s
 }
 
 func writeJSONFile(path string, value any) error {
+	if err := privatefs.EnsureDir(filepath.Dir(path)); err != nil {
+		return err
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -194,6 +265,11 @@ func writeJSONFile(path string, value any) error {
 }
 
 func (s *runtimeStatus) save(dir string) error {
+	if accountguard.Check(dir) != nil {
+		s.State = "account_locked"
+		s.Authenticated = false
+		s.FailureReason = "account_protected"
+	}
 	s.UpdatedAt = time.Now().UTC()
 	if err := writeJSONFile(filepath.Join(dir, "runtime.json"), s); err != nil {
 		return errors.New("could not save local runtime status")
@@ -225,7 +301,7 @@ func watchStop(ctx context.Context, cancel context.CancelFunc, dir string, pid i
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if stopRequested(dir, pid) {
+			if accountguard.Check(dir) != nil || stopRequested(dir, pid) {
 				cancel()
 				return
 			}

@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
+	"github.com/Laky-64/appleservices/internal/privatefs"
 )
 
 //go:embed web/*
@@ -58,53 +60,62 @@ type Server struct {
 	provisionMacPush func(context.Context, string) error
 }
 type Status struct {
-	PID                  int       `json:"pid"`
-	Running              bool      `json:"running"`
-	PushConnected        bool      `json:"push_connected"`
-	Authenticated        bool      `json:"authenticated"`
-	VerificationRequired bool      `json:"verification_required"`
-	State                string    `json:"state"`
-	UpdatedAt            time.Time `json:"updated_at"`
-	LastRefreshAt        time.Time `json:"last_refresh_at"`
-	LastDeviceQueryAt    time.Time `json:"last_device_query_at"`
-	DeviceCount          int       `json:"device_count"`
-	InstallationVisible  bool      `json:"installation_visible"`
-	RefreshCount         int       `json:"refresh_count"`
-	PairingUnsupported   bool      `json:"pairing_unsupported"`
-	PairingState         string    `json:"pairing_state,omitempty"`
-	PushReconnectCount   int       `json:"push_reconnect_count"`
-	PushIssue            string    `json:"push_issue,omitempty"`
-	FailureStage         string    `json:"failure_stage,omitempty"`
-	FailureReason        string    `json:"failure_reason,omitempty"`
+	PID                    int       `json:"pid"`
+	Running                bool      `json:"running"`
+	PushConnected          bool      `json:"push_connected"`
+	Authenticated          bool      `json:"authenticated"`
+	VerificationRequired   bool      `json:"verification_required"`
+	State                  string    `json:"state"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	LastRefreshAt          time.Time `json:"last_refresh_at"`
+	LastDeviceQueryAt      time.Time `json:"last_device_query_at"`
+	DeviceCount            int       `json:"device_count"`
+	InstallationVisible    bool      `json:"installation_visible"`
+	RefreshCount           int       `json:"refresh_count"`
+	PairingUnsupported     bool      `json:"pairing_unsupported"`
+	PairingState           string    `json:"pairing_state,omitempty"`
+	PushReconnectCount     int       `json:"push_reconnect_count"`
+	PushIssue              string    `json:"push_issue,omitempty"`
+	FailureStage           string    `json:"failure_stage,omitempty"`
+	FailureReason          string    `json:"failure_reason,omitempty"`
+	SessionVerified        bool      `json:"session_verified"`
+	Protected              bool      `json:"protected"`
+	LastAttemptAt          time.Time `json:"last_attempt_at"`
+	RenewalMode            string    `json:"renewal_mode,omitempty"`
+	RenewalStage           string    `json:"renewal_stage,omitempty"`
+	RenewalError           string    `json:"renewal_error,omitempty"`
+	RenewalHTTPStatus      int       `json:"renewal_http_status,omitempty"`
+	AutomaticRefreshPaused bool      `json:"automatic_refresh_paused"`
 }
 type view struct {
-	CNFamilyJob          *cnFamilyJob            `json:"cn_family_job,omitempty"`
-	CNFamilyDefault      *cnFamilyPolicy         `json:"cn_family_default,omitempty"`
-	PipelineManaged      bool                    `json:"pipeline_managed,omitempty"`
-	PipelineState        string                  `json:"pipeline_state,omitempty"`
-	Status               Status                  `json:"status"`
-	Devices              []control.Device        `json:"devices"`
-	Pending              *control.Pending        `json:"pending"`
-	CodeReady            bool                    `json:"code_ready"`
-	ControlReady         bool                    `json:"control_ready"`
-	Launching            bool                    `json:"launching"`
-	Message              string                  `json:"message"`
-	Account              string                  `json:"account"`
-	LoginAccount         string                  `json:"login_account,omitempty"`
-	Accounts             []AccountView           `json:"accounts,omitempty"`
-	Selected             string                  `json:"selected,omitempty"`
-	ICloudActivated      bool                    `json:"icloud_activated"`
-	Family               *control.FamilyInfo     `json:"family,omitempty"`
-	FamilyCheckedAt      string                  `json:"family_checked_at,omitempty"`
-	FamilyStale          bool                    `json:"family_stale"`
-	Storage              *icloud.StorageInfo     `json:"storage,omitempty"`
-	StorageCheckedAt     string                  `json:"storage_checked_at,omitempty"`
-	StorageStale         bool                    `json:"storage_stale"`
-	StoragePlan          *icloud.StoragePlanInfo `json:"storage_plan,omitempty"`
-	StoragePlanCheckedAt string                  `json:"storage_plan_checked_at,omitempty"`
-	StoragePlanStale     bool                    `json:"storage_plan_stale"`
-	HideMyEmailAvailable bool                    `json:"hide_my_email_available"`
-	ActivationReady      bool                    `json:"activation_ready"`
+	CNFamilyJob           *cnFamilyJob            `json:"cn_family_job,omitempty"`
+	CNFamilyDefault       *cnFamilyPolicy         `json:"cn_family_default,omitempty"`
+	PipelineManaged       bool                    `json:"pipeline_managed,omitempty"`
+	PipelineState         string                  `json:"pipeline_state,omitempty"`
+	Status                Status                  `json:"status"`
+	Devices               []control.Device        `json:"devices"`
+	Pending               *control.Pending        `json:"pending"`
+	CodeReady             bool                    `json:"code_ready"`
+	ControlReady          bool                    `json:"control_ready"`
+	Launching             bool                    `json:"launching"`
+	Message               string                  `json:"message"`
+	Account               string                  `json:"account"`
+	LoginAccount          string                  `json:"login_account,omitempty"`
+	Accounts              []AccountView           `json:"accounts,omitempty"`
+	Selected              string                  `json:"selected,omitempty"`
+	ICloudActivated       bool                    `json:"icloud_activated"`
+	Family                *control.FamilyInfo     `json:"family,omitempty"`
+	FamilyCheckedAt       string                  `json:"family_checked_at,omitempty"`
+	FamilyStale           bool                    `json:"family_stale"`
+	Storage               *icloud.StorageInfo     `json:"storage,omitempty"`
+	StorageCheckedAt      string                  `json:"storage_checked_at,omitempty"`
+	StorageStale          bool                    `json:"storage_stale"`
+	StoragePlan           *icloud.StoragePlanInfo `json:"storage_plan,omitempty"`
+	StoragePlanCheckedAt  string                  `json:"storage_plan_checked_at,omitempty"`
+	StoragePlanStale      bool                    `json:"storage_plan_stale"`
+	HideMyEmailAvailable  bool                    `json:"hide_my_email_available"`
+	ActivationReady       bool                    `json:"activation_ready"`
+	WorkerCapabilityState string                  `json:"worker_capability_state"`
 }
 type credentials struct {
 	AppleID   string `json:"apple_id"`
@@ -223,6 +234,10 @@ func (s *Server) addAccount(ctx context.Context, creds credentials) (control.Res
 		s.accountsMu.Unlock()
 		return control.Result{Message: err.Error()}, ""
 	}
+	if err := privatefs.EnsureDir(dir); err != nil {
+		s.accountsMu.Unlock()
+		return control.Result{Message: "无法保护账号目录权限"}, ""
+	}
 	// Each account gets isolated identity and provisioning state. An
 	// environment-mismatch response alone does not prove permanent damage.
 	if err := provisionIdentity(dir); err != nil {
@@ -325,7 +340,7 @@ func (s *Server) readStatusFrom(dir string) Status {
 			status.State = "stopped"
 		}
 	}
-	return status
+	return normalizeHealth(dir, status)
 }
 func (s *Server) owns(pid int) bool { return s.ownsIn(pid, s.config.Dir) }
 
@@ -418,6 +433,9 @@ func (s *Server) call(ctx context.Context, path string, body any, result any) er
 }
 
 func workerHTTPError(status int, data []byte, body any) error {
+	if status == http.StatusNotFound {
+		return errors.New("当前后台版本不支持此接口；需要受控升级，不能据此自动重登")
+	}
 	if status == http.StatusBadRequest {
 		if action, ok := body.(control.Action); ok && strings.HasPrefix(action.Action, "hme-") {
 			return errors.New("当前账号后台版本不支持隐私邮箱，请重新连接此账号完成升级")
@@ -434,6 +452,9 @@ func workerHTTPError(status int, data []byte, body any) error {
 }
 
 func (s *Server) callFor(ctx context.Context, dir, path string, body any, result any) error {
+	if path != "/view" && accountguard.Check(dir) != nil {
+		return accountguard.ErrBlocked
+	}
 	record, err := s.recordFor(dir)
 	if err != nil {
 		return err
@@ -498,6 +519,9 @@ func parseFamilyStatus(output string) (*control.FamilyInfo, error) {
 }
 
 func runFamilyStatus(ctx context.Context, helper string, account *Account, joinStorage bool) (*control.FamilyInfo, error) {
+	if account == nil || accountguard.Check(account.Dir) != nil {
+		return nil, accountguard.ErrBlocked
+	}
 	args := []string{"-dir", account.Dir, "-safe-json"}
 	if joinStorage {
 		args = append(args, "-join-shared-storage")
@@ -644,6 +668,9 @@ func (s *Server) resolveCachedFamilyOrganizer(currentAccount *Account, current *
 }
 
 func (s *Server) familyAction(ctx context.Context, account *Account, joinStorage bool) control.Result {
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		return protectedResult()
+	}
 	if account == nil || !acceptedCheckpointReady(account.Dir, account.AppleID) {
 		return control.Result{Message: "当前账号尚未完成 iCloud 激活", Stage: "family-preflight"}
 	}
@@ -707,6 +734,9 @@ func (s *Server) removeFamilyMember(ctx context.Context, organizer *Account, tar
 	target, err := familyRemovalTarget(organizer, targetID, accounts)
 	if err != nil {
 		return control.Result{Message: err.Error(), Stage: "family-binding"}
+	}
+	if accountguard.Check(organizer.Dir) != nil || accountguard.Check(target.Dir) != nil {
+		return protectedResult()
 	}
 	if !acceptedCheckpointReady(organizer.Dir, organizer.AppleID) || !acceptedCheckpointReady(target.Dir, target.AppleID) {
 		return control.Result{Message: "母号或目标成员尚未完成 iCloud 激活", Stage: "family-preflight"}
@@ -842,7 +872,16 @@ func (s *Server) snapshotFor(ctx context.Context, id string) view {
 			result.CodeReady = live.CodeReady
 			result.HideMyEmailAvailable = slices.Contains(live.Capabilities, "hide-my-email")
 			result.ControlReady = true
+			result.WorkerCapabilityState = "upgrade_required"
+			if slices.Contains(live.Capabilities, "health-v2") {
+				result.WorkerCapabilityState = "supported"
+			}
 		}
+	}
+	result.Status = normalizeHealth(dir, result.Status)
+	result.CodeReady = result.CodeReady && result.Status.SessionVerified && result.WorkerCapabilityState == "supported"
+	if !control.PendingFresh(result.Pending, time.Now()) || result.Status.Protected {
+		result.Pending = nil
 	}
 	return result
 }
@@ -882,6 +921,12 @@ func (s *Server) startSavedAccount(ctx context.Context, account *Account) contro
 }
 
 func (s *Server) startInMode(ctx context.Context, dir string, creds credentials, account *Account, resume bool) control.Result {
+	if accountguard.Check(dir) != nil {
+		return protectedResult()
+	}
+	if err := privatefs.EnsureDir(dir); err != nil {
+		return control.Result{Message: "无法保护账号目录权限"}
+	}
 	if s.registrationInProgress(account) && !s.waitingCNPayment(account) && ctx.Value(registrationContextKey{}) != true {
 		return control.Result{Message: "建号任务正在管理此账号，请先查看任务进度"}
 	}
@@ -1090,6 +1135,9 @@ func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
 		accounts := append([]*Account(nil), s.accounts...)
 		s.accountsMu.Unlock()
 		for _, account := range accounts {
+			if accountguard.Check(account.Dir) != nil {
+				continue
+			}
 			if s.registrationInProgress(account) && !s.waitingCNPayment(account) {
 				_ = s.stopIn(ctx, account.Dir)
 				continue
@@ -1260,6 +1308,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.serveCNFamily(w, r)
 			return
 		case r.Method == "POST" && r.URL.Path == "/api/action":
+			selectedAccount := s.lookup(r.URL.Query().Get("account"))
+			if selectedAccount != nil && accountguard.Check(selectedAccount.Dir) != nil {
+				json.NewEncoder(w).Encode(protectedResult())
+				return
+			}
 			var action control.Action
 			if !readJSON(w, r, &action) {
 				return
@@ -1309,6 +1362,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				cacheSafeActionResult(selected, &result)
 				json.NewEncoder(w).Encode(result)
 				return
+			}
+			if action.Action == "allow" || action.Action == "deny" {
+				var live control.View
+				if s.callFor(r.Context(), dir, "/view", nil, &live) != nil || !slices.Contains(live.Capabilities, "expiring-requests") || !control.PendingFresh(live.Pending, time.Now()) || live.Pending.ID != action.RequestID {
+					json.NewEncoder(w).Encode(control.Result{Stage: "request_expired_or_unsupported", Message: "登录请求已过期或后台不支持时效校验；未执行操作"})
+					return
+				}
 			}
 			if err := s.callFor(r.Context(), dir, "/action", action, &result); err != nil {
 				result.Message = err.Error()

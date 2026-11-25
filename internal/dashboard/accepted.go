@@ -11,6 +11,7 @@ import (
 
 	appleservices "github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 	"github.com/Laky-64/appleservices/nativeadi"
 	"howett.net/plist"
@@ -44,6 +45,9 @@ func acceptedCheckpointReady(dir, appleID string) bool {
 }
 
 func (s *Server) acceptedStorageAction(parent context.Context, account *Account, includePlans bool) control.Result {
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		return protectedResult()
+	}
 	if account == nil {
 		return control.Result{Message: "账号不存在", Stage: "accepted-checkpoint"}
 	}

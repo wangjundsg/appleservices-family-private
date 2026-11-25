@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Laky-64/appleservices/internal/control"
 )
@@ -123,7 +124,7 @@ func TestAccountPrivateControlKeepsRenamedLiveWorkerOnline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer controller.Close()
-	data, _ := json.Marshal(Status{PID: os.Getpid(), Running: true, Authenticated: true, PushConnected: true, State: "online"})
+	data, _ := json.Marshal(Status{PID: os.Getpid(), Running: true, Authenticated: true, PushConnected: true, State: "online", LastDeviceQueryAt: time.Now()})
 	if err := os.WriteFile(filepath.Join(accountDir, "runtime.json"), data, 0600); err != nil {
 		t.Fatal(err)
 	}

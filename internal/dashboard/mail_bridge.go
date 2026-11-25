@@ -3,7 +3,9 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,25 +16,53 @@ type mailBridgeAccount struct {
 	ID      string `json:"id"`
 	AppleID string `json:"apple_id"`
 	Ready   bool   `json:"ready"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 func (s *Server) mailBridgeReady(account *Account) bool {
-	if account == nil || s.registrationInProgress(account) || !acceptedCheckpointReady(account.Dir, account.AppleID) {
-		return false
+	ready, _ := s.mailBridgeStatus(account)
+	return ready
+}
+
+func (s *Server) mailBridgeStatus(account *Account) (bool, string) {
+	if account == nil {
+		return false, "account_missing"
+	}
+	if accountguard.Check(account.Dir) != nil {
+		return false, "account_protected"
+	}
+	if s.registrationInProgress(account) || !acceptedCheckpointReady(account.Dir, account.AppleID) {
+		return false, "checkpoint_unavailable"
 	}
 	status := s.accountStatus(account)
-	if !status.Running || !status.Authenticated {
-		return false
+	if !status.Running {
+		return false, "worker_stopped"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var live control.View
+	if s.callFor(ctx, account.Dir, "/view", nil, &live) != nil {
+		return false, "worker_control_unavailable"
+	}
+	if !slices.Contains(live.Capabilities, "mail-bridge-credentials") || !slices.Contains(live.Capabilities, "health-v2") {
+		return false, "worker_upgrade_required"
+	}
+	var liveStatus Status
+	if json.Unmarshal(live.Status, &liveStatus) != nil || liveStatus.PID != status.PID || !normalizeHealth(account.Dir, liveStatus).SessionVerified {
+		return false, "session_unverified"
+	}
+	if !live.BridgeCredentialsReady {
+		return false, "credentials_unavailable"
 	}
 	family, _, stale := readFamilyCache(account)
-	if family != nil && !stale {
-		return sharedFamilyReady(family)
+	if family == nil || stale || !sharedFamilyReady(family) {
+		return false, "family_unverified_or_stale"
 	}
-	// These durable receipts are written only after the full family readback.
-	if job := readCNFamilyJob(account); job != nil && job.State == "completed" {
-		return true
+	storage, stale := readStorageCache(account, storageCacheFile)
+	if storage == nil || stale || storage.Storage == nil || storage.Storage.TotalBytes < registrationPlanBytes {
+		return false, "storage_unverified_or_stale"
 	}
-	return s.readyFamilyOrganizer(account.ID)
+	return true, ""
 }
 
 func (s *Server) serveMailBridgeAccounts(w http.ResponseWriter, _ *http.Request) {
@@ -44,7 +74,8 @@ func (s *Server) serveMailBridgeAccounts(w http.ResponseWriter, _ *http.Request)
 		if strings.TrimSpace(account.AppleID) == "" {
 			continue
 		}
-		items = append(items, mailBridgeAccount{ID: account.ID, AppleID: account.AppleID, Ready: s.mailBridgeReady(account)})
+		ready, reason := s.mailBridgeStatus(account)
+		items = append(items, mailBridgeAccount{ID: account.ID, AppleID: account.AppleID, Ready: ready, Reason: reason})
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"accounts": items})
 }

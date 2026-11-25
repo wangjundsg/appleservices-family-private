@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -311,6 +312,9 @@ func (f registrationFamilyFlow) matchesRegion(action string) bool {
 }
 
 func (s *Server) registrationFamilyAction(ctx context.Context, account *Account, input handoffInput, action, plan string) map[string]any {
+	if account != nil && accountguard.Check(account.Dir) != nil {
+		return map[string]any{"ok": false, "reason": "account_protected", "message": accountguard.Message}
+	}
 	if account == nil || !acceptedCheckpointReady(account.Dir, account.AppleID) {
 		return map[string]any{"ok": false, "state": "unknown", "reason": "family_binding_invalid"}
 	}
@@ -329,6 +333,9 @@ func (s *Server) registrationFamilyAction(ctx context.Context, account *Account,
 		return result
 	}
 	f.family = func(target *Account, extra ...string) (*control.FamilyInfo, error) {
+		if target != nil && accountguard.Check(target.Dir) != nil {
+			return nil, accountguard.ErrBlocked
+		}
 		if len(extra) > 0 && extra[0] != "-verify-pool-member-dir" && extra[0] != "-join-shared-storage" {
 			var refresh control.Result
 			if s.callFor(ctx, target.Dir, "/action", control.Action{Action: "family-refresh-auth"}, &refresh) != nil || !refresh.OK {

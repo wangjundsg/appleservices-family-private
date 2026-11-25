@@ -22,8 +22,10 @@ import (
 	"github.com/Laky-64/appleservices/aps"
 	"github.com/Laky-64/appleservices/gsa"
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/circle"
 	"github.com/Laky-64/appleservices/internal/control"
+	"github.com/Laky-64/appleservices/internal/privatefs"
 	"github.com/Laky-64/appleservices/nativeadi"
 )
 
@@ -66,6 +68,12 @@ func run() (runErr error) {
 	autoActivation := flag.Bool("auto-activate", false, "owner-authorized web terms repair and device activation; may require SMS through the dashboard")
 	registerOnly := flag.Bool("register-only", false, "register this device, emit a receipt, and exit without approving requests")
 	flag.Parse()
+	if err := accountguard.Check(*dir); err != nil {
+		return err
+	}
+	if err := privatefs.EnsureDir(*dir); err != nil {
+		return err
+	}
 	if *background {
 		*controlAPI = true
 	}
@@ -292,6 +300,12 @@ func run() (runErr error) {
 		fmt.Fprintln(os.Stderr, "Local six-digit generation is available for the same device identity.")
 	}
 	generateCode := func(codeCtx context.Context) (string, error) {
+		if err := accountguard.Check(*dir); err != nil {
+			return "", err
+		}
+		if err := codeCtx.Err(); err != nil {
+			return "", err
+		}
 		if localADI != nil {
 			return localADI.Code(codeCtx)
 		}
@@ -299,6 +313,9 @@ func run() (runErr error) {
 	}
 	status.State = "signing_in"
 	if err := status.save(*dir); err != nil {
+		return err
+	}
+	if err := accountguard.Check(*dir); err != nil {
 		return err
 	}
 	var login *appleservices.Login
@@ -487,7 +504,8 @@ func run() (runErr error) {
 		return nil
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Could not verify account device status:", err)
+		status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = renewalDiagnostic(&renewalError{stage: "device_query", err: err})
+		fmt.Fprintf(os.Stderr, "Initial device check failed: stage=%s category=%s http=%d.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus)
 	} else {
 		status.setDevices(devices, *name)
 		if panel != nil {
@@ -517,14 +535,17 @@ func run() (runErr error) {
 	if err != nil {
 		status.State = "device_query_failed"
 	}
-	status.LastRefreshAt = time.Now().UTC()
+	// Startup is not a renewal. Device-query success has its own timestamp.
+	if err != nil {
+		status.Authenticated = false
+	}
 	if panel != nil {
 		panel.SetReady(!*listenOnly)
 	}
 	if err := status.save(*dir); err != nil {
 		return err
 	}
-	fmt.Printf("Session remains active; account renewal runs every %s.\n", *refreshEvery)
+	fmt.Printf("Existing-session checks are scheduled every %s; failed checks pause automatically.\n", *refreshEvery)
 	if *background {
 		fmt.Println("Background mode: closed stdin does not stop reception; requests are never approved automatically.")
 	}
@@ -535,6 +556,7 @@ func run() (runErr error) {
 	}
 	var pendingMu sync.Mutex
 	var pending string
+	var pendingAt time.Time
 	var pendingKind string
 	sendCircle := func(event aps.Event, response circle.Response) error {
 		sender, ok := active.(interface {
@@ -585,20 +607,33 @@ func run() (runErr error) {
 	}
 	refresh := time.NewTicker(*refreshEvery)
 	defer refresh.Stop()
+	if status.State == "device_query_failed" {
+		refresh.Stop()
+		status.AutomaticRefreshPaused = true
+		status.RenewalStage = "device_query"
+		_ = status.save(*dir)
+	}
+	// Maintenance checks the existing session only. Password authentication is
+	// exclusively an explicit login/validation operation, never a periodic retry.
 	beginRenewal := func() (maintainedLogin, error) {
-		if *resumeSession {
-			accepted, err := store.LoadAcceptedICloud()
-			if err != nil {
-				return nil, err
-			}
-			return appleservices.ResumeLogin(appleID, store, accepted, options...)
+		if err := accountguard.Check(*dir); err != nil {
+			return nil, err
 		}
-		return appleservices.BeginLogin(appleservices.Credentials{AppleID: appleID, Password: password}, store, options...)
+		return active, nil
 	}
 	renew := func() control.Result {
-		renewed, devices, err := renewSessionMode(beginRenewal, accountID, registration, !*resumeSession)
+		status.LastAttemptAt = time.Now().UTC()
+		status.RenewalMode = "saved_session_check"
+		status.RenewalSteps = nil
+		renewed, devices, err := renewSessionObserved(beginRenewal, accountID, registration, false, func(stage, result string) {
+			status.RenewalSteps = append(status.RenewalSteps, renewalStep{stage, result})
+		})
 		if err != nil {
-			status.State = "refresh_failed"
+			status.State, status.Authenticated = "refresh_failed", false
+			status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = renewalDiagnostic(err)
+			status.AutomaticRefreshPaused = true
+			// A failed check requires explicit inspection; do not loop on a 401.
+			refresh.Stop()
 			if errors.Is(err, gsa.ErrAccountRepairRequired) {
 				status.FailureReason = gsa.ErrAccountRepairRequired.Error()
 				status.Authenticated = false
@@ -612,6 +647,9 @@ func run() (runErr error) {
 			return control.Result{Message: "续登录失败，请检查登录状态"}
 		}
 		active = renewed
+		status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus = "complete", "", 0
+		status.AutomaticRefreshPaused = false
+		refresh.Reset(*refreshEvery)
 		status.State, status.Authenticated = "online", true
 		status.LastRefreshAt = time.Now().UTC()
 		status.RefreshCount++
@@ -649,6 +687,9 @@ func run() (runErr error) {
 		return hmeClient.List(actionCtx)
 	}
 	performAction := func(actionCtx context.Context, action, visibleRequestID, commandCode, commandLabel, commandNote string) control.Result {
+		if accountguard.Check(*dir) != nil {
+			return control.Result{Stage: "account_protected", Message: accountguard.Message}
+		}
 		if action == "hme-accept-terms" {
 			queryCtx, done := context.WithTimeout(actionCtx, 115*time.Second)
 			defer done()
@@ -1291,8 +1332,9 @@ func run() (runErr error) {
 		pendingMu.Lock()
 		transaction := pending
 		kind := pendingKind
+		receivedAt := pendingAt
 		pendingMu.Unlock()
-		if action != "code" && (transaction == "" || (visibleRequestID != "" && visibleRequestID != requestID(transaction))) {
+		if action != "code" && (!control.PendingFresh(&control.Pending{ReceivedAt: receivedAt}, time.Now()) || transaction == "" || (visibleRequestID != "" && visibleRequestID != requestID(transaction))) {
 			return control.Result{Message: "登录请求已取消或发生变化"}
 		}
 		code := ""
@@ -1320,6 +1362,9 @@ func run() (runErr error) {
 				return control.Result{Message: "无法保存配对进度"}
 			}
 			return control.Result{OK: true, Code: code, CodeKind: "circle", HideAt: time.Now().Add(time.Minute).UTC(), Message: "请在发起端输入此配对验证码"}
+		}
+		if action != "deny" && !control.SessionFresh(status.State, status.Authenticated, status.LastDeviceQueryAt, time.Now()) {
+			return control.Result{Stage: "session_unverified", Message: "当前会话未通过近期检查；未生成验证码"}
 		}
 		if action != "deny" {
 			generationCtx, stop := context.WithTimeout(ctx, 15*time.Second)
@@ -1440,9 +1485,9 @@ func run() (runErr error) {
 				return errVerificationRequired
 			}
 			if result.OK {
-				fmt.Printf("Session renewed. Device query succeeded: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
+				fmt.Printf("Existing-session check succeeded. Device query: count=%d, installation_visible=%t.\n", status.DeviceCount, status.InstallationVisible)
 			} else {
-				fmt.Fprintln(os.Stderr, "Session renewal failed; retaining the existing connection.")
+				fmt.Fprintf(os.Stderr, "Saved-session check failed: stage=%s category=%s http=%d; automatic checks paused.\n", status.RenewalStage, status.RenewalError, status.RenewalHTTPStatus)
 			}
 		case event := <-events:
 			if event.Unsupported {
@@ -1460,11 +1505,12 @@ func run() (runErr error) {
 			if event.Command == 100 {
 				preserveCircle := pending == event.TransactionID && pendingKind == "circle"
 				if pending != event.TransactionID {
+					pendingAt = time.Now().UTC()
 					pendingKind = ""
 				}
 				pending = event.TransactionID
 				if panel != nil && !preserveCircle {
-					panel.SetPending(&control.Pending{ID: requestID(pending), Kind: pendingKind, ReceivedAt: time.Now().UTC()})
+					panel.SetPending(&control.Pending{ID: requestID(pending), Kind: pendingKind, ReceivedAt: pendingAt})
 				}
 			}
 			if event.Command == 400 && pending == event.PreviousTransactionID {
@@ -1482,10 +1528,13 @@ func run() (runErr error) {
 						fmt.Fprintln(os.Stderr, "Circle initial request rejected; no approval or code exchange performed.")
 					} else if circles.pending(event.TransactionID) != nil {
 						pendingMu.Lock()
+						if pending != event.TransactionID {
+							pendingAt = time.Now().UTC()
+						}
 						pending = event.TransactionID
 						pendingKind = "circle"
 						if panel != nil {
-							panel.SetPending(&control.Pending{ID: requestID(pending), Kind: "circle", PairingID: requestID(event.CircleTransactionID), ReceivedAt: time.Now().UTC()})
+							panel.SetPending(&control.Pending{ID: requestID(pending), Kind: "circle", PairingID: requestID(event.CircleTransactionID), ReceivedAt: pendingAt})
 						}
 						pendingMu.Unlock()
 						status.PairingState = "awaiting_approval"

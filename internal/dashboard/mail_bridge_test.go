@@ -3,7 +3,9 @@ package dashboard
 import (
 	"encoding/json"
 	appleservices "github.com/Laky-64/appleservices"
+	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/control"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -61,7 +63,17 @@ func TestMailBridgeOnlyExportsReadyFamilyAccounts(t *testing.T) {
 	}
 	write("session.json", saved)
 	write("icloud-accepted.json", accepted)
-	write("runtime.json", Status{PID: os.Getpid(), Running: true, Authenticated: true})
+	controller, err := control.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	controller.SetBridgeCredentials(account.AppleID, "fixture-password")
+	controller.SetReady(true)
+	write("runtime.json", Status{PID: os.Getpid(), Running: true, Authenticated: true, State: "online", LastDeviceQueryAt: time.Now()})
+	if _, err := writeStorageCache(account, &icloud.StorageInfo{TotalBytes: 50 << 30}); err != nil {
+		t.Fatal(err)
+	}
 	family := &control.FamilyInfo{Member: true, Self: 1, Organizers: 1, StorageKnown: true, StorageParticipating: true, StorageAvailable: true, StorageEnabled: true, StorageBytes: 50 << 30}
 	if _, err := writeFamilyCache(account, family); err != nil {
 		t.Fatal(err)
@@ -69,6 +81,21 @@ func TestMailBridgeOnlyExportsReadyFamilyAccounts(t *testing.T) {
 	if !s.mailBridgeReady(account) {
 		t.Fatal("ready account not eligible")
 	}
+	// A live legacy worker with cached healthy data still cannot promise new IPC.
+	originalRecord, _ := os.ReadFile(filepath.Join(dir, "control.json"))
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := os.ReadFile(filepath.Join(dir, "runtime.json"))
+		json.NewEncoder(w).Encode(control.View{Status: data, CodeReady: true})
+	}))
+	write("control.json", control.Record{PID: os.Getpid(), URL: legacy.URL, Token: controller.Record.Token})
+	if ready, reason := s.mailBridgeStatus(account); ready || reason != "worker_upgrade_required" {
+		t.Fatal("legacy capabilities accepted")
+	}
+	legacy.Close()
+	if err := os.WriteFile(filepath.Join(dir, "control.json"), originalRecord, 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	family.StorageParticipating = false
 	if _, err := writeFamilyCache(account, family); err != nil {
 		t.Fatal(err)
@@ -78,12 +105,18 @@ func TestMailBridgeOnlyExportsReadyFamilyAccounts(t *testing.T) {
 	}
 	family.StorageParticipating = true
 	write("family-status.json", familyCacheRecord{Version: familyCacheVersion, AccountID: account.ID, CheckedAt: time.Now().Add(-time.Hour), Family: *family})
+	write("cn-family-job.json", cnFamilyJob{Account: account.ID, Organizer: "mother", State: "completed"})
 	if s.mailBridgeReady(account) {
-		t.Fatal("stale cache without completed receipt exported")
+		t.Fatal("stale cache with historical receipt exported")
 	}
 	if _, err := writeFamilyCache(account, family); err != nil {
 		t.Fatal(err)
 	}
+	write("storage-status.json", storageCacheRecord{Version: 1, AccountID: account.ID, CheckedAt: time.Now().Add(-time.Hour), Storage: &icloud.StorageInfo{TotalBytes: 50 << 30}})
+	if s.mailBridgeReady(account) {
+		t.Fatal("stale quota exported")
+	}
+	writeStorageCache(account, &icloud.StorageInfo{TotalBytes: 50 << 30})
 	write("runtime.json", Status{PID: os.Getpid(), Running: true, Authenticated: false})
 	if s.mailBridgeReady(account) {
 		t.Fatal("unauthenticated device exported")

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/icloud"
+	"github.com/Laky-64/appleservices/internal/accountguard"
+	"github.com/Laky-64/appleservices/internal/privatefs"
 )
 
 type Record struct {
@@ -39,11 +41,12 @@ type Pending struct {
 	ReceivedAt time.Time `json:"received_at"`
 }
 type View struct {
-	Status       json.RawMessage `json:"status"`
-	Devices      []Device        `json:"devices"`
-	Pending      *Pending        `json:"pending"`
-	CodeReady    bool            `json:"code_ready"`
-	Capabilities []string        `json:"capabilities,omitempty"`
+	Status                 json.RawMessage `json:"status"`
+	Devices                []Device        `json:"devices"`
+	Pending                *Pending        `json:"pending"`
+	CodeReady              bool            `json:"code_ready"`
+	Capabilities           []string        `json:"capabilities,omitempty"`
+	BridgeCredentialsReady bool            `json:"bridge_credentials_ready"`
 }
 type Action struct {
 	Action    string `json:"action"`
@@ -138,6 +141,9 @@ type Server struct {
 }
 
 func New(dir string) (*Server, error) {
+	if err := privatefs.EnsureDir(dir); err != nil {
+		return nil, err
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, errors.New("local control listener unavailable")
@@ -184,16 +190,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" && r.URL.Path == "/view" {
 		data, err := os.ReadFile(filepath.Join(s.dir, "runtime.json"))
 		var status struct {
-			PID int `json:"pid"`
+			PID               int       `json:"pid"`
+			State             string    `json:"state"`
+			Authenticated     bool      `json:"authenticated"`
+			LastDeviceQueryAt time.Time `json:"last_device_query_at"`
 		}
 		if err != nil || json.Unmarshal(data, &status) != nil || status.PID != s.Record.PID {
 			http.Error(w, `{"message":"starting"}`, 503)
 			return
 		}
 		s.mu.Lock()
-		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready, Capabilities: []string{"hide-my-email"}}
+		if !PendingFresh(s.pending, time.Now()) {
+			s.pending = nil
+		}
+		allowed := accountguard.Check(s.dir) == nil
+		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready && allowed && SessionFresh(status.State, status.Authenticated, status.LastDeviceQueryAt, time.Now()), Capabilities: []string{"hide-my-email", "health-v2", "mail-bridge-credentials", "expiring-requests"}, BridgeCredentialsReady: allowed && s.ready && s.bridgeCredentials.AppleID != "" && s.bridgeCredentials.Password != ""}
+		if !allowed {
+			view.Pending = nil
+		}
 		s.mu.Unlock()
 		json.NewEncoder(w).Encode(view)
+		return
+	}
+	if accountguard.Check(s.dir) != nil {
+		http.Error(w, `{"message":"account protected"}`, http.StatusLocked)
 		return
 	}
 	if r.Method == "POST" && r.URL.Path == "/bridge-credentials" {
@@ -217,6 +237,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"message":"unknown action"}`, 400)
 		return
+	}
+	if action.Action == "allow" || action.Action == "deny" {
+		valid := s.RequestFresh(action.RequestID)
+		if !valid {
+			http.Error(w, `{"message":"request expired"}`, http.StatusConflict)
+			return
+		}
 	}
 	timeout := 90 * time.Second
 	if action.Action == "storage-skill-auth-file" {
