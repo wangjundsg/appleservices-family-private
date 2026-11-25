@@ -125,15 +125,16 @@ type Command struct {
 	Reply   chan Result
 }
 type Server struct {
-	Record   Record
-	Commands chan Command
-	dir      string
-	listener net.Listener
-	http     *http.Server
-	mu       sync.Mutex
-	devices  []Device
-	pending  *Pending
-	ready    bool
+	Record            Record
+	Commands          chan Command
+	dir               string
+	listener          net.Listener
+	http              *http.Server
+	mu                sync.Mutex
+	devices           []Device
+	pending           *Pending
+	ready             bool
+	bridgeCredentials BridgeCredentials
 }
 
 func New(dir string) (*Server, error) {
@@ -193,6 +194,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		view := View{Status: data, Devices: s.devices, Pending: s.pending, CodeReady: s.ready, Capabilities: []string{"hide-my-email"}}
 		s.mu.Unlock()
 		json.NewEncoder(w).Encode(view)
+		return
+	}
+	if r.Method == "POST" && r.URL.Path == "/bridge-credentials" {
+		s.serveBridgeCredentials(w, r)
 		return
 	}
 	if r.Method != "POST" || r.URL.Path != "/action" {

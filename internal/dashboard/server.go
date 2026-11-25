@@ -1175,6 +1175,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/mail-bridge/accounts":
+			s.serveMailBridgeAccounts(w, r)
+			return
+		case r.Method == "POST" && r.URL.Path == "/api/mail-bridge/credentials":
+			s.serveMailBridgeCredentials(w, r)
+			return
 		case r.URL.Path == "/api/register" || strings.HasPrefix(r.URL.Path, "/api/register/"):
 			s.serveRegistration(w, r)
 			return

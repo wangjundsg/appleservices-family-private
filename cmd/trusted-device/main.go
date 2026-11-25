@@ -204,6 +204,7 @@ func run() (runErr error) {
 			return err
 		}
 		defer panel.Close()
+		panel.SetBridgeCredentials(appleID, password)
 		panelCommands = panel.Commands
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
