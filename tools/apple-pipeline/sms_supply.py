@@ -13,6 +13,7 @@ PROVIDERS = {
     "hero": ("https://hero-sms.com/stubs/handler_api.php", "SMS_API_KEY_HERO"),
 }
 COUNTRIES = {"GB": ("16", "44"), "CA": ("36", "1"), "ID": ("6", "62"), "US": ("12", "1"), "VN": ("10", "84")}
+HERO_COUNTRIES = {**COUNTRIES, "PL": ("15", "48"), "CO": ("33", "57"), "US": ("187", "1")}
 
 class SupplyError(Exception):
     pass
@@ -41,10 +42,20 @@ class Supply:
 
     def purchase(self, job_id, country, policy, allow=False):
         if not allow: raise SupplyError("purchase_disabled")
-        if country not in COUNTRIES: raise SupplyError("purchase_country_not_allowed")
+        providers = policy.get("providers", ["grizzly", "hero"])
+        if (not isinstance(providers, list) or not providers or len(providers)>2
+                or any(not isinstance(p,str) or p not in PROVIDERS for p in providers) or len(set(providers))!=len(providers)):
+            raise SupplyError("purchase_providers_invalid")
+        duration_hours = policy.get("duration_hours", 0)
+        if type(duration_hours) is not int or duration_hours not in (0,24) or (duration_hours and providers!=["hero"]):
+            raise SupplyError("purchase_duration_unsupported")
+        if duration_hours and policy.get("accept_rental_price_change") is not True:
+            raise SupplyError("rental_price_change_consent_required")
+        if any(country not in (HERO_COUNTRIES if p=="hero" else COUNTRIES) for p in providers):
+            raise SupplyError("purchase_country_not_allowed")
         maximum, budget = price(policy.get("max_price")), price(policy.get("max_total"))
         if policy.get("currency") != "USD" or maximum > budget: raise SupplyError("purchase_budget_invalid")
-        country_id, dial = COUNTRIES[country]
+        _, dial = HERO_COUNTRIES[country]
         acquisition = policy.get("acquisition_id")
         with self.lock(self.path.with_suffix(".lock")):
             ledger = self.read()
@@ -59,6 +70,8 @@ class Supply:
                     # OTP, is refunding, or was refunded must never re-buy.
                     if row.get("country") and row["country"] != country:
                         raise SupplyError("acquisition_country_mismatch")
+                    if row.get("duration_hours",0) != duration_hours:
+                        raise SupplyError("acquisition_duration_mismatch")
                     if row["result"] in {"OTP_RECEIVED", "REFUND_PENDING", "REFUNDED", "CANCELLED"}:
                         raise SupplyError("acquisition_already_settled")
                     if row["result"] == "PURCHASED":
@@ -79,17 +92,24 @@ class Supply:
             exposure = sum((Decimal(row.get("price") or row["reserved"]) for row in bought), Decimal(0))
             if exposure + maximum > budget: raise SupplyError("purchase_budget_exhausted")
             # At most one successful acquisition per call; only NO_NUMBERS permits fallback.
-            for provider in ("grizzly", "hero"):
+            for provider in providers:
+                country_id, _ = (HERO_COUNTRIES if provider=="hero" else COUNTRIES)[country]
                 cfg = self.provider(provider)
                 now = time.time()
                 row = {"operation_id":f"sms:{self.account}:{job_id}:{len(rows)+1}", "job_id":job_id,
                        "acquisition_id": acquisition,
-                       "provider":provider,"country":country,"currency":"USD","price":None,
+                       "provider":provider,"country":country,"country_id":country_id,"duration_hours":duration_hours,
+                       "currency":"USD","price":None,
                        "reserved":str(maximum),"result":"PURCHASE_PENDING","requested_at":now,
                        "activation_id":None,"refund_attempts":0}
                 rows.append(row); self.atomic(self.path, ledger)
                 try:
-                    answer = self.call(cfg, action="getNumberV2",service="wx",country=country_id,maxPrice=str(maximum))
+                    if duration_hours:
+                        # This endpoint has no documented maxPrice. The explicitly selected
+                        # rental uses the quoted reserve; validate actual cost before use.
+                        answer = self.call(cfg,action="getRentNumber",service="wx",country=country_id,duration=duration_hours,currency=840)
+                    else:
+                        answer = self.call(cfg, action="getNumberV2",service="wx",country=country_id,maxPrice=str(maximum))
                 except Exception:
                     row["result"]="PURCHASE_UNKNOWN"; self.atomic(self.path,ledger)
                     raise SupplyError("purchase_requires_readback") from None
@@ -111,12 +131,17 @@ class Supply:
                     if str(result["currency"]) not in {"840","USD"} or actual>maximum: raise ValueError()
                     if str(result.get("countryCode",country_id)) != country_id: raise ValueError()
                     start=dt.datetime.fromisoformat(result["activationTime"])
-                    end=dt.datetime.fromisoformat(result["activationEnd"])
+                    end=dt.datetime.fromisoformat(result.get("activationEndTime") or result["activationEnd"])
                     duration=(end-start).total_seconds()
-                    if not 0 < duration <= 1800: raise ValueError()
+                    expected = duration_hours*3600 if duration_hours else 3600 if provider=="hero" and country in {"PL","CO","US"} else 1800
+                    slack=60 if duration_hours or (provider=="hero" and country in {"PL","CO","US"}) else 0
+                    if not 0 < duration <= expected+slack: raise ValueError()
+                    if (duration_hours or (provider=="hero" and country in {"PL","CO","US"})) and duration < expected-60: raise ValueError()
+                    followup=result.get("canGetAnotherSms",False)
+                    if followup not in (True,False,0,1,"0","1"): raise ValueError()
                     expires=now+duration  # Same provider clock for both times; conservative request start.
                     row.update(result="PURCHASED",currency="USD",expires_at=expires,
-                               phone=phone,can_get_another_sms=str(result.get("canGetAnotherSms"))=="1")
+                               phone=phone,can_get_another_sms=followup in (True,1,"1"))
                     self.atomic(self.path,ledger)
                     return {**cfg,"activation":activation,"phone":phone[len(dial):],"phonecc":country,
                             "expires_at":dt.datetime.fromtimestamp(expires,dt.timezone.utc).isoformat(),

@@ -104,6 +104,50 @@ class SupplyTests(unittest.TestCase):
         self.assertTrue(self.supply.settle("job")["otp_received"])
         self.assertEqual(self.call.call_count,1)
 
+    def test_hero_day_rental_uses_documented_country_duration_and_boolean(self):
+        self.call.return_value=receipt(phoneNumber='48500100200',countryCode=15,activationTime='2026-11-26T01:00:00Z',
+            activationEndTime='2026-11-27T01:00:00Z',canGetAnotherSms=True)
+        result=self.supply.purchase('job','PL',{**POLICY,'providers':['hero'],'duration_hours':24,'accept_rental_price_change':True},allow=True)
+        self.assertEqual(result['provider'],'hero');self.assertTrue(result['can_get_another_sms'])
+        self.assertEqual(result['phone'],'500100200')
+        self.assertEqual(self.call.call_args.kwargs,{'action':'getRentNumber','service':'wx','country':'15','duration':24,'currency':840})
+
+    def test_hero_us_hour_uses_187_and_current_expiry(self):
+        self.call.return_value=receipt(phoneNumber='12025550123',countryCode=187,activationTime='2026-11-26T01:00:00Z',
+            activationEndTime='2026-11-26T02:00:00Z',canGetAnotherSms=False)
+        result=self.supply.purchase('job','US',{**POLICY,'providers':['hero']},allow=True)
+        self.assertEqual(self.call.call_args.kwargs['country'],'187')
+        self.assertFalse(result['can_get_another_sms'])
+
+    def test_wrong_rental_lifetime_retains_order_and_never_rebuys(self):
+        self.call.return_value=receipt(phoneNumber='48500100200',countryCode=15,activationTime='2026-11-26T01:00:00Z',
+            activationEndTime='2026-11-26T02:00:00Z',canGetAnotherSms=True)
+        policy={**POLICY,'providers':['hero'],'duration_hours':24,'accept_rental_price_change':True}
+        with self.assertRaisesRegex(SupplyError,'receipt_requires_review'):
+            self.supply.purchase('job','PL',policy,allow=True)
+        with self.assertRaisesRegex(SupplyError,'readback'):
+            self.supply.purchase('other','PL',policy,allow=True)
+        self.assertEqual(self.call.call_count,1)
+        self.assertEqual(self.supply.read()['spend'][0]['activation_id'],'12345')
+
+    def test_bad_provider_or_unsupported_rental_stops_before_spending(self):
+        for extra in [{'providers':['unknown']},{'providers':[]},{'providers':['hero','hero']},
+                      {'providers':['grizzly'],'duration_hours':24},{'providers':['hero'],'duration_hours':2},
+                      {'providers':['hero'],'duration_hours':24},{'providers':[{}]}]:
+            with self.assertRaises(SupplyError):self.buy(policy={**POLICY,**extra})
+        self.call.assert_not_called()
+
+    def test_rental_intent_cannot_change_duration_or_buy_again_on_resume(self):
+        self.call.return_value=receipt(phoneNumber='48500100200',countryCode=15,activationTime='2026-11-26T01:00:00Z',
+            activationEndTime='2026-11-27T01:00:00Z',canGetAnotherSms=True)
+        policy={**POLICY,'providers':['hero'],'duration_hours':24,'accept_rental_price_change':True,'acquisition_id':'fixture-rental'}
+        first=self.supply.purchase('job','PL',policy,allow=True)
+        recovered=self.supply.purchase('job','PL',policy,allow=True)
+        self.assertEqual(first['activation'],recovered['activation']);self.assertTrue(recovered['recovered'])
+        with self.assertRaisesRegex(SupplyError,'acquisition_duration_mismatch'):
+            self.supply.purchase('job','PL',{**policy,'duration_hours':0},allow=True)
+        self.assertEqual(self.call.call_count,1)
+
 if __name__=="__main__":unittest.main()
 
 
