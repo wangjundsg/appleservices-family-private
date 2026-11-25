@@ -35,12 +35,19 @@ func TestExplicitCaptchaFileOverridesEnvironmentKey(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 		time.Sleep(150 * time.Millisecond)
-		_ = os.WriteFile(answerPath, []byte("\xef\xbb\xbfABCD\r\n"), 0600)
+		_ = os.WriteFile(answerPath, []byte("\xef\xbb\xbfAbCd\r\n"), 0600)
 	}()
 	answer, err := answerQuestion(ctx, &captcha{image: []byte("local-fixture")}, "", "fixture-env-key", 2*time.Second, "", answerPath)
 	<-writerDone
-	if err != nil || answer != "ABCD" || transport.calls.Load() != 0 {
+	if err != nil || answer != "AbCd" || transport.calls.Load() != 0 {
 		t.Fatalf("manual file not selected/normalized: err=%v solverCalls=%d", err, transport.calls.Load())
+	}
+}
+
+func TestManualCaptchaAnswerPreservesCase(t *testing.T) {
+	answer, err := answerQuestion(context.Background(), &captcha{}, "  aB3dE\r\n", "", 0, "", "")
+	if err != nil || answer != "aB3dE" {
+		t.Fatal("manual answer was changed")
 	}
 }
 

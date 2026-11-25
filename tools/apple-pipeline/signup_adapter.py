@@ -235,6 +235,16 @@ class SignupAdapter:
                 "-phonecc", str(sms.get("phonecc") or ""), "-device-dir", context.device_dir,
                 "-captcha-dump", context.captcha_path, "-email-code-file", context.email_code_path,
                 "-phone-code-file", context.phone_code_path]
+        manual_path=(job.cfg.get("protocol") or {}).get("captchaAnswer")
+        if manual_path:
+            target=Path(manual_path).resolve()
+            reserved={Path(p).resolve() for p in (context.state_path,context.captcha_path,
+                                                 context.email_code_path,context.phone_code_path)}
+            if (job.folder.resolve() not in target.parents or target.name!="captcha-answer.txt"
+                    or target in reserved or context.timeout<=30):
+                raise AdapterError("protocol_captcha_input_invalid")
+            # Existing CLI waits for a human in the same session; leave time to return its receipt.
+            args += ["-captcha-answer-file",str(target),"-captcha-wait",f"{min(60,int(context.timeout-30))}s"]
         for key in ("first", "last", "birthday"):
             if job.cfg.get(key):
                 args += ["-" + key, str(job.cfg[key])]

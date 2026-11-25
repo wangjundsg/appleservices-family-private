@@ -148,6 +148,24 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(outcome.get('state'),'waiting_input')
         self.assertEqual(outcome.get('stage'),'email-sent')
 
+    def test_explicit_manual_captcha_file_reaches_executor_with_bounded_wait(self):
+        job=FakeJob(self.folder)
+        target=self.folder/'protocol'/'captcha-answer.txt'
+        job.cfg['protocol']['captchaAnswer']=str(target)
+        adapter=sa.SignupAdapter(binary='unused')
+        context=sa.ExecutorContext.from_job(job)
+        args=adapter._arguments(job,context)
+        self.assertEqual(args[args.index('-captcha-answer-file')+1],str(target.resolve()))
+        self.assertEqual(args[args.index('-captcha-wait')+1],'60s')
+        self.assertNotIn('-captcha-answer',args)
+
+    def test_manual_captcha_file_must_not_alias_state_or_leave_task(self):
+        job=FakeJob(self.folder)
+        for target in (self.folder.parent/'outside.txt',self.folder/'protocol'/'state.json',self.folder/'email-code.txt'):
+            job.cfg['protocol']['captchaAnswer']=str(target)
+            with self.subTest(target=target),self.assertRaisesRegex(sa.AdapterError,'protocol_captcha_input_invalid'):
+                sa.SignupAdapter(binary='unused')._arguments(job,sa.ExecutorContext.from_job(job))
+
     def test_actual_adapter_waiting_reaches_pipeline_without_new_resource_requests(self):
         saved=self.waiting_state()
         adapter=self.adapter('''

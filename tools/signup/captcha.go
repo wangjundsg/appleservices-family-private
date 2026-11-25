@@ -71,7 +71,7 @@ func captchaSource(manual, key, answerPath string) string {
 // token stays bound to this session).
 func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout time.Duration, imagePath, answerPath string) (string, error) {
 	if manual != "" {
-		return strings.ToUpper(strings.TrimSpace(manual)), nil
+		return strings.TrimSpace(manual), nil
 	}
 	if captchaSource(manual, key, answerPath) == "solver" {
 		return solveYesCaptcha(ctx, key, c.image, timeout)
@@ -92,7 +92,7 @@ func answerQuestion(ctx context.Context, c *captcha, manual, key string, timeout
 		if raw, err := os.ReadFile(answerPath); err == nil {
 			if text := strings.TrimSpace(strings.TrimPrefix(string(raw), "\ufeff")); text != "" {
 				_ = os.Remove(answerPath)
-				return strings.ToUpper(text), nil
+				return text, nil
 			}
 		}
 		select {
