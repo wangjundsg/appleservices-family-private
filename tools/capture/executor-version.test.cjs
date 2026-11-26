@@ -14,7 +14,8 @@ test("actual CLI reports loaded source hashes before reading private inputs", ()
   assert.equal(result.status, 0, result.stderr);
   const version = JSON.parse(result.stdout);
   assert.equal(version.entry, entry);
-  assert.equal(version.automaticResend, false);
+  assert.equal(version.automaticResend.email, false);
+  assert.equal(version.automaticResend.phone.maxPerNumber, 1);
   for (const [file, hash] of Object.entries(version.files)) {
     assert.equal(hash, createHash("sha256").update(fs.readFileSync(path.join(__dirname, file))).digest("hex"));
   }

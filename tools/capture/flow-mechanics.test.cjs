@@ -403,7 +403,90 @@ test("C: no-code timeout never invokes a throwing resend callback", async () => 
   assert.equal(events.some(e => e.at === "email-resend"), false);
 });
 
+// ---- E: one phone resend, then one replacement request -------------------
+
+test("E: phone codes get two five-minute windows with exactly one resend", async () => {
+  const clock = fakeClock();
+  const windows = [];
+  let resends = 0;
+  const result = await mech.phoneCodeWindow({
+    now: clock.now,
+    waitCode: async ms => {
+      windows.push(ms);
+      await clock.sleep(ms);
+      return windows.length === 2 ? { code: "654321", messageId: "sms:fixture" } : null;
+    },
+    resend: async () => {
+      resends += 1;
+      return { asked: true, ok: true, how: "resend-text" };
+    },
+  });
+  assert.deepEqual(windows, [300000, 300000]);
+  assert.equal(resends, 1);
+  assert.equal(result.code, "654321");
+  assert.equal(result.timedOut, false);
+  assert.equal(result.resent.ok, true);
+  assert.equal(result.waitedMs, 600000);
+});
+
+test("E: a second phone timeout requests replacement without a second resend", async () => {
+  const clock = fakeClock();
+  let resends = 0;
+  const result = await mech.phoneCodeWindow({
+    now: clock.now,
+    waitCode: async ms => { await clock.sleep(ms); return null; },
+    resend: async () => { resends += 1; return { asked: true, ok: true, how: "resend-text" }; },
+  });
+  assert.equal(resends, 1);
+  assert.equal(result.code, "");
+  assert.equal(result.timedOut, true);
+  assert.equal(result.replace, true);
+  assert.equal(result.waitedMs, 600000);
+});
+
 // ---- D: every exit names a reason ----------------------------------------
+
+test("E: lease expiry never resends or starts replacement", async () => {
+  const clock = fakeClock();
+  const result = await mech.phoneCodeWindow({now: clock.now, deadline: clock.now()+10000,
+    waitCode: async ms => {await clock.sleep(ms); return null;},
+    resend: async () => {throw Error("must not resend after expiry");}});
+  assert.equal(result.replace, false);
+  assert.equal(result.resent.asked, false);
+});
+
+test("E: a first-window code avoids all resends; unknown resend result stops", async () => {
+  let reads=0;
+  const first=await mech.phoneCodeWindow({waitCode: async()=>"123456", resend:async()=>{throw Error("unexpected");}});
+  assert.equal(first.code,"123456");
+  const unknown=await mech.phoneCodeWindow({waitCode:async()=>{reads++;return null;},resend:async()=>({ok:false})});
+  assert.equal(reads,1);
+  assert.equal(unknown.replace,false);
+});
+
+test("E: stale, cancelled, retry and malformed SMS never become new codes", () => {
+  const used=new Set(["123456"]);
+  for(const status of ["STATUS_OK:123456","STATUS_WAIT_RETRY:654321","STATUS_CANCEL","STATUS_OK:123","STATUS_OK:123456:extra"])
+    assert.equal(mech.freshSMSCode(status,used),"");
+  assert.equal(mech.freshSMSCode("STATUS_OK:654321",used),"654321");
+});
+
+test("E: uncertain clicks and completed clicks both forbid replay after restart", async () => {
+  const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sms-once-test-'));
+  try {
+    for(const fails of [true,false]) {
+      const marker=path.join(dir,String(fails)+'.json');
+      let calls=0;
+      const click=async()=>{calls++;if(fails)throw Error('response lost');};
+      if(fails)await assert.rejects(mech.onceAction(marker,click),/response lost/);
+      else await mech.onceAction(marker,click);
+      await assert.rejects(mech.onceAction(marker,click),/EEXIST/);
+      assert.equal(calls,1);
+      fs.unlinkSync(marker);
+    }
+  } finally {fs.rmdirSync(dir);}
+});
 
 test("D: the six requested reasons plus the two terminal screens are the vocabulary", () => {
   for (const reason of ["success", "captcha-exhausted", "email-code-timeout", "submit-failed", "hard-reject", "script-error"]) {
@@ -476,6 +559,12 @@ test("wiring C: the email step waits without wiring any resend action", () => {
   assert.ok(sentAt>0 && sentAt<submit,'email query starts after the send and can miss a fast OTP');
   assert.match(source,/poolEmailCode\(windowMs\)/);
   assert.match(source, /manualEmailCode\(windowMs\)/);
+});
+
+test("wiring E: the phone step uses the bounded resend and replacement handoff", () => {
+  assert.match(source, /mech\.phoneCodeWindow\(/);
+  assert.match(source, /replacement-number-file/);
+  assert.match(source, /replacement_number_required/);
 });
 
 test("wiring D: both exits write the close record before the terminal record", () => {

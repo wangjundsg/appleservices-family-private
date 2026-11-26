@@ -28,7 +28,7 @@ PROBE_STATES = {"account_exists", "requires_2fa", "authenticated"}
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
 STAGES = ("create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
-             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM", "PL":"POL", "CO":"COL"}
+             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM", "PL":"POL", "CO":"COL", "PT":"PRT"}
 
 
 import job_policy
@@ -360,6 +360,32 @@ class Job:
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
 
+    def replace_number(self):
+        handoff = self.folder / "replacement-number.json"
+        if handoff.exists(): return
+        sms = self.cfg["sms"]
+        if not sms.get("auto_purchase"):
+            raise PipelineError("replacement_number_requires_input", "waiting_input")
+        intent = self.folder / "replacement-number-intent.json"
+        if intent.exists():
+            request = read(intent)
+        else:
+            request = {"previous_activation": str(sms["activation"]),
+                       "acquisition_id": secrets.token_hex(16)}
+            atomic(intent, request)
+        policy = {**sms, "acquisition_id": request["acquisition_id"]}
+        try:
+            purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], policy, self.allow_purchase)
+        except SupplyError as e:
+            raise PipelineError(str(e), "needs_review") from None
+        if str(purchased["activation"]) == request["previous_activation"] or purchased["phonecc"] != sms["phonecc"]:
+            raise PipelineError("replacement_number_invalid", "needs_review")
+        self.cfg["sms"] = {**sms, **purchased}
+        atomic(self.folder / "input.json", self.cfg)
+        self.claim_number()
+        atomic(handoff, {**purchased, "previous_activation": request["previous_activation"]})
+        self.update(reason="replacement_number_ready", acquisition_id=request["acquisition_id"])
+
     def protocol_step(self, waiting=None, action=None):
         """One delegation to the adapter: create the first time, resume afterwards.
 
@@ -509,6 +535,11 @@ class Job:
                             try: event = json.loads(line)
                             except ValueError: continue
                             state = event.get("state")
+                            if state == "replacement_number_required":
+                                if code_mode or self.method != "browser":
+                                    raise PipelineError("replacement_wrong_stage", "needs_review")
+                                self.replace_number()
+                                end = time.monotonic() + max(1, timestamp(self.cfg["sms"]["expires_at"]) - time.time()) + 15
                             if state == "terms": self.update(stage="terms", status="running")
                             if state == "waiting_input":
                                 waiting = True
@@ -569,7 +600,9 @@ class Job:
                    "sms-api": sms.get("api", "https://api.grizzlysms.com/stubs/handler_api.php"),
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
                    "expected-locale": roxy["locale"], "expected-timezone": roxy["timeZone"],
-                   "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt")}
+                   "expected-egress-country": self.cfg.get("account_country", "US"),
+                   "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt"),
+                   "replacement-number-file": str(self.folder / "replacement-number.json")}
             birthday = dt.date.fromisoformat(self.cfg.get("birthday", "1992-07-18"))
             inp.update({"first": self.cfg.get("first", "James"), "last": self.cfg.get("last", "Carter"),
                         "birth-month": f"{birthday.month:02d}", "birth-day": f"{birthday.day:02d}",

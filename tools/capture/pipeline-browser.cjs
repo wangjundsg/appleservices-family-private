@@ -16,7 +16,7 @@ const { chromium } = require("../../.tools/js/node_modules/playwright-core");
     const seen = await page.evaluate(() => ({ ua: navigator.userAgent, platform: navigator.platform,
       locale: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       offset: new Date().getTimezoneOffset() }));
-    if (exit.status !== "success" || exit.countryCode !== input.phonecc || seen.platform !== "Win32" || !seen.ua.includes("Windows NT") ||
+    if (exit.status !== "success" || exit.countryCode !== input["expected-egress-country"] || seen.platform !== "Win32" || !seen.ua.includes("Windows NT") ||
         seen.locale !== input["expected-locale"] || seen.timezone !== input["expected-timezone"]) {
       throw Error("geo_mismatch");
     }

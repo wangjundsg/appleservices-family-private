@@ -318,6 +318,28 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(p.PipelineError,"account_number_limit"):self.job.create_with_replacement()
         self.assertEqual(create.call_count,2)
 
+    def test_phone_timeout_buys_one_replacement_without_settling_old_number(self):
+        self.job.cfg["sms"].update(phonecc="PT",auto_purchase=True,max_price="1.10",max_total="2.20",currency="USD",
+                                   providers=["hero"],supply_operation="sms:old")
+        self.job.update(number_owned=True, acquisition_id="old-acquisition")
+        purchased={"activation":"new-activation","phone":"912345678","phonecc":"PT",
+                   "expires_at":p.iso(p.time.time()+600),"supply_operation":"sms:new",
+                   "provider":"hero","api":"https://hero.test/api","key":"new-key",
+                   "can_get_another_sms":True}
+        supply=unittest.mock.Mock()
+        supply.purchase.return_value=purchased
+        with patch.object(self.job,"supply",return_value=supply), \
+             patch.object(self.job,"claim_number") as claim, \
+             patch.object(self.job,"settle_number") as settle:
+            self.job.replace_number()
+            self.job.replace_number()
+        self.assertEqual(supply.purchase.call_count,1)
+        settle.assert_not_called()
+        claim.assert_called_once()
+        handoff=p.read(self.root/"replacement-number.json")
+        self.assertEqual({key:handoff[key] for key in ("activation","phone","phonecc","expires_at")},
+                         {key:purchased[key] for key in ("activation","phone","phonecc","expires_at")})
+
     def test_legacy_purchase_cannot_bypass_explicit_gate(self):
         self.job.cfg["sms"].pop("activation")
         with patch.object(p,"sms_call") as call:
@@ -386,6 +408,25 @@ class PipelineTests(unittest.TestCase):
         data=p.read(self.root/"create-input.json")
         self.assertEqual(data["country"],"USA")
         self.assertEqual(data["phonecc"],"GB")
+        self.assertEqual(data["expected-egress-country"],"US")
+        self.assertEqual(data["replacement-number-file"],str(self.root/"replacement-number.json"))
+
+    def test_manual_number_replacement_never_buys(self):
+        with patch.object(self.job,"supply") as supply:
+            with self.assertRaisesRegex(p.PipelineError,"replacement_number_requires_input"):
+                self.job.replace_number()
+        supply.assert_not_called()
+
+    def test_unknown_replacement_purchase_reuses_same_intent(self):
+        self.job.cfg["sms"].update(auto_purchase=True)
+        supply=unittest.mock.Mock()
+        supply.purchase.side_effect=p.SupplyError("purchase_requires_readback")
+        with patch.object(self.job,"supply",return_value=supply):
+            for _ in range(2):
+                with self.assertRaisesRegex(p.PipelineError,"purchase_requires_readback"):
+                    self.job.replace_number()
+        ids=[c.args[2]["acquisition_id"] for c in supply.purchase.call_args_list]
+        self.assertEqual(ids[0],ids[1])
 
     def test_default_account_region_is_us_with_foreign_phone(self):
         with patch.object(self.job,"forge",return_value={"dirId":"fixture-browser","debuggingPort":12345}),patch.object(self.job,"process",return_value=(0,{})),patch.object(self.job,"cleanup_browser"):

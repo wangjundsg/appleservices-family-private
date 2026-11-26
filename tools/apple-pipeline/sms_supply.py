@@ -13,7 +13,7 @@ PROVIDERS = {
     "hero": ("https://hero-sms.com/stubs/handler_api.php", "SMS_API_KEY_HERO"),
 }
 COUNTRIES = {"GB": ("16", "44"), "CA": ("36", "1"), "ID": ("6", "62"), "US": ("12", "1"), "VN": ("10", "84")}
-HERO_COUNTRIES = {**COUNTRIES, "PL": ("15", "48"), "CO": ("33", "57"), "US": ("187", "1")}
+HERO_COUNTRIES = {**COUNTRIES, "PL": ("15", "48"), "CO": ("33", "57"), "US": ("187", "1"), "PT": ("117", "351")}
 
 class SupplyError(Exception):
     pass

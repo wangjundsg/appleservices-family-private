@@ -71,7 +71,7 @@
     for (const name of ['email','password','phone','platform','activation','expiresAt']) {
       field(name).disabled=automatic; field(name).closest('label').hidden=automatic;
     }
-    for (const option of field('phonecc').options) option.disabled=automatic && !['PL','CO','US'].includes(option.value);
+    for (const option of field('phonecc').options) option.disabled=automatic && !['PL','CO','US','PT'].includes(option.value);
     if(automatic) field('phonecc').value=setup?.resources?.phoneCountry||'PL';
     field('phonecc').disabled=automatic;
     $('registerPasswordHint').hidden=automatic; $('registerExpiryHint').hidden=automatic;

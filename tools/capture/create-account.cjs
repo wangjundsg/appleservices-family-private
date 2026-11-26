@@ -71,7 +71,7 @@ function executorVersion() {
   return { entry: __filename, node: process.version,
     files: Object.fromEntries(files.map(file => [file,
       createHash("sha256").update(fs.readFileSync(path.join(__dirname, file))).digest("hex")])),
-    automaticResend: false, fieldReadback: true, maxFieldCorrections: 1 };
+    automaticResend: {email: false, phone: {afterMs: 300000, maxPerNumber: 1, replaceAfterMs: 600000}}, fieldReadback: true, maxFieldCorrections: 1 };
 }
 const executor = executorVersion();
 if (process.argv.includes("--version")) {
@@ -122,9 +122,11 @@ function flagOn(name) {
 const outdir = path.resolve(arg("outdir", ".cache/acct"));
 const email = String(arg("email", ""));
 const jwt = String(arg("jwt", ""));
-const phone = String(arg("phone", ""));
-const activation = String(arg("activation", ""));
-const heroKey = String(arg("hero-key", process.env.APPLESERVICES_SMS_KEY || ""));
+let phone = String(arg("phone", ""));
+let activation = String(arg("activation", ""));
+let heroKey = String(arg("hero-key", process.env.APPLESERVICES_SMS_KEY || ""));
+const excludedSMS = new Set();
+let phoneReplaced = false;
 const awaitCaptcha = String(arg("await-captcha", ""));
 // --preflight gates the browser on the captcha resource being reachable at all;
 // --auto-refund cancels the number before any non-zero exit (run-20261113 §4.5,
@@ -365,12 +367,25 @@ async function latestEmailCode(since) {
   return flow.pickEmailCode(body.results || [], { address: email, senderDomains, since });
 }
 
-async function smsCode() {
+async function smsStatus() {
   const url = `${SMS_API_BASE}?api_key=${heroKey}&action=getStatus&id=${activation}`;
-  const res = await fetch(url);
-  const text = (await res.text()).trim();
-  if (text.startsWith("STATUS_OK")) {
-    const code = text.split(":")[1] || "";
+  const res = await fetch(url, {signal: AbortSignal.timeout(15000)});
+  if (!res.ok) throw new Error("sms_provider_read_failed");
+  return (await res.text()).trim();
+}
+
+async function captureSMSBaseline() {
+  const status = await smsStatus();
+  if (!/^STATUS_(OK:\d{6}|WAIT_CODE|WAIT_RETRY(?::\d{6})?|WAIT_RESEND)$/.test(status)) {
+    throw new Error("sms_provider_not_ready");
+  }
+  const match = /:(\d{6})$/.exec(status);
+  if (match) excludedSMS.add(match[1]);
+}
+
+async function smsCode() {
+  const code = mech.freshSMSCode(await smsStatus(), excludedSMS);
+  if (code) {
     // The chain after creation asks Apple for a *second* code on the same
     // number; gsa-login has to be told which code is already spent. The value
     // goes to a private file, never to the log (run-20261113 §A2).
@@ -383,6 +398,60 @@ async function smsCode() {
     return code;
   }
   return "";
+}
+
+async function oncePhoneAction(name, action) {
+  const key = createHash("sha256").update(activation).digest("hex").slice(0, 16);
+  const marker = path.join(outdir, `phone-${key}-${name}.json`);
+  // An uncertain click stays recorded: restarting must never replay it.
+  await mech.onceAction(marker, action);
+}
+
+async function phoneAction(page, labels, name) {
+  await oncePhoneAction(name, async () => {
+    const frame = await widgetFrame(page);
+    if (!frame) throw new Error("phone_widget_missing");
+    await mech.phoneMenuAction(frame, labels, locator => mech.clickElement(locator, {mouse: page.mouse, sleep}));
+  });
+  return {asked: true, ok: true, how: name};
+}
+
+async function replacePhone(page) {
+  if (phoneReplaced) return false;
+  const file = String(arg("replacement-number-file", ""));
+  if (!file) return false;
+  // Prove the change-number form exists before requesting a paid resource.
+  await phoneAction(page, mech.PHONE_REPLACE_LABELS, "replace");
+  const frame = await widgetFrame(page);
+  const input = frame.locator('input[name="phoneNumber"], input[name="phone"]');
+  await input.waitFor({state: "visible", timeout: 15000});
+  note("step", {state: "replacement_number_required", previous_activation: activation});
+  const response = await waitFor(async () => {
+    if (!fs.existsSync(file)) return null;
+    try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+    catch { throw new Error("replacement_file_unreadable"); }
+  }, 60000, "replacement-number");
+  if (!response) throw new Error("replacement_number_unavailable");
+  if (response.previous_activation !== activation || !/^\d{5,15}$/.test(response.phone) ||
+      !/^[A-Za-z0-9_-]{1,100}$/.test(response.activation) || response.activation === activation ||
+      response.phonecc !== phoneCC || response.phone === phone ||
+      !Number.isFinite(Date.parse(response.expires_at)) || Date.parse(response.expires_at) <= Date.now()) {
+    throw new Error("replacement_number_invalid");
+  }
+  if (response.api && response.api !== SMS_API_BASE) throw new Error("replacement_provider_changed");
+  activation = response.activation;
+  phone = response.phone;
+  leaseDeadline = Date.parse(response.expires_at);
+  heroKey = response.key || heroKey;
+  excludedSMS.clear();
+  await captureSMSBaseline();
+  await selectIfNeeded(frame.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
+  await fillIfNeeded(input, phone, "phone_number");
+  await oncePhoneAction("submit-number", () => clickContinue(page, frame, "replacement-phone"));
+  phoneReplaced = true;
+  note("step", {at: "replacement-number-submitted"});
+  await frame.locator('input[name="phoneNumber"], input[name="phone"]').waitFor({state: "hidden", timeout: 15000});
+  return true;
 }
 
 async function waitFor(producer, timeoutMs, label) {
@@ -950,6 +1019,7 @@ async function clickContinue(page, frame, tag = "") {
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
+  await captureSMSBaseline();
   const frozen = attachMode ? null : loadProfile();
   const profile = frozen ? frozen.profile : null;
   if (attachMode) {
@@ -1618,10 +1688,16 @@ async function clickContinue(page, frame, tag = "") {
       picked = window.picked;
       emailWindow = window;
     } else {
-      picked = await waitFor(smsCode, 180000, "sms-code");
+      const window = await mech.phoneCodeWindow({
+        waitCode: ms => waitFor(smsCode, ms, "sms-code"),
+        deadline: leaseDeadline,
+        resend: () => phoneAction(page, mech.PHONE_RESEND_LABELS, "resend"),
+      });
+      picked = window.picked;
+      if (window.replace && await replacePhone(page)) continue;
     }
     let code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
-    if (!code) {
+    if (!code && verdict === "email_step") {
       const late = await lifecycle.retainInput({
         deadline: leaseDeadline,
         notify: () => note("step", { at: verdict, state: "waiting_input", expires_at: new Date(leaseDeadline).toISOString() }),
@@ -1661,11 +1737,20 @@ async function clickContinue(page, frame, tag = "") {
       break;
     }
     phoneSubmitted = verdict === "phone_step";
+    if (phoneSubmitted) excludedSMS.add(code);
     await checkCreationFailure();
-    await fillDigits(current, code);
-    // Review A2: mask the authentication inputs before this screenshot.
-    await shot(`0${step + 1}-code-filled`, { maskAuth: true });
-    await clickContinue(page, current, verdict);
+    if (phoneSubmitted) {
+      const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
+      await oncePhoneAction(`code-${digest}`, async () => {
+        await fillDigits(current, code);
+        await clickContinue(page, current, verdict);
+      });
+    } else {
+      await fillDigits(current, code);
+      // Review A2: mask the authentication inputs before this screenshot.
+      await shot(`0${step + 1}-code-filled`, { maskAuth: true });
+      await clickContinue(page, current, verdict);
+    }
     await sleep(9000);
     await shot(`0${step + 1}-after`, { maskAuth: true });
   }

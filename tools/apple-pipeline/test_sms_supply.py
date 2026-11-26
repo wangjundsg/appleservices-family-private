@@ -43,6 +43,13 @@ class SupplyTests(unittest.TestCase):
         self.assertEqual(self.call.call_args.kwargs["maxPrice"],"1.10")
         self.assertEqual(self.supply.read()["spend"][0]["result"],"NO_PURCHASE")
 
+    def test_portugal_uses_hero_country_117_and_local_phone(self):
+        self.call.return_value=receipt(phoneNumber="351912345678",countryCode="117")
+        result=self.supply.purchase("pt-job","PT",{**POLICY,"providers":["hero"]},allow=True)
+        self.assertEqual(self.call.call_args.kwargs["country"],"117")
+        self.assertEqual(result["phone"],"912345678")
+        self.assertEqual(result["phonecc"],"PT")
+
     def test_timeout_persists_unknown_and_blocks_new_job(self):
         self.call.side_effect=TimeoutError()
         for job in ("job","other-job"):

@@ -274,6 +274,21 @@ const RESEND_LABELS = Object.freeze([
   "erneut senden",
 ]);
 
+// Phone challenge controls are rendered as a menu.  Keep the visible-copy
+// fallbacks localized; the caller still scopes them to the active widget.
+const PHONE_HELP_LABELS = Object.freeze([
+  "didn't get a code", "didn’t get a code", "没有收到验证码", "未收到验证码",
+  "não recebeu um código", "não recebeu o código", "nao recebeu um codigo",
+]);
+const PHONE_RESEND_LABELS = Object.freeze([
+  "resend text", "resend code", "重新发送短信", "重新傳送簡訊", "重新傳送短信",
+  "reenviar sms", "reenviar mensagem", "reenviar código", "reenviar codigo",
+]);
+const PHONE_REPLACE_LABELS = Object.freeze([
+  "use a different number", "使用其他号码", "使用其他電話號碼", "使用其他電話",
+  "usar um número diferente", "usar outro número", "usar um numero diferente", "usar outro numero",
+]);
+
 // channelCode flattens the three pickers (string from the SMS API, object from
 // Graph, null from a timeout) into "the code or nothing".
 function channelCode(picked) {
@@ -308,6 +323,59 @@ async function emailCodeWindow({ waitCode, now = Date.now, deadline = Infinity, 
   };
 }
 
+// The phone flow has a different contract from email: wait five minutes,
+// request exactly one new SMS, then wait five more minutes.  A second timeout
+// hands control to the caller's replacement-number path; it never loops.
+async function phoneCodeWindow({ waitCode, resend, now = Date.now, deadline = Infinity,
+  firstMs = 300000, secondMs = 300000 } = {}) {
+  const started = now();
+  const wait = async ms => {
+    const remaining = Math.min(ms, 300000, deadline - now());
+    return remaining > 0 ? waitCode(remaining) : null;
+  };
+  let picked = await wait(firstMs);
+  let resent = { asked: false, ok: false, how: "not-needed" };
+  if (!channelCode(picked) && now() < deadline) {
+    resent = await resend();
+    if (resent && resent.ok) picked = await wait(secondMs);
+  }
+  const code = channelCode(picked);
+  return {
+    picked: code ? picked : null,
+    code,
+    resent,
+    waitedMs: now() - started,
+    timedOut: !code,
+    replace: !code && Boolean(resent && resent.ok) && now() < deadline,
+  };
+}
+
+function freshSMSCode(status, excluded = new Set()) {
+  const match = /^STATUS_OK:(\d{6})$/.exec(String(status).trim());
+  return match && !excluded.has(match[1]) ? match[1] : "";
+}
+
+async function onceAction(marker, action) {
+  const fs = require("node:fs");
+  fs.writeFileSync(marker, JSON.stringify({state: "intent", at: Date.now()}), {flag: "wx", mode: 0o600});
+  await action();
+  fs.writeFileSync(marker, JSON.stringify({state: "completed", at: Date.now()}), {mode: 0o600});
+}
+
+async function phoneMenuAction(frame, labels, click, sleep = ms => new Promise(resolve => setTimeout(resolve, ms))) {
+  const help = await findAction(frame, PHONE_HELP_LABELS);
+  if (!help.ok) throw new Error("phone_help_not_found");
+  await click(help.locator);
+  let action;
+  for (let i = 0; i < 20; i++) {
+    action = await findAction(frame, labels);
+    if (action.ok) break;
+    await sleep(100);
+  }
+  if (!action.ok) throw new Error("phone_action_not_found");
+  await click(action.locator);
+}
+
 // findAction is the text-matched finder used for "send it again": a button or a
 // link whose visible text is one of `labels`. It deliberately ignores the
 // submit exclusions, because on the email step "Send a new code" is the action
@@ -318,6 +386,8 @@ async function findAction(frame, labels, { selector = "button, a, [role=button]"
   const wanted = labels.map((label) => fold(label));
   for (let i = 0; i < count; i += 1) {
     const candidate = list.nth(i);
+    if (typeof candidate.isVisible === "function" && !await candidate.isVisible()) continue;
+    if (typeof candidate.isEnabled === "function" && !await candidate.isEnabled()) continue;
     const text = await textOf(candidate);
     if (!text) continue;
     const hay = fold(text);
@@ -344,6 +414,9 @@ async function clickElement(locator, { mouse = null, sleep, rand = Math.random }
 module.exports = {
   CLOSE_REASONS,
   NOT_SUBMIT,
+  PHONE_HELP_LABELS,
+  PHONE_REPLACE_LABELS,
+  PHONE_RESEND_LABELS,
   RESEND_LABELS,
   SUBMIT_LABELS,
   channelCode,
@@ -358,6 +431,10 @@ module.exports = {
   fold,
   isNotSubmit,
   normalizeCloseReason,
+  phoneCodeWindow,
+  phoneMenuAction,
+  freshSMSCode,
+  onceAction,
   selectField,
   selectByKeyboard,
 };
