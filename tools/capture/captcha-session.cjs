@@ -2,12 +2,16 @@
 const fail=reason=>Object.assign(new Error(reason),{state:"unknown",closeReason:"captcha-exhausted",evidence:reason});
 
 // One answer belongs to one image. Three consecutive refreshes is a hard cap.
-async function readChallenge({capture,recognize,fallback,manual,refresh,clear,progress=async()=>false,log=()=>{},available=()=>true,maxRounds=4,remoteDigests=new Set()}) {
+async function readChallenge({capture,recognize,fallback,manual,refresh,clear,progress=async()=>false,log=()=>{},available=()=>true,maxRounds=4,remoteDigests=new Set(),refreshIntervalMs=0,sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=Date.now}) {
   let previous="";
   let unchanged=false;
+  let lastRefresh=-Infinity;
   const refreshOnce=async(round,refreshes)=>{
+    await sleep(Math.max(0,lastRefresh+refreshIntervalMs-now()));
+    if(!available())throw fail("captcha_attempt_deadline");
     await clear();
     const result=await refresh();
+    lastRefresh=now();
     log({at:result?.changed===false?"captcha-refresh-unchanged":"captcha-refreshed",round:round+1,refreshes,refresh_limit:3});
   };
   const rounds=fallback ? Math.max(1,Math.min(4,maxRounds)) : 1;

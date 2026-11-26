@@ -226,13 +226,19 @@ def main() -> int:
         print("", end="")
         return 1
     if not key:
-        print(f"solver: missing key for {args.provider}", file=sys.stderr)
+        print(json.dumps({"solver_error":"missing_key"}), file=sys.stderr)
         print("", end="")
         return 1
 
     try:
         text = SOLVERS[args.provider](key, image_b64, args.timeout)
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+    except urllib.error.HTTPError as exc:
+        print(json.dumps({"solver_error":f"http_{exc.code}"}), file=sys.stderr)
+        text = ""
+    except (urllib.error.URLError, TimeoutError) as exc:
+        print(json.dumps({"solver_error":"network_error"}), file=sys.stderr)
+        text = ""
+    except ValueError as exc:
         print(f"solver: {type(exc).__name__}", file=sys.stderr)
         text = ""
 

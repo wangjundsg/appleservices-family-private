@@ -182,8 +182,13 @@ async function runCaptchaCommandAsync(cmd, pngPath, options = {}) {
   if(!pngPath)return {ok:false,text:"",error:"missing_image",ms:Date.now()-started};
   const timeout=Number.isFinite(options.timeoutMs) && options.timeoutMs>0 ? options.timeoutMs : CAPTCHA_CMD_TIMEOUT_MS;
   return new Promise(resolve=>execFile(argv[0],[...argv.slice(1),String(pngPath)],
-    {encoding:"utf8",timeout,windowsHide:true,maxBuffer:1<<20},(error,stdout)=>resolve({
-      ok:!error,text:error?"":String(stdout||"").trim(),error:error?(error.killed?"solver_timeout":"solver_failed"):"",ms:Date.now()-started})));
+    {encoding:"utf8",timeout,windowsHide:true,maxBuffer:1<<20},(error,stdout,stderr)=>{
+      let diagnostic="";
+      for(const line of String(stderr||"").split(/\r?\n/)) {
+        try {const code=JSON.parse(line).solver_error;if(/^(?:http_[45][0-9]{2}|missing_key|network_error)$/.test(code))diagnostic=code;}catch{}
+      }
+      resolve({ok:!error,text:error?"":String(stdout||"").trim(),error:error?(diagnostic || (error.killed?"solver_timeout":"solver_failed")):"",ms:Date.now()-started});
+    }));
 }
 
 // ---- captcha image selection (run-20261113 §4.4) --------------------------
@@ -203,7 +208,32 @@ function naturalSize(entry) {
 
 function loaded(entry) {
   const { width, height } = naturalSize(entry);
-  return width > 0 && height > 0;
+  return width > 0 && height > 0 && entry.challengeReady !== false;
+}
+
+async function observeCaptchaImages(frame) {
+  return frame.evaluate(() => {
+    const all=[...document.images];
+    const entry=img=>({index:all.indexOf(img),natural:[img.naturalWidth||0,img.naturalHeight||0],source:img.currentSrc||img.src});
+    const images=all.map(entry),input=document.querySelector('input[name="captcha"]');
+    const root=input?.closest('.captcha');
+    if(root) {
+      const container=root.querySelector('.captcha-container');
+      const adjacent=all.filter(img=>container?.contains(img)).map(img=>({...entry(img),
+        challengeReady:img.complete && img.naturalWidth>=80 && img.naturalHeight>=30 && !/^data:image\/(?:svg|gif)/i.test(img.currentSrc||img.src)}));
+      return {scopePresent:true,images,adjacent,unavailable:/无法获取\s*Captcha|無法取得\s*Captcha|unable to (?:get|load).*captcha|captcha.*unavailable/i.test(root.innerText)};
+    }
+    const adjacent=[];let node=input;
+    for(let depth=0;depth<3 && node;depth++,node=node.parentElement) {
+      let sibling=node.previousElementSibling;
+      for(let step=0;step<8 && sibling;step++,sibling=sibling.previousElementSibling) {
+        const img=sibling.tagName==='IMG'?sibling:sibling.querySelector('img');
+        if(img)adjacent.push(entry(img));
+      }
+      if(adjacent.length)break;
+    }
+    return {images,adjacent};
+  });
 }
 
 // pickCaptchaImage decides which <img> is the captcha.
@@ -219,11 +249,11 @@ function loaded(entry) {
 // on the image resource produces) is *not* a reason to pick something else next
 // to it: the run reports "captcha image not loaded" and stops, because OCR on
 // the wrong picture only buys 16 rejected answers (run-20261113 §4.4).
-function pickCaptchaImage({ adjacent = [], images = [] } = {}) {
+function pickCaptchaImage({ adjacent = [], images = [], scopePresent = false } = {}) {
   const near = Array.isArray(adjacent) ? adjacent : [];
   const all = Array.isArray(images) ? images : [];
 
-  if (near.length) {
+  if (scopePresent || near.length) {
     const hit = near.find(loaded);
     if (!hit) return { ok: false, src_kind: "adjacent", reason: "captcha image not loaded" };
     const { width, height } = naturalSize(hit);
@@ -284,6 +314,7 @@ module.exports = {
   CAPTCHA_MAX_WIDTH,
   CaptchaTracker,
   captchaArgv,
+  observeCaptchaImages,
   pickCaptchaImage,
   runCaptchaCommand,
   runCaptchaCommandAsync,

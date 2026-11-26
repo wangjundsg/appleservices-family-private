@@ -416,7 +416,7 @@ async function phoneAction(page, labels, name) {
   await oncePhoneAction(name, async () => {
     const frame = await widgetFrame(page);
     if (!frame) throw new Error("phone_widget_missing");
-    await mech.phoneMenuAction(frame, labels, locator => mech.clickElement(locator, {mouse: page.mouse, sleep}));
+    await mech.phoneMenuAction(frame, labels, locator => mech.clickElement(locator, {mouse: page.mouse, sleep, scroll:nativeMode?scrollField:undefined}));
   });
   return {asked: true, ok: true, how: name};
 }
@@ -721,6 +721,7 @@ async function hardRefusal(frame, pageText) {
 // Picking from a real dropdown: click it open, wait like a person reading the
 // list, choose, then let the widget settle before the next field.
 async function selectHuman(locator, value, label = "") {
+  if(nativeMode)await scrollField(locator);
   await locator.click({ timeout: 15000 });
   await sleep(300 + Math.floor(Math.random() * 500));
   await mech.selectByKeyboard(locator, value, nativeMode ? {sleep, stepMs: 100, settleMs: 300} : {});
@@ -735,6 +736,7 @@ async function selectHuman(locator, value, label = "") {
 // A is flow-mechanics.fillField; this wrapper only supplies the typer and the
 // log sink, so the rule itself is unit-tested against a fake locator.
 const blurField = locator => nativeMode ? locator.blur({timeout:5000}) : locator.press("Tab",{timeout:5000});
+const scrollField = locator => mech.settleInView(locator,{sleep});
 async function fillIfNeeded(locator, value, label = "") {
   return mech.fillField(locator, value, label, { type: typeHuman, log: note, blur: blurField,
     normalize: label === "phone_number" ? value => String(value).replace(/\D/g, "") : String });
@@ -748,6 +750,7 @@ async function selectIfNeeded(locator, value, label = "") {
 async function typeHuman(locator, text, label = "") {
   const value = String(text == null ? "" : text);
   if (!value) return;
+  if(nativeMode)await scrollField(locator);
   await locator.click({ timeout: 15000 });
   for (const ch of value) {
     await locator.pressSequentially(ch, { timeout: 5000 });
@@ -762,6 +765,7 @@ async function typeHuman(locator, text, label = "") {
 async function fillDigits(frame, code) {
   const boxes = frame.locator('input[type="tel"]');
   const count = await boxes.count();
+  if(nativeMode && count)await scrollField(boxes.first());
   note("code-boxes", { count });
   if (count === code.length) {
     for (let i = 0; i < code.length; i += 1) {
@@ -784,34 +788,7 @@ async function fillDigits(frame, code) {
 // in DOM order; the size window is only a fallback for a page without that
 // structure, and a picture that did not load is never acceptable either way.
 async function observeCaptchaImages(fr) {
-  return fr
-    .evaluate(() => {
-      const all = [...document.querySelectorAll("img")];
-      const indexOf = new Map(all.map((el, index) => [el, index]));
-      const size = (el) => [el.naturalWidth || 0, el.naturalHeight || 0];
-      const images = all.map((el, index) => ({ index, natural: size(el) }));
-
-      const input = document.querySelector('input[name="captcha"]');
-      if (!input) return { images, adjacent: [] };
-
-      // Walk up from the input and look for the nearest preceding img in the
-      // same container: previous element siblings first, then one level up. The
-      // depth/sibling bounds keep a page-wide logo out of the result.
-      const adjacent = [];
-      let node = input;
-      for (let depth = 0; depth < 3 && node; depth += 1) {
-        let sibling = node.previousElementSibling;
-        for (let step = 0; step < 8 && sibling; step += 1) {
-          const img = sibling.tagName === "IMG" ? sibling : sibling.querySelector("img");
-          if (img && indexOf.has(img)) adjacent.push({ index: indexOf.get(img), natural: size(img) });
-          sibling = sibling.previousElementSibling;
-        }
-        if (adjacent.length) break;
-        node = node.parentElement;
-      }
-      return { images, adjacent };
-    })
-    .catch(() => ({ images: [], adjacent: [] }));
+  return lib.observeCaptchaImages(fr);
 }
 
 // captchaLocator returns the captcha image locator plus what the picker decided.
@@ -832,6 +809,11 @@ async function captchaLocator(fr, { state = "failed", tag = "" } = {}) {
 }
 
 const nativeRemoteCaptchas = new Set();
+const pendingCaptchaRequests = new Set();
+let captchaResponseStatus = 0;
+function checkCaptchaService() {
+  if(captchaResponseStatus>=400)throw Object.assign(new Error("captcha_service_unavailable"),{state:"unknown",evidence:"captcha_service_unavailable",closeReason:"captcha-exhausted"});
+}
 async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
   const answerFile = path.resolve(awaitCaptcha || ".cache/captcha-answer.txt");
   const deadline = Math.min(Date.now() + timeoutMs, leaseDeadline);
@@ -851,6 +833,7 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     return /^[A-Za-z0-9]{3,6}$/.test(answer) ? {answer} : "";
   }, Math.max(0,until-Date.now()), "captcha");
   return captchaSession.readChallenge({
+    refreshIntervalMs:3000,sleep,
     remoteDigests: nativeRemoteCaptchas,
     progress,
     available: () => Date.now() < deadline,
@@ -860,11 +843,16 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
       let found;
       const until = Math.min(Date.now()+10000, deadline);
       while (Date.now() < until) {
-        const pick = lib.pickCaptchaImage(await observeCaptchaImages(fr));
+        checkCaptchaService();
+        if(pendingCaptchaRequests.size){await sleep(250);continue;}
+        const observed=await observeCaptchaImages(fr);
+        if(observed.unavailable)throw Object.assign(new Error("captcha_service_unavailable"),{state:"unknown",evidence:"captcha_service_unavailable"});
+        const pick = lib.pickCaptchaImage(observed);
         if (pick.ok) {found={pick,locator:fr.locator("img").nth(pick.index)};break;}
         await sleep(250);
       }
       if (!found) {
+        if(pendingCaptchaRequests.size)throw Object.assign(new Error("captcha_request_timeout"),{state:"unknown",evidence:"captcha_request_timeout"});
         note("step",{at:"captcha-unavailable",tag});
         throw Object.assign(new Error("captcha_image_unavailable"),{captchaUnavailable:true});
       }
@@ -886,14 +874,16 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     fallback: captchaFallbackFlag ? async ({png}) => {
       if(Date.now() >= deadline)return "";
       const result=await lib.runCaptchaCommandAsync(captchaFallbackFlag,png,{timeoutMs:Math.min(75000,deadline-Date.now())});
-      note("step",{at:"ocr-remote-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms});
+      note("step",{at:"ocr-remote-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms,error:result.error});
+      if(/^(?:http_[45][0-9]{2}|missing_key|network_error|solver_timeout)$/.test(result.error))
+        throw Object.assign(new Error("captcha_remote_unavailable"),{state:"unknown",evidence:"captcha_remote_unavailable",closeReason:"captcha-exhausted"});
       return result.ok ? result.text : "";
     } : null,
     manual: () => manual(deadline),
     refresh: async () => {
       if (Date.now() >= deadline) throw Object.assign(new Error("captcha_attempt_deadline"),{state:"unknown",closeReason:"captcha-exhausted"});
       try {
-        return await mech.refreshCaptcha(fr,{click:locator=>mech.clickElement(locator,{mouse:page.mouse,sleep})});
+        return await mech.refreshCaptcha(fr,{check:checkCaptchaService,pending:()=>pendingCaptchaRequests.size>0,click:locator=>mech.clickElement(locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined})});
       } catch (error) {
         throw Object.assign(error,{state:"unknown",evidence:error.evidence || "captcha_refresh_failed",closeReason:"captcha-exhausted"});
       }
@@ -971,7 +961,7 @@ async function readPhase(page) {
 // submitted (widget still there, form still there, screen unchanged).
 async function clickContinue(page, frame, tag = "") {
   const before = await readPhase(page);
-  const tried = await mech.clickSubmit(frame, { mouse: page.mouse, sleep, log: note, tag });
+  const tried = await mech.clickSubmit(frame, { mouse: page.mouse, sleep, log: note, tag, scroll:nativeMode?scrollField:undefined });
 
   if (tried.clicked) return { clicked: true, retried: false, via: tried.via };
 
@@ -1349,8 +1339,12 @@ async function clickContinue(page, frame, tag = "") {
     err.closeReason = "creation-rejected";
     throw err;
   }
+  page.on("request",req=>{if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);});
+  page.on("requestfinished",req=>pendingCaptchaRequests.delete(req));
+  page.on("requestfailed",req=>{if(pendingCaptchaRequests.delete(req))captchaResponseStatus=599;});
   page.on("response", (res) => {
     const u = res.url();
+    if(nativeMode && /\/captcha(?:\?|$)/.test(u))captchaResponseStatus=res.status();
     const method = res.request().method();
     const path = new URL(u).pathname;
     const creation = method === "POST" && (path === "/account" || path === "/account/validate");
@@ -1719,7 +1713,7 @@ async function clickContinue(page, frame, tag = "") {
       const current = await widgetFrame(page);
       const action = await mech.findAction(current,mech.RESEND_LABELS);
       if (!action.ok) throw new Error("email_resend_not_found");
-      await mech.clickElement(action.locator,{mouse:page.mouse,sleep});
+      await mech.clickElement(action.locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined});
     });
     note("step",{at:"email-resend",count:1});
     return {asked:true,ok:true,how:"resend-email"};
@@ -1731,7 +1725,7 @@ async function clickContinue(page, frame, tag = "") {
     const back = await mech.findAction(current,["后退","返回","後退","返回上一步","Back","Go back"]);
     if (!back.ok) return false;
     await mech.onceAction(path.join(outdir,"email-replace.json"),async()=>{
-      await mech.clickElement(back.locator,{mouse:page.mouse,sleep});
+      await mech.clickElement(back.locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined});
     });
     const form = await widgetFrame(page);
     await form.locator('input[name="appleId"]').waitFor({state:"visible",timeout:15000});

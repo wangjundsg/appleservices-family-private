@@ -7,6 +7,8 @@ import ocr
 import solver
 import contextlib
 import io
+import json
+import urllib.error
 
 class OCRTests(unittest.TestCase):
     def setUp(self):
@@ -53,5 +55,18 @@ class OCRTests(unittest.TestCase):
             self.assertEqual(solver.main(),0)
         remote.assert_called_once()
         self.assertEqual(output.getvalue(),'aB3D')
+
+    def test_transport_failure_returns_safe_diagnostic_without_answer(self):
+        for failure, code in [
+            (urllib.error.HTTPError('https://fixture.invalid/private',403,'private-response',{},None),'http_403'),
+            (urllib.error.URLError('private-response'),'network_error'),
+            (TimeoutError('private-response'),'network_error'),
+        ]:
+            with self.subTest(code=code), patch('sys.argv',['solver.py',str(self.image),'--skip-local','--key','fixture-key']), \
+                 patch.dict(solver.SOLVERS,{'yes':Mock(side_effect=failure)}), \
+                 contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(solver.main(),1)
+            self.assertEqual(output.getvalue(),'')
+            self.assertEqual(json.loads(errors.getvalue()),{'solver_error':code})
 
 if __name__ == '__main__': unittest.main()

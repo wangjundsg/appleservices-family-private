@@ -2,6 +2,30 @@
 const {test}=require("node:test");
 const assert=require("node:assert/strict");
 const {readChallenge}=require("./captcha-session.cjs");
+test("refresh cooldown applies across rounds and rechecks the deadline",async()=>{
+  let clock=0,captures=0;const times=[];
+  const options={capture:async()=>({digest:String(++captures)}),recognize:async()=>"",clear:()=>{},
+    fallback:async()=>"",refresh:async()=>{times.push(clock);clock+=250;},maxRounds:2,
+    refreshIntervalMs:3000,now:()=>clock,sleep:async ms=>{clock+=ms;}};
+  await assert.rejects(readChallenge(options),/captcha_attempt_limit/);
+  assert.equal(times.length,6);
+  for(let i=1;i<times.length;i++)assert.ok(times[i]-times[i-1]>=3250);
+  clock=0;captures=0;times.length=0;
+  await assert.rejects(readChallenge({...options,available:()=>clock<1000}),/captcha_attempt_deadline/);
+  assert.equal(times.length,1,"cooldown expiry must not send another refresh");
+});
+
+test("service and remote transport failures end the loop without another refresh",async()=>{
+  for(const failingStep of ["capture","refresh","fallback"]) {
+    let refreshes=0,captures=0;
+    const failure=Error("captcha_service_unavailable");
+    await assert.rejects(readChallenge({clear:()=>{},recognize:async()=>"",
+      capture:async()=>{if(failingStep==="capture")throw failure;return {digest:String(++captures)};},
+      refresh:async()=>{refreshes++;if(failingStep==="refresh")throw failure;},
+      fallback:async()=>{throw failure;}}),error=>error===failure);
+    assert.equal(refreshes,{capture:0,refresh:1,fallback:3}[failingStep]);
+  }
+});
 test("unreadable OCR refreshes at most three times, never submits an empty answer",async()=>{
   let captures=0,refreshes=0,clears=0;
   await assert.rejects(readChallenge({capture:async()=>({digest:String(++captures)}),

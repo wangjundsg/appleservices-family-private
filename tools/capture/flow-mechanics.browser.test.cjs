@@ -6,6 +6,67 @@ const path = require("node:path");
 const mech = require("./flow-mechanics.cjs");
 const chrome = process.env.TEST_CHROME_EXE || "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
+test("refresh refuses an outstanding request or a service error without clicking",{skip:!fs.existsSync(chrome)},async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:true});
+  try {
+    const page=await browser.newPage();let clicks=0;
+    await page.setContent('<div class="captcha"><div class="captcha-container"></div><input name="captcha"><button>新验证码</button></div>');
+    const click=async()=>{clicks++;};
+    await assert.rejects(mech.refreshCaptcha(page,{timeout:150,pending:()=>true,click}),/captcha_request_timeout/);
+    assert.equal(clicks,0);
+    let failed=false;
+    await assert.rejects(mech.refreshCaptcha(page,{click:async()=>{clicks++;failed=true;},
+      check:()=>{if(failed)throw Error("captcha_service_unavailable");}}),/captcha_service_unavailable/);
+    assert.equal(clicks,1);
+    await assert.rejects(mech.refreshCaptcha(page,{click,check:()=>{throw Error("captcha_service_unavailable");}}),/captcha_service_unavailable/);
+    assert.equal(clicks,1,"known 503 must never trigger another request");
+    for(const message of ['当前无法获取 Captcha。','Captcha is unavailable']) {
+      await page.locator('.captcha-container').evaluate((el,text)=>el.textContent=text,message);
+      await assert.rejects(mech.refreshCaptcha(page,{click,timeout:200}),/captcha_service_unavailable/);
+      assert.equal(clicks,1,"known error message must never trigger another request");
+    }
+  }finally{await browser.close();}
+});
+
+test("native scrolling settles before clicking and leaves visible fields alone",{skip:!fs.existsSync(chrome)},async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:true});
+  try {
+    const page=await browser.newPage({viewport:{width:1000,height:700}});
+    await page.setContent('<input id="first"><div style="height:1800px"></div><button id="target" onclick="window.clicked++">Next</button><div style="height:600px"></div><script>window.clicked=0;</script>');
+    const field=page.locator('#target');
+    await mech.settleInView(page.locator('#first'));
+    assert.equal(await page.evaluate(()=>scrollY),0);
+    await page.locator('#first').focus();
+    await mech.settleInView(field);
+    const top=await page.evaluate(()=>scrollY);
+    assert.ok(top>1000);
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'first');
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(()=>scrollY),top,'scroll still moving after helper returns');
+    await mech.settleInView(field);
+    assert.equal(await page.evaluate(()=>scrollY),top,'visible control must not be recentered');
+    await mech.clickElement(field,{scroll:mech.settleInView,sleep:async()=>{}});
+    assert.equal(await page.evaluate(()=>window.clicked),1);
+    assert.equal(await page.evaluate(()=>scrollY),top);
+  }finally{await browser.close();}
+});
+
+test("refresh waits for the actual CAPTCHA, not a loading or privacy image",{skip:!fs.existsSync(chrome)},async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:true});
+  try{
+    const page=await browser.newPage();
+    await page.setContent(`<div class="captcha"><div class="captcha-container"><img></div><div class="input"><input name="captcha"><button>新验证码</button></div></div><img id="privacy">
+      <script>let n=0;function png(){const c=document.createElement('canvas');c.width=160;c.height=70;const x=c.getContext('2d');x.fillStyle='rgb('+(++n*40)+',0,0)';x.fillRect(0,0,160,70);return c.toDataURL();}
+      document.querySelector('.captcha-container img').src=png();document.querySelector('#privacy').src=png();window.ready=false;
+      document.querySelector('button').onclick=()=>{document.querySelector('.captcha-container').innerHTML='Loading';document.querySelector('#privacy').src=png();setTimeout(()=>{const img=new Image();img.src=png();document.querySelector('.captcha-container').replaceChildren(img);window.ready=true;},300);};</script>`);
+    await mech.refreshCaptcha(page,{timeout:1500});
+    assert.equal(await page.evaluate(()=>window.ready),true,"loading state treated as a new challenge");
+  }finally{await browser.close();}
+});
+
 test("native field blur never focuses the empty email or phone help control", {skip:!fs.existsSync(chrome)}, async()=>{
   const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
   const browser=await chromium.launch({executablePath:chrome,headless:false});

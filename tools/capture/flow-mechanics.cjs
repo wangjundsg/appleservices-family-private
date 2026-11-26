@@ -21,6 +21,8 @@
 
 "use strict";
 
+const {observeCaptchaImages,pickCaptchaImage}=require("./capture-lib.cjs");
+
 const clip = (value, max) => String(value == null ? "" : value).slice(0, max);
 
 // Fold for text matching only: Apple writes the same control in every locale,
@@ -226,7 +228,7 @@ async function findSubmit(frame, { labels = SUBMIT_LABELS, log = () => {} } = {}
 // telling us the submission would not be accepted.
 async function clickSubmit(
   frame,
-  { mouse = null, log = () => {}, tag = "", labels = SUBMIT_LABELS, now = Date.now, sleep, rand = Math.random, waitEnabledMs = 10000 } = {},
+  { mouse = null, log = () => {}, tag = "", labels = SUBMIT_LABELS, now = Date.now, sleep, rand = Math.random, waitEnabledMs = 10000, scroll = null } = {},
 ) {
   const found = await findSubmit(frame, { labels, log });
   if (!found.ok) {
@@ -247,7 +249,8 @@ async function clickSubmit(
     return { clicked: false, reason: "submit-disabled", locator: button, text: found.text };
   }
 
-  await button.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+  if(scroll)await scroll(button);
+  else await button.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
   const box = await button.boundingBox().catch(() => null);
   if (box && mouse && typeof mouse.move === "function") {
     await mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 14 }).catch(() => {});
@@ -397,24 +400,34 @@ async function phoneMenuAction(frame, labels, click, sleep = ms => new Promise(r
   await click(action.locator);
 }
 
-async function refreshCaptcha(frame, {timeout = 10000, click = locator => locator.click({timeout})} = {}) {
+async function refreshCaptcha(frame, {timeout = 10000, click = locator => locator.click({timeout}), check = ()=>{}, pending = ()=>false} = {}) {
+  const waitUntil=Date.now()+timeout;
+  while(pending() && Date.now()<waitUntil){check();await new Promise(resolve=>setTimeout(resolve,100));}
+  check();
+  if(pending())throw Object.assign(new Error("captcha_request_timeout"),{state:"unknown",evidence:"captcha_request_timeout"});
   const button = frame.getByRole("button", {name:/^(新验证码|新驗證碼|换一张|換一張|New Code|New code|Refresh CAPTCHA)$/i});
   if (await button.count() !== 1) throw Object.assign(new Error("captcha_refresh_unavailable"),{state:"unknown",evidence:"captcha_refresh_unavailable",closeReason:"captcha-exhausted"});
-  const before = await frame.locator("img").evaluateAll(images => images.map(i=>i.src));
+  const original = await observeCaptchaImages(frame);
+  if(original.unavailable)throw Object.assign(new Error("captcha_service_unavailable"),{state:"unknown",evidence:"captcha_service_unavailable"});
+  const picked = pickCaptchaImage(original);
+  const before = picked.ok ? original.images.find(i=>i.index===picked.index)?.source : "";
   const input = frame.locator('input[name="captcha"]');
   if (await input.inputValue()) await input.fill("");
   // Blur validation can replace the refresh button between mousedown and click.
   // Finish it first, then resolve the button again through its locator.
   await input.blur();
+  check();
   await click(button);
-  try {
-    await frame.waitForFunction(old => [...document.querySelectorAll("img")].some((img,index)=>
-      img.complete && img.naturalWidth > 0 && img.src !== old[index]), before, {timeout});
-    return {changed:true};
-  } catch (error) {
-    if (error.name !== "TimeoutError") throw error;
-    return {changed:false};
+  const end=Date.now()+timeout;
+  while(Date.now()<end) {
+    check();
+    const observed=await observeCaptchaImages(frame),current=pickCaptchaImage(observed);
+    if(observed.unavailable)throw Object.assign(new Error("captcha_service_unavailable"),{state:"unknown",evidence:"captcha_service_unavailable"});
+    if(!pending() && current.ok && observed.images.find(i=>i.index===current.index)?.source!==before)return {changed:true};
+    await new Promise(resolve=>setTimeout(resolve,100));
   }
+  if(pending())throw Object.assign(new Error("captcha_request_timeout"),{state:"unknown",evidence:"captcha_request_timeout"});
+  return {changed:false};
 }
 
 // findAction is the text-matched finder used for "send it again": a button or a
@@ -441,8 +454,9 @@ async function findAction(frame, labels, { selector = "button, a, [role=button]"
 // clickElement is the calm version of a click: scroll, hover the centre, settle,
 // press. Used for the resend control so it does not carry the submit machinery
 // (and can never be logged as a submit).
-async function clickElement(locator, { mouse = null, sleep, rand = Math.random } = {}) {
-  await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+async function clickElement(locator, { mouse = null, sleep, rand = Math.random, scroll = null } = {}) {
+  if(scroll)await scroll(locator);
+  else await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
   const box = await locator.boundingBox().catch(() => null);
   if (box && mouse && typeof mouse.move === "function") {
     await mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 12 }).catch(() => {});
@@ -450,6 +464,23 @@ async function clickElement(locator, { mouse = null, sleep, rand = Math.random }
   await sleep(300 + Math.floor(rand() * 400));
   await locator.click({ timeout: 15000 });
   return { clicked: true };
+}
+
+async function settleInView(locator,{sleep=ms=>new Promise(r=>setTimeout(r,ms)),timeout=3000}={}) {
+  const view=await locator.page().evaluate(()=>({width:innerWidth,height:innerHeight}));
+  const visible=box=>box && box.y>=0 && box.y+box.height<=view.height && box.x>=0 && box.x+box.width<=view.width;
+  let prior=await locator.boundingBox();
+  if(visible(prior))return;
+  await locator.evaluate(el=>el.scrollIntoView({behavior:"smooth",block:"center",inline:"nearest"}));
+  const end=Date.now()+timeout;let stable=0;
+  while(Date.now()<end) {
+    await sleep(100);
+    const box=await locator.boundingBox();
+    stable=visible(box) && prior && Math.abs(box.y-prior.y)<1 && Math.abs(box.x-prior.x)<1 ? stable+1:0;
+    if(stable>=2)return;
+    prior=box;
+  }
+  throw Object.assign(new Error("scroll_not_settled"),{state:"unknown",evidence:"scroll_not_settled"});
 }
 
 module.exports = {
@@ -478,5 +509,6 @@ module.exports = {
   freshSMSCode,
   onceAction,
   selectField,
+  settleInView,
   selectByKeyboard,
 };

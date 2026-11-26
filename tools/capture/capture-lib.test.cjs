@@ -19,6 +19,15 @@ const { test } = require("node:test");
 
 const lib = require("./capture-lib.cjs");
 
+test("failed solver exposes only whitelisted diagnostics, never response content",async()=>{
+  for(const [code,expected] of [["http_403","http_403"],["network_error","network_error"],["private-response","solver_failed"]]) {
+    const script=`process.stderr.write('private-response\\n'+JSON.stringify({solver_error:${JSON.stringify(code)}}));process.stdout.write('private-response');process.exitCode=1;`;
+    const result=await lib.runCaptchaCommandAsync([process.execPath,"-e",script],"fixture.png");
+    assert.equal(result.error,expected);assert.equal(result.text,"");assert.equal(result.ok,false);
+    assert.equal(JSON.stringify(result).includes("private-response"),false);
+  }
+});
+
 test("native OCR does not block browser events and bounds solver time",async()=>{
   let ticked=false;const timer=setTimeout(()=>{ticked=true;},10);
   const result=await lib.runCaptchaCommandAsync([process.execPath,"-e","setTimeout(()=>process.stdout.write('aB3D'),80)"],"fixture.png");
@@ -121,6 +130,10 @@ test("§4.3 runCaptchaCommand never throws on a bad command string", () => {
 });
 
 // ---- §4.4: captcha image selection -----------------------------------------
+
+test("known CAPTCHA container never falls back to a small privacy icon",()=>{
+  assert.equal(lib.pickCaptchaImage({scopePresent:true,adjacent:[],images:[{index:0,natural:[124,118]}]}).ok,false);
+});
 
 // The page from the live run: a 378x169 privacy illustration plus a captcha
 // <img> that never loaded because /captcha answered 503.
