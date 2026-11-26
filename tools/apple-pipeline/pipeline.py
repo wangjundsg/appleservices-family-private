@@ -35,18 +35,26 @@ import job_policy
 import protocol_adapter as adapter_registry
 
 
+def _secret_candidates():
+    """Where to look for the image-text key, in order of preference."""
+    here = Path(__file__).resolve()
+    yield Path.cwd() / "state" / "secrets.json"
+    yield here.parents[2] / "state" / "secrets.json"
+    yield Path.home() / ".appleservices" / "secrets.json"
+
+
 def resolve_captcha(cfg: dict) -> tuple:
     """Work out which image-text path to use and where the key comes from.
 
-    Order: explicit config, then YESCAPTCHA_KEY, then the local secrets file.
-    A missing key degrades to manual instead of stalling the job with a hard error,
-    so a fresh checkout still runs without any local configuration.
+    Order: explicit config, then YESCAPTCHA_KEY, then the local secrets file
+    (looked up next to the repo, not only in the process working directory).
+    Missing key fails loudly instead of silently waiting for a human.
     """
     key = str(cfg.get("yescaptcha_key") or "").strip()
     if not key:
         key = str(os.environ.get("YESCAPTCHA_KEY", "")).strip()
     if not key:
-        for candidate in (Path("state/secrets.json"), Path.home() / ".appleservices" / "secrets.json"):
+        for candidate in _secret_candidates():
             try:
                 data = json.loads(candidate.read_text(encoding="utf-8"))
             except Exception:
@@ -54,13 +62,10 @@ def resolve_captcha(cfg: dict) -> tuple:
             key = str(data.get("yescaptcha_key") or "").strip()
             if key:
                 break
-    solver = cfg.get("captcha_solver")
-    if solver is None:
-        solver = "yes" if key else "manual"
+    solver = cfg.get("captcha_solver") or "yes"
     if solver == "yes" and not key:
         solver = "manual"
     return solver, key
-
 
 
 class PipelineError(Exception):
@@ -181,10 +186,11 @@ def validate(cfg):
         raise PipelineError("residential_socks5_required", "usage")
     if cfg.get("accept_terms") is not True:
         raise PipelineError("terms_consent_required", "usage")
-    solver_name, solver_key = resolve_captcha(cfg)
     if cfg.get("captcha_solver") not in (None, "manual", "yes"):
         raise PipelineError("unsupported_captcha_solver", "usage")
-    if cfg.get("captcha_solver") == "yes" and not solver_key:
+    solver_name, solver_key = resolve_captcha(cfg)
+    if solver_name != "yes" and cfg.get("captcha_solver") != "manual":
+        # No key anywhere: fail loudly rather than parking the job on a human.
         raise PipelineError("captcha_key_required", "usage")
     snake, camel = cfg.get("registration_method"), cfg.get("registrationMethod")
     if snake and camel and snake != camel:
