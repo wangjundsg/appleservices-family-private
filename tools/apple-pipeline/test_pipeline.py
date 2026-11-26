@@ -393,6 +393,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(data["country"],"USA")
         self.assertEqual(data["phonecc"],"GB")
 
+    def test_browser_launch_receives_background_flags_and_uses_shared_executor(self):
+        with patch.object(self.job,"forge",return_value={"dirId":"fixture-browser","debuggingPort":12345}) as forge,patch.object(self.job,"process",return_value=(0,{})) as process,patch.object(self.job,"cleanup_browser"):
+            self.job.create()
+        opened=next(call for call in forge.call_args_list if call.args[0]=="open")
+        self.assertEqual(opened.kwargs["args"],["--disable-renderer-backgrounding","--disable-backgrounding-occluded-windows","--disable-background-timer-throttling"])
+        self.assertIn(["node","tools/capture/create-account.cjs"],[call.args[0] for call in process.call_args_list])
+
     def test_invalid_account_region_stops_before_number_or_browser(self):
         self.job.cfg["account_country"]="not-a-region"
         with self.assertRaisesRegex(p.PipelineError,"unsupported_account_country"):

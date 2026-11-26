@@ -83,30 +83,77 @@ function closeReasonFor({ state = "", evidence = "", message = "" } = {}) {
 // the other fields alone, so a retry that re-types the name, the birthday and
 // the password is both slow and an automation tell. `type` is the driver's own
 // human-paced typer; `log` is the driver's note().
-async function fillField(locator, value, label, { type, log = () => {} } = {}) {
+function fieldError(label) {
+  const error = new Error("field_readback_failed");
+  error.state = "failed";
+  error.evidence = `field_mismatch:${/^[a-z_]+$/.test(label) ? label : "field"}`;
+  return error;
+}
+
+async function readField(locator, label) {
+  try { return await locator.inputValue({ timeout: 5000 }); }
+  catch { throw fieldError(label); }
+}
+
+async function fillField(locator, value, label, { type, log = () => {}, normalize = String } = {}) {
   const want = String(value == null ? "" : value);
-  const have = await locator.inputValue({ timeout: 5000 }).catch(() => null);
-  if (have === want) {
+  let have = await readField(locator, label);
+  if (normalize(have) === normalize(want)) {
     log("step", { at: "field-kept", field: label });
     return { kept: true, typed: false };
   }
-  // A box that holds something else is emptied first: typeHuman appends, and an
-  // appended address is what produced "Enter a valid email address".
-  if (have) await locator.fill("", { timeout: 5000 }).catch(() => {});
-  if (typeof type === "function") await type(locator, want, label);
-  return { kept: false, typed: true };
+  if (typeof type !== "function") throw fieldError(label);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (have) {
+        await locator.press("ControlOrMeta+A", { timeout: 5000 });
+        await locator.press("Backspace", { timeout: 5000 });
+        if (await readField(locator, label)) throw fieldError(label);
+      }
+      await type(locator, want, label);
+      // Blur triggers the form's own validation before the readback.
+      await locator.press("Tab", { timeout: 5000 });
+    } catch { throw fieldError(label); }
+    have = await readField(locator, label);
+    if (normalize(have) === normalize(want)) {
+      log("step", { at: "field-verified", field: label, corrected: attempt === 1 });
+      return { kept: false, typed: true, corrected: attempt === 1 };
+    }
+  }
+  throw fieldError(label);
 }
 
 // selectField is the same read-first rule for the three birthday dropdowns.
 async function selectField(locator, value, label, { choose, log = () => {} } = {}) {
   const want = String(value == null ? "" : value);
-  const have = await locator.inputValue({ timeout: 5000 }).catch(() => null);
+  const have = await readField(locator, label);
   if (have === want) {
     log("step", { at: "field-kept", field: label });
     return { kept: true, selected: false };
   }
-  if (typeof choose === "function") await choose(locator, want, label);
-  return { kept: false, selected: true };
+  if (typeof choose !== "function") throw fieldError(label);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await choose(locator, want, label);
+      await locator.press("Tab", { timeout: 5000 });
+    } catch { throw fieldError(label); }
+    if (await readField(locator, label) === want) {
+      log("step", { at: "field-verified", field: label, corrected: attempt === 1 });
+      return { kept: false, selected: true, corrected: attempt === 1 };
+    }
+  }
+  throw fieldError(label);
+}
+
+// Use the native select's keyboard behavior; no DOM value assignment.
+async function selectByKeyboard(locator, value) {
+  const index = await locator.evaluate((el, wanted) => Array.from(el.options)
+    .filter(option => !option.disabled && !option.parentElement.disabled)
+    .findIndex(option => option.value === wanted), String(value));
+  if (index < 0) throw new Error("select_option_unavailable");
+  await locator.press("Home", { timeout: 5000 });
+  for (let i = 0; i < index; i++) await locator.press("ArrowDown", { timeout: 5000 });
+  await locator.press("Enter", { timeout: 5000 });
 }
 
 // ---- B: the submit button -------------------------------------------------
@@ -235,31 +282,13 @@ function channelCode(picked) {
   return String(picked.code || "");
 }
 
-// emailCodeWindow is the tolerance period the email step was missing:
-//   1. wait 90s for the code,
-//   2. ask the page to send another one (once, by text, never by coordinates),
-//   3. wait 120s more,
-//   4. only then give up — and the caller records `waited=210s rescanned=yes`.
-// waitCode(ms) must resolve to something channelCode understands; resend() must
-// resolve to {asked, ok, how} and must not throw (a throw here would end the run
-// the same way the old code did).
-async function emailCodeWindow({ waitCode, resend, log = () => {}, now = Date.now, firstMs = 90000, secondMs = 120000 } = {}) {
+// Keep both delivery windows, but never request another verification message.
+// Legacy callers may still supply `resend`; it is deliberately ignored.
+async function emailCodeWindow({ waitCode, now = Date.now, firstMs = 90000, secondMs = 120000 } = {}) {
   const started = now();
   let picked = await waitCode(firstMs);
-  let resent = { asked: false, ok: false, how: "not-needed" };
+  const resent = { asked: false, ok: false, how: "disabled" };
   if (!channelCode(picked)) {
-    try {
-      resent = await resend();
-    } catch (e) {
-      resent = { asked: true, ok: false, how: "error", error: clip(e && e.message ? e.message : e, 120) };
-    }
-    log("step", {
-      at: "email-resend",
-      asked: Boolean(resent && resent.asked),
-      ok: Boolean(resent && resent.ok),
-      how: (resent && resent.how) || "",
-      elapsed_ms: now() - started,
-    });
     picked = await waitCode(secondMs);
   }
   const waitedMs = now() - started;
@@ -325,4 +354,5 @@ module.exports = {
   isNotSubmit,
   normalizeCloseReason,
   selectField,
+  selectByKeyboard,
 };

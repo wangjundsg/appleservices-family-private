@@ -557,7 +557,9 @@ class Job:
         if not resource.get("dirId"): raise PipelineError("browser_identity_missing")
         atomic(self.folder / "browser.json", {"dirId": resource["dirId"]})
         try:
-            opened = self.forge("open", dirId=resource["dirId"], args=[], headless=False)
+            opened = self.forge("open", dirId=resource["dirId"], args=[
+                "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
+                "--disable-background-timer-throttling"], headless=False)
             port = opened.get("debuggingPort") or str(opened.get("debuggerAddress", "")).rsplit(":", 1)[-1]
             if not str(port).isdigit() or not 0 < int(port) < 65536:
                 raise PipelineError("browser_port_missing")

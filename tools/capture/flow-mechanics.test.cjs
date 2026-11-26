@@ -23,7 +23,7 @@ const mech = require("./flow-mechanics.cjs");
 // fakeControl is a Playwright locator as far as these helpers are concerned:
 // value read, clear, type, select, text, enabled, scroll, box, click.
 function fakeControl({ value = "", text = "", type = "button", enabled = true, box = { x: 100, y: 200, width: 120, height: 40 } } = {}) {
-  const state = { value, text, type, enabled, box, clicks: 0, scrolls: 0, fills: [], selected: null };
+  const state = { value, text, type, enabled, box, clicks: 0, scrolls: 0, fills: [], keys: [], selected: null };
   const control = {
     state,
     async inputValue() {
@@ -32,6 +32,10 @@ function fakeControl({ value = "", text = "", type = "button", enabled = true, b
     async fill(v) {
       state.fills.push(v);
       state.value = String(v);
+    },
+    async press(key) {
+      state.keys.push(key);
+      if (key === "Backspace") state.value = "";
     },
     async pressSequentially(ch) {
       state.value += ch;
@@ -128,7 +132,8 @@ test("A: a field with a stale value is cleared before it is retyped", async () =
     log: () => {},
   });
   assert.equal(out.kept, false);
-  assert.deepEqual(control.state.fills, [""], "the old value was appended to instead of cleared");
+  assert.deepEqual(control.state.fills, [], "clearing should use keyboard input");
+  assert.deepEqual(control.state.keys.slice(0, 2), ["ControlOrMeta+A", "Backspace"]);
   assert.deepEqual(typed, ["james187@outlook.com"]);
   assert.equal(control.state.value, "james187@outlook.com");
 });
@@ -148,7 +153,62 @@ test("A: a birthday dropdown that already shows the wanted month is left alone",
   assert.equal(day.state.selected, "16");
   assert.deepEqual(events.map((e) => [e.at, e.field]), [
     ["field-kept", "birth_month"],
+    ["field-verified", "birth_day"],
   ]);
+});
+
+test("A: truncated input is read back and corrected exactly once", async () => {
+  const control = fakeControl();
+  let writes = 0;
+  const result = await mech.fillField(control, "expected", "first_name", {
+    type: async (loc, value) => { loc.state.value = ++writes === 1 ? "truncated" : value; },
+  });
+  assert.equal(writes, 2);
+  assert.equal(result.corrected, true);
+  assert.equal(control.state.value, "expected");
+});
+
+test("A: persistent mismatch stops after two writes and never logs field contents", async () => {
+  const control = fakeControl();
+  let writes = 0;
+  const logs = [];
+  await assert.rejects(mech.fillField(control, "private-fixture", "password", {
+    type: async loc => { writes++; loc.state.value = "wrong-fixture"; },
+    log: (...event) => logs.push(event),
+  }), error => error.message === "field_readback_failed" && error.evidence === "field_mismatch:password");
+  assert.equal(writes, 2);
+  assert.doesNotMatch(JSON.stringify(logs), /private-fixture|wrong-fixture/);
+});
+
+test("A: formatted phone readback matches digits without a second write", async () => {
+  const control = fakeControl();
+  let writes = 0;
+  await mech.fillField(control, "967365000", "phone_number", {
+    normalize: value => value.replace(/\D/g, ""),
+    type: async loc => { writes++; loc.state.value = "967 365 000"; },
+  });
+  assert.equal(writes, 1);
+});
+
+test("A: unreadable initial field stops before typing", async () => {
+  let writes = 0;
+  await assert.rejects(mech.fillField({ inputValue: async () => { throw Error("secret fixture"); } }, "wanted", "email", {
+    type: async () => { writes++; },
+  }), /field_readback_failed/);
+  assert.equal(writes, 0);
+});
+
+test("A: a dropdown reset is corrected once; a persistent reset fails", async () => {
+  const control = fakeControl({ value: "01" });
+  let writes = 0;
+  const result = await mech.selectField(control, "07", "birth_month", {
+    choose: async loc => { loc.state.value = ++writes === 1 ? "01" : "07"; },
+  });
+  assert.equal(result.corrected, true);
+  assert.equal(writes, 2);
+  await assert.rejects(mech.selectField(control, "09", "birth_month", {
+    choose: async loc => { loc.state.value = "01"; },
+  }), /field_readback_failed/);
 });
 
 // ---- B: the submit button -------------------------------------------------
@@ -256,7 +316,7 @@ test("B: a click that times out is reported once and never retried", async () =>
 
 // ---- C: the email code grace window ---------------------------------------
 
-test("C: 90s, one resend, 120s more — and the code that lands in the second window is used", async () => {
+test("C: both wait windows accept a late code without invoking a supplied resend callback", async () => {
   const clock = fakeClock();
   const windows = [];
   const events = [];
@@ -275,12 +335,12 @@ test("C: 90s, one resend, 120s more — and the code that lands in the second wi
     log: (kind, data) => events.push({ kind, ...data }),
   });
   assert.deepEqual(windows, [90000, 120000], "the grace windows are not 90s then 120s");
-  assert.equal(resends, 1, "the page was asked to resend more than once");
+  assert.equal(resends, 0, "automatic resend must never be called");
   assert.equal(out.timedOut, false);
   assert.equal(out.code, "654321");
-  assert.equal(out.rescanned, true);
+  assert.equal(out.rescanned, false);
   assert.equal(out.waitedMs, 210000);
-  assert.equal(events.filter((e) => e.at === "email-resend").length, 1);
+  assert.equal(events.filter((e) => e.at === "email-resend").length, 0);
 });
 
 test("C: a code that never arrives still costs the full 210s and reports it", async () => {
@@ -301,7 +361,7 @@ test("C: a code that never arrives still costs the full 210s and reports it", as
   assert.equal(out.picked, null);
 });
 
-test("C: a resend that throws does not end the run", async () => {
+test("C: no-code timeout never invokes a throwing resend callback", async () => {
   const clock = fakeClock();
   const events = [];
   const out = await mech.emailCodeWindow({
@@ -316,11 +376,9 @@ test("C: a resend that throws does not end the run", async () => {
     log: (kind, data) => events.push(data),
   });
   assert.equal(out.timedOut, true);
-  assert.equal(out.resent.how, "error");
-  assert.match(out.resent.error, /detached/);
-  const record = events.find((e) => e.at === "email-resend");
-  assert.equal(record.asked, true);
-  assert.equal(record.ok, false);
+  assert.equal(out.resent.how, "disabled");
+  assert.equal(out.resent.asked, false);
+  assert.equal(events.some(e => e.at === "email-resend"), false);
 });
 
 // ---- D: every exit names a reason ----------------------------------------
@@ -386,10 +444,9 @@ test("wiring B: the submit is resolved by the shared finder, not by a loose sele
   assert.ok(gate > 0 && forced > gate, "the force-click is no longer behind the readback");
 });
 
-test("wiring C: the email step runs the grace window and presses one resend", () => {
+test("wiring C: the email step waits without wiring any resend action", () => {
   assert.match(source, /mech\.emailCodeWindow\(/, "the email step has no grace window");
-  assert.match(source, /resendEmailCode\(page, current\)/, "the resend is not wired into the window");
-  assert.match(source, /mech\.findAction\(frame, mech\.RESEND_LABELS\)/, "the resend is not found by text");
+  assert.doesNotMatch(source, /resendEmailCode|mech\.RESEND_LABELS/, "an automatic resend action remains wired");
   // The pickers take the window they are given instead of owning a fixed one.
   assert.match(source, /graphEmailCode\(emailRequestedAt, windowMs\)/);
   const sentAt=source.indexOf('emailRequestedAt = Date.now();',source.indexOf('submissionMayHaveLanded = true;'));

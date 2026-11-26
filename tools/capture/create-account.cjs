@@ -48,7 +48,7 @@
 // and nothing in run.jsonl said why the run had ended:
 //   A  fillForm types only what is not already right      flow-mechanics.fillField
 //   B  the submit is resolved by type=submit, then label, never by position
-//   C  the email step waits 90s, asks one resend, then 120s more
+//   C  the email step waits 90s, then 120s more, without resending
 //   D  every exit writes one {"kind":"close","reason":"..."} record
 //
 // Exit codes (review item B4 — success needs evidence, not hope):
@@ -61,6 +61,23 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
+
+// This file is an executable; import flow-mechanics.cjs for reusable helpers.
+if (require.main !== module) throw new Error("create_account_is_cli_use_flow_mechanics");
+function executorVersion() {
+  const files = ["create-account.cjs", "flow-mechanics.cjs", "account-flow.cjs", "capture-lib.cjs",
+    "registration-lifecycle.cjs", "mail-reader.cjs", "otpgmail.cjs"];
+  return { entry: __filename, node: process.version,
+    files: Object.fromEntries(files.map(file => [file,
+      createHash("sha256").update(fs.readFileSync(path.join(__dirname, file))).digest("hex")])),
+    automaticResend: false, fieldReadback: true, maxFieldCorrections: 1 };
+}
+const executor = executorVersion();
+if (process.argv.includes("--version")) {
+  console.log(JSON.stringify(executor));
+  process.exit(0);
+}
 const flow = require("./account-flow.cjs");
 const lifecycle = require("./registration-lifecycle.cjs");
 const privateInput = lifecycle.readInput(process.env.APPLESERVICES_CREATE_INPUT);
@@ -630,7 +647,7 @@ async function hardRefusal(frame, pageText) {
 async function selectHuman(locator, value, label = "") {
   await locator.click({ timeout: 15000 }).catch(() => {});
   await sleep(300 + Math.floor(Math.random() * 500));
-  await locator.selectOption(value, { timeout: 15000 }).catch(() => {});
+  await mech.selectByKeyboard(locator, value);
   await sleep(250 + Math.floor(Math.random() * 450));
   if (label) note("step", { at: "selected", field: label, value: String(value) });
 }
@@ -642,7 +659,8 @@ async function selectHuman(locator, value, label = "") {
 // A is flow-mechanics.fillField; this wrapper only supplies the typer and the
 // log sink, so the rule itself is unit-tested against a fake locator.
 async function fillIfNeeded(locator, value, label = "") {
-  return mech.fillField(locator, value, label, { type: typeHuman, log: note });
+  return mech.fillField(locator, value, label, { type: typeHuman, log: note,
+    normalize: label === "phone_number" ? value => String(value).replace(/\D/g, "") : String });
 }
 
 // The same read-first rule for the three birthday dropdowns.
@@ -856,28 +874,6 @@ async function clickContinue(page, frame, tag = "") {
   return { clicked: true, retried: true };
 }
 
-// C: one "send it again" press, by text, after the first 90s did not produce a
-// code. Never by coordinates and never on the captcha refresh control: on the
-// email step the resend action IS "Send a new code" / "Gửi mã mới", which is the
-// same copy the submit finder has to avoid on the form. A control that is not on
-// the page is a logged skip, not a failed run.
-async function resendEmailCode(page, frame) {
-  if (Date.now() >= leaseDeadline) return { asked: false, ok: false, how: "activation-expired" };
-  const found = await mech.findAction(frame, mech.RESEND_LABELS);
-  if (!found.ok) {
-    note("step", { at: "email-resend-not-found", reason: found.reason });
-    return { asked: false, ok: false, how: "not-found" };
-  }
-  try {
-    await mech.clickElement(found.locator, { mouse: page.mouse, sleep });
-  } catch (e) {
-    note("step", { at: "email-resend-failed", text: clip(found.text, 40), error: clip(e && e.message ? e.message : e, 120) });
-    return { asked: true, ok: false, how: "click-failed", text: clip(found.text, 40) };
-  }
-  await sleep(1500);
-  return { asked: true, ok: true, how: "clicked", text: clip(found.text, 40) };
-}
-
 (async () => {
   try {
     leaseDeadline = lifecycle.expiry(arg("activation-expires-at", ""));
@@ -889,6 +885,7 @@ async function resendEmailCode(page, frame) {
   // The account directory exists before the first refusal so a refused run still
   // leaves run.jsonl (including the refund answer) next to its siblings.
   fs.mkdirSync(outdir, { recursive: true });
+  note("executor-version", executor);
 
   // Review A1: the refusal is a named outcome, thrown before a browser exists and
   // before the first network request. It goes through the same failure handler as
@@ -980,6 +977,9 @@ async function resendEmailCode(page, frame) {
     args: [
       "--disable-blink-features=AutomationControlled",
       "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
+      "--disable-renderer-backgrounding",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-background-timer-throttling",
     ],
   };
   const proxy = arg("proxy", "");
@@ -1253,14 +1253,9 @@ async function resendEmailCode(page, frame) {
       ? String(actual).replace(/\D/g, "") === String(want).replace(/\D/g, "")
       : actual === want;
   const ensureField = async (fr, selector, want, label, { secret = false } = {}) => {
-    let value = await fieldValue(fr, selector);
-    if (!sameFieldValue(selector, value, want)) {
-      // The repair goes through the same read-first rule (A): a box that is
-      // already right is never touched, so a retry after a rejected captcha
-      // does not look like a typist with no memory.
-      await fillIfNeeded(fr.locator(selector), want, `${label}_retry`);
-      value = await fieldValue(fr, selector);
-    }
+    // Shared helpers already made at most one correction. A later page reset
+    // is a failure to review, not permission to keep rewriting the form.
+    const value = await fieldValue(fr, selector);
     const ok = sameFieldValue(selector, value, want);
     note("step", {
       at: "field-check",
@@ -1319,7 +1314,7 @@ async function resendEmailCode(page, frame) {
     // re-assert our choice (run-20261113d 2.1). The re-assert is a read-first
     // select too, so a widget that kept the value is simply left alone.
     await sleep(7000);
-    await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+    await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
     await fillIfNeeded(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
     // The same hydration pass is what let autofill rewrite the address, so the
     // four value-bearing fields are asserted again after it, right before the
@@ -1329,9 +1324,14 @@ async function resendEmailCode(page, frame) {
     await ensureField(fr, 'input[name="password"]', password, "password", { secret: true });
     await ensureField(fr, 'input[name="confirmPassword"]', password, "confirm_password", { secret: true });
     await ensureField(fr, 'input[name="phoneNumber"]', phone, "phone_number");
+    await ensureField(fr, 'input[name="firstName"]', firstName, "first_name");
+    await ensureField(fr, 'input[name="lastName"]', lastName, "last_name");
+    await ensureField(fr, 'select[data-testid="select-month"]', birthMonth, "birth_month");
+    await ensureField(fr, 'select[data-testid="select-day"]', birthDay, "birth_day");
+    await ensureField(fr, 'select[data-testid="select-year"]', birthYear, "birth_year");
     let dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
     if (dial !== phoneCC) {
-      await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code").catch(() => {});
+      await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
       await sleep(400);
       dial = await fr.$eval('select[name="phoneCode"]', (el) => el.value).catch(() => "");
     }
@@ -1602,11 +1602,9 @@ async function resendEmailCode(page, frame) {
         : (windowMs) => waitFor(() => latestEmailCode(startedAt), windowMs, "email-code");
     let picked;
     if (verdict === "email_step") {
-      // C: 90s, one resend, 120s more. The old code treated the first empty poll
-      // as the end of the run and closed the window with a number still rented.
+      // Continue polling through both windows; do not request another message.
       const window = await mech.emailCodeWindow({
         waitCode: (windowMs) => emailPicker(windowMs),
-        resend: () => resendEmailCode(page, current),
         log: note,
       });
       note("step", {
