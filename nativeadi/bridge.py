@@ -4,6 +4,22 @@ import struct
 import queue
 import hashlib
 
+class NativeFailure(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+def native_failure(result):
+    # Classify in memory; never expose the native payload or its URLs/metadata.
+    raw = result.lower()
+    if b'handshake' in raw and (b'eof' in raw or b'tls' in raw):
+        return NativeFailure('native_tls_handshake_failed')
+    if b'timed out' in raw or b'timeout' in raw:
+        return NativeFailure('native_network_timeout')
+    if b'connection refused' in raw or b'dns error' in raw:
+        return NativeFailure('native_connection_failed')
+    return NativeFailure('native_operation_failed')
+
 class SyncResult(C.Structure):
     _fields_ = [('ptr', C.c_void_p), ('length', C.c_int32)]
 class ExternalData(C.Structure):
@@ -59,8 +75,7 @@ class Bridge:
         return ptr
     def unwrap(self,result):
         if not result or result[0]!=0:
-            # Discard native messages: they may contain private metadata.
-            raise RuntimeError('native request rejected action='+str(result[0] if result else -1))
+            raise native_failure(result or b'')
         return result[1:]
     def sync(self,func,data=b''):
         result=self.library.frb_pde_ffi_dispatcher_sync(func,self.prepare(data),len(data),len(data))

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -80,6 +81,7 @@ func (s *Server) runMacPushProvisioner(ctx context.Context, dir string) error {
 			strings.EqualFold(key, "HTTP_PROXY"),
 			strings.EqualFold(key, "HTTPS_PROXY"),
 			strings.EqualFold(key, "ALL_PROXY"),
+			strings.EqualFold(key, "APPLESERVICES_NATIVE_HTTP_PROXY"),
 			strings.EqualFold(key, "APPLESERVICES_SOCKS_PROXY"):
 			continue
 		}
@@ -90,7 +92,40 @@ func (s *Server) runMacPushProvisioner(ctx context.Context, dir string) error {
 	command.Stdout = &output
 	command.Stderr = &output
 	if err := command.Run(); err != nil {
-		return errors.New("Mac APS bootstrap failed")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return macPushDiagnostic(output.Bytes())
 	}
 	return nil
+}
+
+type macPushFailure struct{ phase string }
+
+func (e *macPushFailure) Error() string { return "Mac APS bootstrap failed: " + e.phase }
+
+func macPushDiagnostic(output []byte) error {
+	for _, line := range bytes.Split(output, []byte("\n")) {
+		var record struct{ Stage, Phase string }
+		if json.Unmarshal(line, &record) != nil || record.Stage != "Mac APS setup" {
+			continue
+		}
+		switch record.Phase {
+		case "initialize", "read-hardware", "read-config-and-identity", "connect-APS", "save-APS":
+			return &macPushFailure{phase: record.Phase}
+		}
+	}
+	return errors.New("Mac APS bootstrap failed")
+}
+
+func macPushFailureMessage(err error) string {
+	var failure *macPushFailure
+	if errors.As(err, &failure) {
+		phase := map[string]string{"initialize": "初始化本机模块", "read-hardware": "读取设备身份", "read-config-and-identity": "校验设备配置", "connect-APS": "连接 Apple 推送服务", "save-APS": "保存推送证书"}[failure.phase]
+		return "Mac 推送初始化失败，阶段：" + phase + "。账号目录已保留，尚未启动账号登录，请修复后选择该账号连接。"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "Mac 推送初始化已取消或超时。账号目录已保留，尚未启动账号登录。"
+	}
+	return "Mac 推送初始化失败，请检查本机模块和网络。账号目录已保留，尚未启动账号登录；未获取具体失败阶段。"
 }

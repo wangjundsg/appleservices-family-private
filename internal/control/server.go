@@ -59,6 +59,7 @@ type Action struct {
 	Note      string `json:"note,omitempty"`
 }
 type Result struct {
+	AccountID           string                          `json:"account_id,omitempty"`
 	Subscription        *SubscriptionInfo               `json:"subscription,omitempty"`
 	OK                  bool                            `json:"ok"`
 	Message             string                          `json:"message,omitempty"`

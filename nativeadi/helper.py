@@ -27,7 +27,7 @@ kernel.SetStdHandle.restype=C.c_int
 kernel.SetStdHandle(C.c_uint32(-11),msvcrt.get_osfhandle(null_fd))
 kernel.SetStdHandle(C.c_uint32(-12),msvcrt.get_osfhandle(null_fd))
 
-from bridge import Bridge, encode_string
+from bridge import Bridge, NativeFailure, encode_string
 
 
 def send(response):
@@ -151,6 +151,9 @@ def main():
 
 if __name__=='__main__':
     try: main()
+    except NativeFailure as failure:
+        send({'error':failure.code})
+        raise SystemExit(1)
     except Exception:
         send({'error':'native ADI operation failed'})
         raise SystemExit(1)

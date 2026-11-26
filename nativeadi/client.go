@@ -145,6 +145,10 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.command != nil || c.closed {
 		return errors.New("nativeadi: client cannot be started again")
 	}
+	helperEnv, err := Environment()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(c.config.ProfileDir, 0700); err != nil {
 		return errors.New("nativeadi: bridge directory unavailable")
 	}
@@ -177,7 +181,7 @@ func (c *Client) Start(ctx context.Context) error {
 	command := exec.Command(c.config.Python, "-u", filepath.Join(directory, "helper.py"))
 	backgroundexec.Configure(command)
 	// The helper needs no account secrets, including through inherited env vars.
-	command.Env = bridgeEnvironment()
+	command.Env = helperEnv
 	input, err := command.StdinPipe()
 	if err != nil {
 		return errors.New("nativeadi: bridge input unavailable")
@@ -232,21 +236,42 @@ func (c *Client) Start(ctx context.Context) error {
 }
 
 func (c *Client) receive(ctx context.Context, id uint64) (reply, error) {
+	// The helper can send its final diagnostic and exit before we are scheduled.
+	// Drain that reply before treating process exit as an unexplained failure.
 	select {
 	case message := <-c.replies:
-		if message.Error != "" {
-			return reply{}, errors.New("nativeadi: native generation or provisioning failed")
-		}
-		identity, err := uuid.Parse(message.DeviceID)
-		if err != nil || identity != c.deviceID || message.ID != id {
-			return reply{}, errors.New("nativeadi: response used a different device or request")
-		}
-		return message, nil
+		return c.validateReply(message, id)
+	default:
+	}
+	select {
+	case message := <-c.replies:
+		return c.validateReply(message, id)
 	case <-c.done:
+		select {
+		case message := <-c.replies:
+			return c.validateReply(message, id)
+		default:
+		}
 		return reply{}, errors.New("nativeadi: helper exited before completing the request")
 	case <-ctx.Done():
 		return reply{}, ctx.Err()
 	}
+}
+
+func (c *Client) validateReply(message reply, id uint64) (reply, error) {
+	if message.Error != "" {
+		switch message.Error {
+		case "native_tls_handshake_failed", "native_network_timeout", "native_connection_failed":
+			return reply{}, errors.New("nativeadi: " + message.Error)
+		default:
+			return reply{}, errors.New("nativeadi: native generation or provisioning failed")
+		}
+	}
+	identity, err := uuid.Parse(message.DeviceID)
+	if err != nil || identity != c.deviceID || message.ID != id {
+		return reply{}, errors.New("nativeadi: response used a different device or request")
+	}
+	return message, nil
 }
 
 func (c *Client) request(ctx context.Context, operation string) (reply, error) {

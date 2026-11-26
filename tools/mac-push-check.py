@@ -111,7 +111,7 @@ def main():
         phase = "connect-APS"
         result = b.call(201, config.pack() + identity.pack() + state_arg + encode_string(str(profile)))
         if len(result) < 13 or result[12] != 0:
-            output.write(json.dumps({"stage": "Mac APS setup", "connected": False}) + "\n")
+            output.write(json.dumps({"stage": "Mac APS setup", "phase": phase, "connected": False}) + "\n")
             return 1
         phase = "save-APS"
         fresh = plistlib.loads((profile / "hw_info.plist").read_bytes())

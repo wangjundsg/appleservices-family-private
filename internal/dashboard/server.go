@@ -25,6 +25,7 @@ import (
 	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 	"github.com/Laky-64/appleservices/internal/privatefs"
+	"github.com/Laky-64/appleservices/nativeadi"
 )
 
 //go:embed web/*
@@ -964,6 +965,9 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	if creds.TwoFactor != "sms" && creds.TwoFactor != "sms-existing" && creds.TwoFactor != "circle" && creds.TwoFactor != "trusted-device" {
 		return control.Result{Message: "不支持的验证方式"}
 	}
+	if _, err := nativeadi.Environment(); err != nil {
+		return control.Result{Stage: "native-proxy", Message: "ADI 代理配置无效：请为 APPLESERVICES_NATIVE_HTTP_PROXY 配置带端口的 HTTP/HTTPS 代理，不能直接填入 SOCKS 地址。"}
+	}
 	s.setLaunching(account, true)
 	defer s.setLaunching(account, false)
 	if current.Running {
@@ -981,7 +985,9 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	// The worker must not start until that account-private identity exists;
 	// otherwise it exits before Apple credential authentication begins.
 	if err := s.ensureMacPushState(ctx, dir); err != nil {
-		return control.Result{Message: "无法初始化该账号的独立 Mac 推送身份，请检查本机依赖后重试"}
+		message := macPushFailureMessage(err)
+		s.setMessage(account, message)
+		return control.Result{Stage: "mac-aps", Message: message}
 	}
 	output, err := os.OpenFile(filepath.Join(dir, "daemon.out.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
@@ -1043,6 +1049,12 @@ func lastProcessError(path string) string {
 		}
 		// Never forward arbitrary stderr (which can contain credentials).
 		switch {
+		case strings.Contains(line, "native_tls_handshake_failed"):
+			return "ADI 网络 TLS 握手失败，请检查 ADI 专用 HTTP 代理配置；该错误本身不代表账号密码被拒绝。"
+		case strings.Contains(line, "native_network_timeout"), strings.Contains(line, "native_connection_failed"):
+			return "ADI 网络连接失败或超时，请检查 ADI 专用代理；已保留原设备身份，未自动重试登录。"
+		case strings.Contains(line, "native_proxy_invalid"):
+			return "ADI 专用代理配置无效，请检查 APPLESERVICES_NATIVE_HTTP_PROXY 的协议和端口。"
 		case strings.Contains(line, "account_repair_"):
 			return "后台账号设置未完成；验证码或其他 Apple 设置仍需处理，未自动重复提交。"
 		case strings.Contains(line, "automatic_activation_"):
@@ -1259,9 +1271,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			result, id := s.addAccount(r.Context(), creds)
-			if id != "" {
-				result.Message = strings.TrimSpace(result.Message)
-			}
+			result.AccountID = id
 			json.NewEncoder(w).Encode(result)
 			return
 		case r.Method == "POST" && r.URL.Path == "/api/accounts/remove":
