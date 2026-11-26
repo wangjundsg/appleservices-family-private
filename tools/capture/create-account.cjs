@@ -48,7 +48,7 @@
 // and nothing in run.jsonl said why the run had ended:
 //   A  fillForm types only what is not already right      flow-mechanics.fillField
 //   B  the submit is resolved by type=submit, then label, never by position
-//   C  the email step waits 90s, then 120s more, without resending
+//   C  the email step waits up to ten minutes, without resending
 //   D  every exit writes one {"kind":"close","reason":"..."} record
 //
 // Exit codes (review item B4 — success needs evidence, not hope):
@@ -1605,6 +1605,7 @@ async function clickContinue(page, frame, tag = "") {
       // Continue polling through both windows; do not request another message.
       const window = await mech.emailCodeWindow({
         waitCode: (windowMs) => emailPicker(windowMs),
+        deadline: leaseDeadline,
         log: note,
       });
       note("step", {
@@ -1643,7 +1644,7 @@ async function clickContinue(page, frame, tag = "") {
       finalState = "waiting_input";
       finalEvidence = `${verdict}-code-timeout`;
       // C/D: name what was waited and whether the page was asked to send again,
-      // so the close record reads `waited=210s rescanned=yes` verbatim.
+      // Record actual elapsed time; waiting never requests a new message.
       if (verdict === "email_step") {
         const waitedS = emailWindow ? Math.round(emailWindow.waitedMs / 1000) : 0;
         const rescanned = emailWindow && emailWindow.rescanned ? "yes" : "no";

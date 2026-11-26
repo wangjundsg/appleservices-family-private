@@ -27,7 +27,7 @@
 | 读回核对 | `fillIfNeeded` / `selectIfNeeded` → 共享模块 | 已正确则跳过；填写后失焦、读回，不符仅纠正一次；持续不符立即停止 |
 | 提交前核对 | `create-account.cjs` 的 `ensureField` | 再检查姓名、生日、邮箱、密码、号码和地区，防止后续页面重绘覆盖 |
 | 提交按钮定位 | `create-account.cjs` 的 `clickContinue` | 只匹配主提交按钮，排除"换一张/新码" |
-| 邮件等待 | `flow-mechanics.emailCodeWindow` | 90 秒后继续等待 120 秒，绝不自动重发；有效租期内保留原任务等迟到验证码 |
+| 邮件等待 | `flow-mechanics.emailCodeWindow` | 默认最多 10 分钟，拆成两段各 5 分钟以兼容读取器；不超过号码租期，绝不自动重发；有效租期内保留原任务等迟到验证码 |
 
 **用字段读回、页面校验和提交回执验收；不能按“少于 60 秒”等耗时阈值推断 Apple 的拒绝原因或可信度。**
 

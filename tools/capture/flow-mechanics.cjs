@@ -284,12 +284,17 @@ function channelCode(picked) {
 
 // Keep both delivery windows, but never request another verification message.
 // Legacy callers may still supply `resend`; it is deliberately ignored.
-async function emailCodeWindow({ waitCode, now = Date.now, firstMs = 90000, secondMs = 120000 } = {}) {
+async function emailCodeWindow({ waitCode, now = Date.now, deadline = Infinity, firstMs = 300000, secondMs = 300000 } = {}) {
   const started = now();
-  let picked = await waitCode(firstMs);
+  // Individual readers accept at most five minutes; retain two bounded windows.
+  const wait = async ms => {
+    const remaining = Math.min(ms, 300000, deadline - now());
+    return remaining > 0 ? waitCode(remaining) : null;
+  };
+  let picked = await wait(firstMs);
   const resent = { asked: false, ok: false, how: "disabled" };
   if (!channelCode(picked)) {
-    picked = await waitCode(secondMs);
+    picked = await wait(secondMs);
   }
   const waitedMs = now() - started;
   const code = channelCode(picked);

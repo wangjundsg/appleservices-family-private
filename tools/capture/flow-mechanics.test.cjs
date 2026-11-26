@@ -334,16 +334,16 @@ test("C: both wait windows accept a late code without invoking a supplied resend
     now: clock.now,
     log: (kind, data) => events.push({ kind, ...data }),
   });
-  assert.deepEqual(windows, [90000, 120000], "the grace windows are not 90s then 120s");
+  assert.deepEqual(windows, [300000, 300000], "each reader call must stay within its five-minute limit");
   assert.equal(resends, 0, "automatic resend must never be called");
   assert.equal(out.timedOut, false);
   assert.equal(out.code, "654321");
   assert.equal(out.rescanned, false);
-  assert.equal(out.waitedMs, 210000);
+  assert.equal(out.waitedMs, 600000);
   assert.equal(events.filter((e) => e.at === "email-resend").length, 0);
 });
 
-test("C: a code that never arrives still costs the full 210s and reports it", async () => {
+test("C: a code that never arrives waits ten minutes and reports it", async () => {
   const clock = fakeClock();
   const out = await mech.emailCodeWindow({
     waitCode: async (ms) => {
@@ -356,9 +356,31 @@ test("C: a code that never arrives still costs the full 210s and reports it", as
   });
   assert.equal(out.timedOut, true);
   assert.equal(out.code, "");
-  assert.equal(out.waitedMs, 210000);
+  assert.equal(out.waitedMs, 600000);
   assert.equal(out.rescanned, false);
   assert.equal(out.picked, null);
+});
+
+test("C: the lease deadline shortens the wait and an expired lease performs no read", async () => {
+  const clock = fakeClock(), windows = [];
+  const waitCode = async ms => { windows.push(ms); await clock.sleep(ms); return null; };
+  const result = await mech.emailCodeWindow({waitCode, now: clock.now, deadline: 420000});
+  assert.deepEqual(windows, [300000, 120000]);
+  assert.equal(result.waitedMs, 420000);
+  await mech.emailCodeWindow({waitCode, now: clock.now, deadline: 420000});
+  assert.equal(windows.length, 2);
+});
+
+test("C: a code arriving after seven minutes is accepted without resending", async () => {
+  const clock = fakeClock();
+  let reads = 0;
+  const result = await mech.emailCodeWindow({now: clock.now, waitCode: async ms => {
+    await clock.sleep(++reads === 1 ? ms : 120000);
+    return reads === 2 ? {code:"001234",messageId:"late-fixture"} : null;
+  }, resend: () => { throw Error("must not resend"); }});
+  assert.equal(result.waitedMs, 420000);
+  assert.equal(result.code, "001234");
+  assert.equal(result.resent.asked, false);
 });
 
 test("C: no-code timeout never invokes a throwing resend callback", async () => {
