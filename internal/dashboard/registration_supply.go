@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -48,8 +49,18 @@ func normalizedRegistrationEmail(email string) string {
 // Called under registerMu: request.json is the durable mailbox reservation.
 // The Outlook read-only API cannot reserve a mailbox for other consumers.
 func (s *Server) prepareAutomaticRegistration(body *registerRequest, settings registerSettings) error {
-	if os.Getenv("SMS_API_KEY") == "" {
-		return errors.New("服务端缺少 SMS_API_KEY")
+	s.resourceDefaults(&settings)
+	if settings.Resources.SMSProvider != "hero" && settings.Resources.SMSProvider != "grizzly" {
+		return errors.New("不支持的购号供应商")
+	}
+	if smsKey(settings.Resources.SMSProvider) == "" {
+		return errors.New("服务端缺少所选短信供应商密钥")
+	}
+	if settings.Resources.MailProvider == "otpgmail" {
+		return s.prepareOTPGmailRegistration(body, settings.Resources)
+	}
+	if settings.Resources.MailProvider != "outlook" {
+		return errors.New("不支持的邮箱供应商")
 	}
 	var client struct {
 		BaseURL  string `json:"baseUrl"`
@@ -133,6 +144,61 @@ func (s *Server) prepareAutomaticRegistration(body *registerRequest, settings re
 		return nil
 	}
 	return errors.New("没有未占用且授权可用的受支持邮箱；当前建号器不支持 outlook.com 和 icloud.com")
+}
+
+func (s *Server) prepareOTPGmailRegistration(body *registerRequest, r resourceSettings) error {
+	order, err := loadOTPGmailOrder(r)
+	if err != nil {
+		return err
+	}
+	email := normalizedRegistrationEmail(order.Email)
+	s.accountsMu.Lock()
+	occupied := false
+	for _, account := range s.accounts {
+		if normalizedRegistrationEmail(account.AppleID) == email {
+			occupied = true
+		}
+	}
+	s.accountsMu.Unlock()
+	if occupied {
+		return errors.New("邮箱已绑定账号，不能重新注册")
+	}
+	files, _ := filepath.Glob(filepath.Join(s.registerRoot(), "reg-*", "request.json"))
+	for _, file := range files {
+		var prior struct {
+			Email     string `json:"email"`
+			OrderFile string `json:"otpgmail_order_file"`
+		}
+		if readRegisterJSON(file, &prior) != nil {
+			return errors.New("历史任务不可读，请先核实邮箱占用")
+		}
+		if normalizedRegistrationEmail(prior.Email) == email {
+			return errors.New("邮箱已有任务，未知或失败结果不会自动释放订单")
+		}
+		if prior.OrderFile != "" {
+			var bound otpGmailOrder
+			if readRegisterJSON(prior.OrderFile, &bound) != nil {
+				return errors.New("历史邮箱订单不可读，请先核实")
+			}
+			if bound.OrderID == order.OrderID {
+				return errors.New("邮箱订单已被任务占用")
+			}
+		}
+	}
+	result, err := s.probeMail(context.Background(), r, true)
+	if err != nil {
+		return err
+	}
+	if result["orderReady"] != true {
+		return errors.New("邮箱订单未处于等待新码状态，未购买号码")
+	}
+	random := make([]byte, 18)
+	if _, err := rand.Read(random); err != nil {
+		return errors.New("无法生成账号密码")
+	}
+	body.Email, body.Password = email, "Aa1!"+hex.EncodeToString(random)
+	body.mailOrder = &order
+	return nil
 }
 
 func (s *Server) registrationInProgress(account *Account) bool {

@@ -17,11 +17,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/privatefs"
 )
 
 // The panel supervises the existing pipeline. Credentials stay in private files;
 // neither subprocess output nor upstream responses are sent to the browser.
 type registerRequest struct {
+	mailOrder          *otpGmailOrder
 	Family             registrationFamily `json:"family"`
 	Automatic          bool               `json:"automatic"`
 	Email              string             `json:"email"`
@@ -42,9 +45,11 @@ type registerRequest struct {
 }
 
 type registerSettings struct {
-	Roxy           map[string]any `json:"roxy"`
-	CodePoolConfig string         `json:"codePoolConfig"`
-	Purchase       purchasePolicy `json:"purchase"`
+	Roxy           map[string]any            `json:"roxy"`
+	CodePoolConfig string                    `json:"codePoolConfig"`
+	Purchase       purchasePolicy            `json:"purchase"`
+	Resources      resourceSettings          `json:"resources"`
+	ProxyProfiles  map[string]map[string]any `json:"proxyProfiles"`
 }
 
 type registerMeta struct {
@@ -140,6 +145,7 @@ var registerMessages = map[string]string{
 	"family_role_mismatch":                   "任务用途不允许执行此家庭或订阅操作。",
 }
 var registrationCountries = map[string][2]string{
+	"PL": {"pl-PL", "Europe/Warsaw"}, "CO": {"es-CO", "America/Bogota"},
 	"GB": {"en-GB", "Europe/London"}, "US": {"en-US", "America/New_York"},
 	"CA": {"en-CA", "America/Toronto"}, "AU": {"en-AU", "Australia/Sydney"},
 	"CN": {"zh-CN", "Asia/Shanghai"}, "DE": {"de-DE", "Europe/Berlin"},
@@ -168,7 +174,7 @@ func validateRegistration(body registerRequest) error {
 		if body.RetryOf != "" {
 			return errors.New("自动任务请在原任务中核实，不能换任务重购")
 		}
-		if !strings.Contains("|GB|CA|ID|US|VN|", "|"+body.PhoneCC+"|") {
+		if len(body.PhoneCC) != 2 || !strings.Contains("|GB|CA|ID|US|VN|PL|CO|", "|"+body.PhoneCC+"|") {
 			return errors.New("不支持的自动购号国家")
 		}
 		if !body.AcceptTerms || body.CaptchaProvider != "yes" {
@@ -266,13 +272,11 @@ func (s *Server) pipelineAccount(account *Account) bool {
 
 func (s *Server) registerSettings() (registerSettings, error) {
 	var settings registerSettings
-	file := os.Getenv("APPLESERVICES_REGISTER_CONFIG")
-	if file == "" {
-		file = filepath.Join(s.config.Dir, "registration-config.json")
-	}
-	if readRegisterJSON(file, &settings) != nil {
+	if readRegisterJSON(s.registerConfigFile(), &settings) != nil {
+		s.resourceDefaults(&settings)
 		return settings, errors.New("服务端尚未配置 registration-config.json")
 	}
+	s.resourceDefaults(&settings)
 	for _, key := range []string{"token", "workspaceId", "projectId"} {
 		if value, ok := settings.Roxy[key].(string); !ok || strings.TrimSpace(value) == "" {
 			return settings, errors.New("服务端 Forge 配置不完整")
@@ -329,11 +333,19 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		if !settings.Purchase.valid() {
 			return "", errors.New("购号价格和总预算尚未配置")
 		}
+		if settings.Resources.SMSProvider == "hero" {
+			if body.PhoneCC != settings.Resources.PhoneCountry {
+				return "", errors.New("号码国家与保存的 Hero 设置不一致，请刷新资源设置")
+			}
+			if settings.Resources.DurationHours != 0 && (settings.Resources.DurationHours != 24 || !settings.Resources.AcceptRentalPriceChange) {
+				return "", errors.New("一天租期需确认供应商不保证下单价格上限")
+			}
+		}
 		if err := s.prepareAutomaticRegistration(&body, settings); err != nil {
 			return "", err
 		}
 	}
-	key := os.Getenv(strings.ToUpper(body.Platform) + "_API_KEY")
+	key := smsKey(body.Platform)
 	if key == "" && !body.Automatic {
 		return "", errors.New("服务端缺少所选接码平台的 API_KEY 环境变量")
 	}
@@ -403,17 +415,18 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	id := "reg-" + time.Now().Format("20060102") + "-" + hex.EncodeToString(random)
 	folder := s.registerFolder(id)
 	roxy := settings.Roxy
-	locale := registrationCountries[body.PhoneCC]
+	accountCountry := "US"
+	if body.Family.Role == "organizer" || body.Family.Role == "member" {
+		accountCountry = body.Family.Region
+	}
+	locale := registrationCountries[accountCountry]
 	roxy["locale"], roxy["timeZone"] = locale[0], locale[1]
 	if body.Egress.Mode == "roxy" {
-		proxy, ok := roxy["proxyInfo"].(map[string]any)
-		if !ok || proxy["host"] == nil || proxy["host"] == "" {
-			return "", errors.New("服务端未配置 SOCKS5 代理地址")
+		proxy, proxyErr := resourceProxy(settings, accountCountry, body.Egress.ProxyPort)
+		if proxyErr != nil {
+			return "", proxyErr
 		}
-		proxy["protocol"], proxy["port"] = "SOCKS5", body.Egress.ProxyPort
-		if username, ok := proxy["proxyUserName"].(string); ok {
-			proxy["proxyUserName"] = strings.ReplaceAll(username, "{country}", strings.ToLower(body.PhoneCC))
-		}
+		roxy["proxyInfo"] = proxy
 	} else {
 		delete(roxy, "proxyInfo")
 	}
@@ -441,8 +454,24 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		"sms": map[string]any{"api": api, "key": key, "activation": body.Activation, "phone": body.Phone, "phonecc": body.PhoneCC, "expires_at": body.ExpiresAt.Format(time.RFC3339)}}
 	if body.Automatic {
 		delete(manifest, "email_code_file")
-		manifest["code_pool_config"] = settings.CodePoolConfig
-		manifest["sms"] = map[string]any{"auto_purchase": true, "phonecc": body.PhoneCC, "currency": settings.Purchase.Currency, "max_price": settings.Purchase.MaxPrice, "max_total": settings.Purchase.MaxTotal}
+		if settings.Resources.MailProvider == "otpgmail" {
+			order := body.mailOrder
+			if order == nil || !strings.EqualFold(order.Email, body.Email) {
+				return "", errors.New("邮箱订单发生变化，请核实后继续")
+			}
+			if err := privatefs.EnsureDir(folder); err != nil {
+				return "", errors.New("无法创建私有任务目录")
+			}
+			orderPath := filepath.Join(folder, "otpgmail-order.json")
+			if err := writeRegisterJSON(orderPath, order); err != nil {
+				return "", errors.New("无法冻结邮箱订单")
+			}
+			manifest["otpgmail_order_file"] = orderPath
+		} else {
+			manifest["code_pool_config"] = settings.CodePoolConfig
+		}
+		manifest["sms"] = map[string]any{"auto_purchase": true, "phonecc": body.PhoneCC, "currency": settings.Purchase.Currency, "max_price": settings.Purchase.MaxPrice, "max_total": settings.Purchase.MaxTotal,
+			"providers": []string{settings.Resources.SMSProvider}, "duration_hours": settings.Resources.DurationHours, "accept_rental_price_change": settings.Resources.AcceptRentalPriceChange}
 	}
 	if body.Family.Role == "organizer" || body.Family.Role == "member" {
 		manifest["account_country"] = body.Family.Region
@@ -450,7 +479,12 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if method == methodProtocol {
 		// The pipeline owns purchasing, refunds and cleanup; it hands these paths
 		// to the protocol adapter so the adapter never guesses a directory.
-		manifest["protocol"] = protocolPaths(folder)
+		protocol := map[string]any{}
+		for key, value := range protocolPaths(folder) {
+			protocol[key] = value
+		}
+		protocol["auto_codes"] = body.Automatic
+		manifest["protocol"] = protocol
 	}
 	if body.RetryOf != "" {
 		manifest["retry_of"] = body.RetryOf
@@ -472,6 +506,13 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	command := exec.Command(program, programArgs...)
 	command.Dir = s.config.RepoRoot
 	command.Env = append(os.Environ(), "APPLESERVICES_PIPELINE_STATE="+s.registerRoot())
+	// Existing launchers may supply either alias. The pipeline reads these names.
+	if value := smsKey("hero"); value != "" {
+		command.Env = append(command.Env, "SMS_API_KEY_HERO="+value)
+	}
+	if value := smsKey("grizzly"); value != "" {
+		command.Env = append(command.Env, "SMS_API_KEY="+value)
+	}
 	configureProcess(command)
 	if err := command.Start(); err != nil {
 		code := -1
@@ -542,13 +583,20 @@ func (s *Server) registerView(id string) map[string]any {
 }
 
 func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/register/resources" || r.URL.Path == "/api/register/resources/check" {
+		s.serveResources(w, r)
+		return
+	}
 	if r.URL.Path == "/api/register/config" {
 		if r.Method != "GET" {
 			w.WriteHeader(405)
 			return
 		}
+		s.registerMu.Lock()
 		settings, err := s.registerSettings()
-		json.NewEncoder(w).Encode(map[string]any{"purchaseEnabled": s.config.AllowPurchase, "subscriptionEnabled": s.config.AllowSubscription, "familyOrganizers": s.familyOrganizers(), "budgetConfigured": err == nil && settings.Purchase.valid(), "mailboxConfigured": err == nil && settings.CodePoolConfig != ""})
+		s.registerMu.Unlock()
+		_, orderErr := loadOTPGmailOrder(settings.Resources)
+		json.NewEncoder(w).Encode(map[string]any{"purchaseEnabled": s.config.AllowPurchase, "subscriptionEnabled": s.config.AllowSubscription, "familyOrganizers": s.familyOrganizers(), "budgetConfigured": err == nil && settings.Purchase.valid(), "mailboxConfigured": err == nil && ((settings.Resources.MailProvider == "otpgmail" && orderErr == nil) || (settings.Resources.MailProvider == "outlook" && settings.CodePoolConfig != "")), "smsConfigured": smsKey(settings.Resources.SMSProvider) != "", "resources": settings.Resources})
 		return
 	}
 	if r.URL.Path == "/api/register" {

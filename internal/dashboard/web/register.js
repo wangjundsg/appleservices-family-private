@@ -11,17 +11,73 @@
   let jobs = [];
   let setup = null;
   let familySelected=false;
+  const resourceForm=$('resourceForm'), resourceField=name=>resourceForm.elements.namedItem(name);
+  let resourceBusy=false, resourceChecking=0;
+  function rentalConsent() { $('resourceRentalConsent').hidden=resourceField('durationHours').value!=='24'; }
+  resourceField('durationHours').addEventListener('change',rentalConsent);
+  function renderResources(view) {
+    const settings=view.settings;
+    for(const name of ['credentialFile','orderFile','phoneCountry','durationHours','proxyPort']) resourceField(name).value=settings[name]|| (name==='durationHours'?'0':'');
+    resourceField('acceptRentalPriceChange').checked=!!settings.acceptRentalPriceChange;
+    resourceField('maxPrice').value=view.purchase.maxPrice||'';resourceField('maxTotal').value=view.purchase.maxTotal||'';
+    resourceField('proxyProfile').replaceChildren(...view.proxyProfiles.map(p=>new Option(p.name,p.id)));
+    resourceField('proxyProfile').value=settings.proxyProfile;
+    if(!resourceField('proxyPort').value) resourceField('proxyPort').value=view.proxyPort||'';
+    $('resourceMailState').textContent=view.orderConfigured ? '已绑定 Gmail 订单，仓库 '+view.warehouse+'；供应商状态待查询。' : view.orderMessage;
+    $('resourceSMSState').textContent=view.smsCredentialLoaded ? 'Hero 密钥已加载；号码有效期与库存以供应商回执为准。' : '当前面板未加载 Hero 密钥，请使用配置好凭据的启动环境。';
+    $('resourceProxyName').textContent=view.proxyProvider||'现有配置';
+    $('resourceProxyState').textContent=view.proxyConfigured ? '配置已读取；按账号地区固定出口，手机国家独立。' : view.proxyMessage;
+    $('resourcePurchaseState').textContent=view.purchaseEnabled ? '购号开关已开启；开始注册才会购号。' : '当前服务购号开关关闭；保存与查询不会开启。';
+    if(view.configError) resourceNotice(view.configError);
+    rentalConsent();
+  }
+  function resourceNotice(message) { $('resourceNotice').textContent=message;$('resourceNotice').hidden=!message; }
+  async function loadResources() { renderResources(await api('/resources')); }
+  resourceForm.addEventListener('submit',async event=>{
+    event.preventDefault();if(resourceBusy||resourceChecking||!resourceForm.reportValidity())return;
+    resourceBusy=true;const button=resourceForm.querySelector('button[type=submit]');button.disabled=true;
+    try {
+      const settings={mailProvider:'otpgmail',smsProvider:'hero',credentialFile:resourceField('credentialFile').value.trim(),orderFile:resourceField('orderFile').value.trim(),phoneCountry:resourceField('phoneCountry').value,durationHours:Number(resourceField('durationHours').value),acceptRentalPriceChange:resourceField('acceptRentalPriceChange').checked,proxyProfile:resourceField('proxyProfile').value,proxyPort:Number(resourceField('proxyPort').value)};
+      const purchase={maxPrice:resourceField('maxPrice').value.trim(),maxTotal:resourceField('maxTotal').value.trim(),currency:'USD'};
+      renderResources(await api('/resources',{settings,purchase}));
+      for(const id of ['resourceMailResult','resourceSMSResult','resourceProxyResult']) {$(id).textContent='设置已更改，请重新查询';delete $(id).dataset.ok;}
+      resourceNotice('资源设置已保存。已有任务保持原配置；未购买或发送验证码。');
+      await loadSetup();
+    } catch(error) {resourceNotice(error.message);} finally {resourceBusy=false;button.disabled=false;}
+  });
+  for(const button of document.querySelectorAll('[data-resource-check]')) button.addEventListener('click',async()=>{
+    if(resourceBusy)return;
+    resourceChecking++;resourceForm.querySelector('button[type=submit]').disabled=true;
+    const kind=button.dataset.resourceCheck, output=$({mail:'resourceMailResult',sms:'resourceSMSResult',proxy:'resourceProxyResult'}[kind]);
+    button.disabled=true;output.textContent='正在按已保存的设置执行只读查询…';delete output.dataset.ok;
+    try {
+      const answer=await api('/resources/check',{resource:kind});
+      output.dataset.ok=String(answer.ok);
+      let message=answer.message;
+      if(answer.ok) {
+        const result=answer.result;
+        if(kind==='mail') {
+          const states={not_bound:'尚未绑定邮箱订单',waiting_code:'订单等待新码',queued:'订单仍在排队',completed:'订单已有完成回执，需核实原任务',cancelled:'订单已取消'};
+          message='余额 '+result.balanceVnd+' VND。'+result.offers.map(o=>'仓库 '+o.warehouse+'：'+o.priceVnd+' VND，库存 '+o.stock).join('；')+'。'+(states[result.orderStatus]||'订单状态待核实')+'。取到验证码不等于账号创建成功。';
+        } else if(kind==='sms') message='余额 '+result.balance+'（'+result.balanceCurrency+'），活跃订单 '+result.activeOrders+'。报价 '+result.quote.price+'（'+result.quote.currency+'），库存 '+result.quote.stock+'；这是查询快照，下单以回执为准。';
+        else message='固定代理连通成功；请求地区 US，未核验实际出口地区。未更换出口。';
+      }
+      output.textContent=message+' 查询于 '+new Date(answer.checkedAt).toLocaleString();
+    } catch(error) {output.dataset.ok='false';output.textContent=error.message;}
+    finally {button.disabled=false;resourceChecking--;resourceForm.querySelector('button[type=submit]').disabled=resourceChecking>0;}
+  });
   function automaticMode() {
     const automatic = field('automatic').checked;
     for (const name of ['email','password','phone','platform','activation','expiresAt']) {
       field(name).disabled=automatic; field(name).closest('label').hidden=automatic;
     }
-    for (const option of field('phonecc').options) option.disabled=automatic && !['GB','CA','ID','US','VN'].includes(option.value);
-    if (field('phonecc').selectedOptions[0].disabled) field('phonecc').value='GB';
+    for (const option of field('phonecc').options) option.disabled=automatic && !['PL','CO','US'].includes(option.value);
+    if(automatic) field('phonecc').value=setup?.resources?.phoneCountry||'PL';
+    field('phonecc').disabled=automatic;
     $('registerPasswordHint').hidden=automatic; $('registerExpiryHint').hidden=automatic;
     $('registerAutomaticHint').hidden=!automatic;
-    const ready=setup && setup.purchaseEnabled && setup.budgetConfigured && setup.mailboxConfigured;
-    $('registerAutomaticHint').textContent=ready ? '自动选取未占用邮箱、生成密码并取码。建号后交给现有面板完成激活。' : '自动购号尚未开放：需先商定并配置价格、邮箱池，再显式开启购号。';
+    const ready=setup && setup.purchaseEnabled && setup.budgetConfigured && setup.mailboxConfigured && setup.smsConfigured && (setup.resources.durationHours!==24 || setup.resources.acceptRentalPriceChange);
+    $('registerAutomaticHint').textContent=ready ? '本机配置齐备；开始前将核实绑定邮箱订单，再按保存的 Hero 预算购号。创建与激活分别核验。' : '尚不能自动建号：请在注册资源中绑定邮箱订单、配置 Hero 与预算，并核对服务端购号开关。';
     const role=field('familyRole').value, mother=role==='organizer', member=role==='member';
     $('registerFamilyRegionLabel').hidden=!mother;field('familyRegion').disabled=!mother;
     $('registerOrganizerLabel').hidden=!member; field('organizer').disabled=!member; field('organizer').required=member;
@@ -36,6 +92,7 @@
   field('organizer').addEventListener('change',automaticMode);
   async function loadSetup() {
     setup=await api('/config');
+    if(setup.resources?.proxyPort) field('proxyPort').value=setup.resources.proxyPort;
     const prior=field('organizer').value, mothers=setup.familyOrganizers||[];
     field('organizer').replaceChildren(...(mothers.length ? mothers.map(m=>new Option(m.name||m.id,m.id)) : [new Option('请先完成一个母号','')]));
     if(mothers.some(m=>m.id===prior)) field('organizer').value=prior;
@@ -164,6 +221,6 @@
       }
     } catch(error) { notice(error.message); }
   });
-  automaticMode(); loadSetup().catch(error=>notice(error.message));
+  automaticMode(); loadSetup().catch(error=>notice(error.message)); loadResources().catch(error=>resourceNotice(error.message));
   refresh(); setInterval(refresh,3000);
 })();

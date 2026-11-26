@@ -25,5 +25,22 @@ main > .request-card.registration-card { margin-bottom:24px; opacity:1; animatio
 .register-evidence img { width:100%; height:auto; display:block; }
 .register-evidence figcaption { padding:10px; overflow-wrap:anywhere; color:var(--muted); font-size:12px; }
 .registration-card [hidden] { display:none !important; }
+.resource-workbench { margin-top:18px; border:1px solid #d8e0e8; border-radius:10px; padding:0 18px; background:#fbfcfe; }
+.resource-workbench summary { padding:16px 0; font-size:14px; font-weight:600; cursor:pointer; color:#263649; }
+.resource-workbench summary span { margin-left:16px; font-size:12px; font-weight:400; color:#62748a; }
+.resource-intro { font-size:13px; line-height:1.7; color:#62748a; margin:0 0 16px; }
+.resource-row { display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px 20px; padding:16px 0; border-top:1px solid #dfe6ee; }
+.resource-row h4 { margin:0 0 7px; font-size:14px; color:#263649; }
+.resource-row h4 span { font-size:12px; font-weight:400; margin-left:12px; color:#62748a; }
+.resource-row p { margin:0; font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.resource-result { grid-column:1/-1; color:#62748a; }
+.resource-result[data-ok=true] { color:#196747; }
+.resource-result[data-ok=false] { color:#a23f29; }
+.resource-workbench .text-button { font-size:13px; min-height:36px; padding:8px; }
+.resource-workbench .cache-note { font-size:12px; line-height:1.7; }
+.resource-workbench .button { font-size:13px; }
+#resourceForm { border-top:1px solid #dfe6ee; padding-bottom:20px; }
+.resource-workbench summary:focus-visible { outline:2px solid #2369b5; outline-offset:3px; }
+@media(max-width:600px) { .resource-workbench summary span { display:block; margin:8px 0 0 16px; } .resource-row { grid-template-columns:1fr; } .resource-row button { justify-self:start; } }
 @media(max-width:1000px) { .register-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media(max-width:600px) { .register-fields { grid-template-columns:1fr; } .registration-card>.card-title-row { align-items:flex-start; gap:12px; } .register-stages { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; } .register-progress-head { flex-direction:column; } }

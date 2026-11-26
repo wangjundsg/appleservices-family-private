@@ -34,8 +34,33 @@
   <div id="notice" class="notice" role="status" hidden></div>
   <section class="request-card registration-card overview-only" aria-labelledby="registerHeading">
     <div class="card-title-row"><div><h3 id="registerHeading">新建 Apple ID</h3><p class="card-description">注册、登录与设备登记，完成后加入账号列表。</p></div><button type="button" class="button button-primary" id="registerToggle" aria-expanded="false" aria-controls="registerForm">新建账号</button></div>
+    <details class="resource-workbench" id="resourceWorkbench">
+      <summary>注册资源<span>邮箱、手机与固定出口</span></summary>
+      <p class="resource-intro">先绑定邮箱订单，再核对手机和代理。查询不会购买资源或发送验证码。</p>
+      <div class="resource-list">
+        <article class="resource-row"><div><h4>邮箱 <span>OTPGmail</span></h4><p id="resourceMailState">正在读取本机配置…</p></div><button type="button" class="text-button" data-resource-check="mail">查询余额与订单</button><p class="resource-result" id="resourceMailResult" role="status">尚未查询供应商</p></article>
+        <article class="resource-row"><div><h4>手机 <span>Hero SMS</span></h4><p id="resourceSMSState">正在读取本机配置…</p></div><button type="button" class="text-button" data-resource-check="sms">查询余额与库存</button><p class="resource-result" id="resourceSMSResult" role="status">尚未查询供应商</p></article>
+        <article class="resource-row"><div><h4>代理 <span id="resourceProxyName">现有配置</span></h4><p id="resourceProxyState">正在读取本机配置…</p></div><button type="button" class="text-button" data-resource-check="proxy">检查固定出口</button><p class="resource-result" id="resourceProxyResult" role="status">尚未检查连通性</p></article>
+      </div>
+      <form id="resourceForm">
+        <div class="register-fields">
+          <label>邮箱凭据文件<input name="credentialFile" required autocomplete="off" placeholder="本机 DPAPI 文件的绝对路径"></label>
+          <label>已购买的邮箱订单文件<input name="orderFile" autocomplete="off" placeholder="本机私有订单 JSON 的绝对路径"></label>
+          <label>Hero 号码国家<select name="phoneCountry"><option value="PL">波兰 +48</option><option value="CO">哥伦比亚 +57</option><option value="US">美国 +1</option></select></label>
+          <label>Hero 号码有效期<select name="durationHours"><option value="0">普通激活 · 以回执为准</option><option value="24">一天租期 · 24 小时</option></select></label>
+          <label>单号码最高预算（USD）<input name="maxPrice" inputmode="decimal" placeholder="未配置"></label>
+          <label>单账号累计预算（USD）<input name="maxTotal" inputmode="decimal" placeholder="未配置"></label>
+          <label>固定代理配置<select name="proxyProfile"><option value="current">现有配置</option></select></label>
+          <label>固定代理端口<input name="proxyPort" type="number" min="1" max="65535" placeholder="沿用现有配置"></label>
+        </div>
+        <label class="register-consent" id="resourceRentalConsent"><input name="acceptRentalPriceChange" type="checkbox">接受一天租期下单价格可能变化；Hero 此接口不提供价格硬上限。</label>
+        <p class="cache-note">邮箱凭据仅由本机当前 Windows 用户解密。代理密码不在页面显示；已有任务保持原订单和出口。</p>
+        <div class="register-actions"><button class="button button-primary" type="submit">保存资源设置</button><span id="resourcePurchaseState" class="cache-note"></span></div>
+        <p id="resourceNotice" class="register-notice" role="status" hidden></p>
+      </form>
+    </details>
     <form id="registerForm" hidden>
-      <label class="register-consent"><input name="automatic" type="checkbox" checked>自动从 Outlook 邮箱池选取邮箱并购买号码</label>
+      <label class="register-consent"><input name="automatic" type="checkbox" checked>使用已绑定的 OTPGmail 邮箱订单，按预算购买 Hero 号码</label>
       <p id="registerAutomaticHint" class="cache-note">正在检查自动建号配置…</p>
       <div class="register-fields">
         <label>账号用途<select name="familyRole"><option value="organizer">母号 · 开通 iCloud+ 并新建家庭</option><option value="member">成员 · 加入母号家庭</option><option value="none">仅建号和激活</option></select></label>
@@ -43,12 +68,12 @@
         <label id="registerFamilyRegionLabel">家庭账号地区<select name="familyRegion"><option value="US">美国 · 现有限定 USD 0.99/月</option><option value="CN">中国大陆 · 现有限定 CNY 6.00/月</option></select></label>
         <label>账号邮箱<input name="email" type="email" maxlength="254" autocomplete="off" required placeholder="你的邮箱地址"></label>
         <label>账号密码<input name="password" type="password" minlength="8" maxlength="256" autocomplete="new-password" required aria-describedby="registerPasswordHint"></label>
-        <label>号码国家<select name="phonecc"><option value="GB">英国 +44</option><option value="US">美国 +1</option><option value="CA">加拿大 +1</option><option value="ID">印尼 +62</option><option value="VN">越南 +84</option><option value="AU">澳大利亚 +61</option><option value="CN">中国 +86</option><option value="DE">德国 +49</option><option value="FR">法国 +33</option><option value="SG">新加坡 +65</option><option value="HK">中国香港 +852</option><option value="JP">日本 +81</option></select></label>
+        <label>号码国家<select name="phonecc"><option value="PL">波兰 +48</option><option value="CO">哥伦比亚 +57</option><option value="GB">英国 +44</option><option value="US">美国 +1</option><option value="CA">加拿大 +1</option><option value="ID">印尼 +62</option><option value="VN">越南 +84</option><option value="AU">澳大利亚 +61</option><option value="CN">中国 +86</option><option value="DE">德国 +49</option><option value="FR">法国 +33</option><option value="SG">新加坡 +65</option><option value="HK">中国香港 +852</option><option value="JP">日本 +81</option></select></label>
         <label>手机号码（不含国家码）<input name="phone" inputmode="numeric" pattern="[0-9]{5,15}" maxlength="15" autocomplete="off" required placeholder="7700900123"></label>
-        <label>接码平台<select name="platform"><option value="grizzly">Grizzly SMS</option><option value="hero">Hero SMS</option></select></label>
+        <label>接码平台<select name="platform"><option value="hero">Hero SMS</option><option value="grizzly">Grizzly SMS</option></select></label>
         <label>已购买的激活 ID<input name="activation" pattern="[A-Za-z0-9_\-]{1,100}" maxlength="100" autocomplete="off" required></label>
         <label>号码到期时间（本机时区）<input name="expiresAt" type="datetime-local" required aria-describedby="registerExpiryHint"></label>
-        <label>网络出口<select name="mode"><option value="roxy">Roxy · SOCKS5 代理</option><option value="direct">直连</option></select></label>
+        <label>网络出口<select name="mode"><option value="roxy">已保存的固定代理</option><option value="direct">直连</option></select></label>
         <label id="registerPortLabel">SOCKS5 端口<input name="proxyPort" type="number" min="1" max="65535" value="10005" required></label>
       </div>
       <p id="registerPasswordHint" class="cache-note">密码至少 8 位，包含大小写字母、数字和特殊字符。</p>

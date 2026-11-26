@@ -29,7 +29,7 @@ func TestAutomaticRequestUsesPrivateManifestAndDoesNotCollideOnEmptyActivation(t
 	defer pool.Close()
 	client := filepath.Join(s.config.RepoRoot, "client.json")
 	_ = writeRegisterJSON(client, map[string]string{"baseUrl": pool.URL, "apiToken": "fixture"})
-	settings := registerSettings{Roxy: map[string]any{"token": "fixture", "workspaceId": "fixture", "projectId": "fixture"}, CodePoolConfig: client, Purchase: purchasePolicy{"1.10", "2.20", "USD"}}
+	settings := registerSettings{Resources: resourceSettings{MailProvider: "outlook", SMSProvider: "grizzly"}, Roxy: map[string]any{"token": "fixture", "workspaceId": "fixture", "projectId": "fixture"}, CodePoolConfig: client, Purchase: purchasePolicy{"1.10", "2.20", "USD"}}
 	config := filepath.Join(s.config.RepoRoot, "config.json")
 	t.Setenv("APPLESERVICES_REGISTER_CONFIG", config)
 	_ = writeRegisterJSON(config, settings)
@@ -110,7 +110,7 @@ func TestMailboxSelectionChecksAuthorizationAndLocalReservation(t *testing.T) {
 	_ = writeRegisterJSON(filepath.Join(folder, "request.json"), map[string]string{"email": "USED@hotmail.com"})
 	_ = writeRegisterJSON(filepath.Join(s.config.RepoRoot, ".cache", "mailbox-usage.json"), map[string]string{"LEGACY@hotmail.com": "2026-11-14T00:00:00Z"})
 	body := registerRequest{}
-	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client}); err != nil {
+	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client, Resources: resourceSettings{MailProvider: "outlook", SMSProvider: "grizzly"}}); err != nil {
 		t.Fatal(err)
 	}
 	if body.Email != "ready@hotmail.com" || !strongRegistrationPassword(body.Password) || requests != 1 {
@@ -118,7 +118,7 @@ func TestMailboxSelectionChecksAuthorizationAndLocalReservation(t *testing.T) {
 	}
 	_ = writeRegisterJSON(filepath.Join(folder, "request.json"), map[string]string{"email": "ready@hotmail.com"})
 	s.accounts = append(s.accounts, &Account{AppleID: "used@hotmail.com"})
-	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client}); err == nil {
+	if err := s.prepareAutomaticRegistration(&body, registerSettings{CodePoolConfig: client, Resources: resourceSettings{MailProvider: "outlook", SMSProvider: "grizzly"}}); err == nil {
 		t.Fatal("reused occupied mailbox")
 	}
 }
@@ -132,7 +132,7 @@ func TestMailboxSelectionStopsOnCorruptLegacyUsage(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(file), 0700)
 	for _, contents := range []string{"broken", "null", "[]"} {
 		_ = os.WriteFile(file, []byte(contents), 0600)
-		if err := s.prepareAutomaticRegistration(&registerRequest{}, registerSettings{CodePoolConfig: client}); err == nil || !strings.Contains(err.Error(), "旧邮箱占用") {
+		if err := s.prepareAutomaticRegistration(&registerRequest{}, registerSettings{CodePoolConfig: client, Resources: resourceSettings{MailProvider: "outlook", SMSProvider: "grizzly"}}); err == nil || !strings.Contains(err.Error(), "旧邮箱占用") {
 			t.Fatal("corrupt legacy usage did not stop before network access", err)
 		}
 	}
