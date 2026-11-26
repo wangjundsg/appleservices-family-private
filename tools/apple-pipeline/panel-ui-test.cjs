@@ -37,6 +37,10 @@ async page => {
   await form.locator('[name=email]').fill('fixture@example.test');
   await form.locator('[name=password]').fill('weak');
   check(await form.locator('[name=password]').evaluate(e => !e.checkValidity()),'weak password accepted');
+  for (const invalid of ['Valid-aaa1B','Valid-111aB','Valid-!!!a1B']) {
+    await form.locator('[name=password]').fill(invalid);
+    check(await form.locator('[name=password]').evaluate(e=>!e.checkValidity()),'consecutive password characters accepted');
+  }
   await form.locator('[name=password]').fill('Fixture-only123!');
   await form.locator('[name=phone]').fill('7700900123');
   await form.locator('[name=activation]').fill('invalid/activation');

@@ -115,7 +115,7 @@
   function validatePassword() {
     if (field('automatic').checked) { field('password').setCustomValidity(''); return; }
     const value = field('password').value;
-    field('password').setCustomValidity(value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value) ? '' : '密码需至少 8 位，包含大小写字母、数字和特殊字符');
+    field('password').setCustomValidity(value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value) && !/([\s\S])\1\1/u.test(value) ? '' : '密码需至少 8 位，包含大小写字母、数字和特殊字符，不能连续重复同一字符 3 次');
   }
   field('password').addEventListener('input',validatePassword);
   function browserMode() {

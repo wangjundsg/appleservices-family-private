@@ -3,7 +3,7 @@ package dashboard
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -44,6 +44,21 @@ func (p purchasePolicy) valid() bool {
 
 func normalizedRegistrationEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func generateRegistrationPassword(entropy io.Reader) (string, error) {
+	// Keep 18 random bytes while avoiding long hex strings and invalid runs.
+	for attempt := 0; attempt < 16; attempt++ {
+		random := make([]byte, 18)
+		if _, err := io.ReadFull(entropy, random); err != nil {
+			return "", errors.New("无法生成账号密码")
+		}
+		password := "Aa1!" + base64.RawURLEncoding.EncodeToString(random)
+		if strongRegistrationPassword(password) {
+			return password, nil
+		}
+	}
+	return "", errors.New("无法生成符合注册规则的密码")
 }
 
 // Called under registerMu: request.json is the durable mailbox reservation.
@@ -136,11 +151,11 @@ func (s *Server) prepareAutomaticRegistration(body *registerRequest, settings re
 		if strings.HasSuffix(email, "@outlook.com") || strings.HasSuffix(email, "@icloud.com") {
 			continue
 		}
-		random := make([]byte, 18)
-		if _, err := rand.Read(random); err != nil {
-			return errors.New("无法生成账号密码")
+		password, err := generateRegistrationPassword(rand.Reader)
+		if err != nil {
+			return err
 		}
-		body.Email, body.Password = email, "Aa1!"+hex.EncodeToString(random)
+		body.Email, body.Password = email, password
 		return nil
 	}
 	return errors.New("没有未占用且授权可用的受支持邮箱；当前建号器不支持 outlook.com 和 icloud.com")
@@ -192,11 +207,11 @@ func (s *Server) prepareOTPGmailRegistration(body *registerRequest, r resourceSe
 	if result["orderReady"] != true {
 		return errors.New("邮箱订单未处于等待新码状态，未购买号码")
 	}
-	random := make([]byte, 18)
-	if _, err := rand.Read(random); err != nil {
-		return errors.New("无法生成账号密码")
+	password, err := generateRegistrationPassword(rand.Reader)
+	if err != nil {
+		return err
 	}
-	body.Email, body.Password = email, "Aa1!"+hex.EncodeToString(random)
+	body.Email, body.Password = email, password
 	body.mailOrder = &order
 	return nil
 }

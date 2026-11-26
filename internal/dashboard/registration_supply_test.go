@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,35 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRegistrationPasswordRejectsConsecutiveTriples(t *testing.T) {
+	for _, value := range []string{"Valid-aaa1B", "Valid-111aB", "Valid-!!!a1B"} {
+		if strongRegistrationPassword(value) {
+			t.Fatal("consecutive identical characters accepted")
+		}
+	}
+	if !strongRegistrationPassword("Valid-aa11!!B") {
+		t.Fatal("valid pairs rejected")
+	}
+}
+
+func TestGeneratedRegistrationPasswordRetriesInvalidEntropy(t *testing.T) {
+	valid := make([]byte, 18)
+	for i := range valid {
+		valid[i] = byte(i)
+	}
+	reader := bytes.NewReader(append(make([]byte, 18), valid...))
+	password, err := generateRegistrationPassword(reader)
+	if err != nil || len(password) != 28 || !strongRegistrationPassword(password) || reader.Len() != 0 {
+		t.Fatal("generator did not reject the invalid first candidate")
+	}
+	if _, err := generateRegistrationPassword(bytes.NewReader(nil)); err == nil {
+		t.Fatal("entropy failure ignored")
+	}
+	if _, err := generateRegistrationPassword(bytes.NewReader(make([]byte, 18*16))); err == nil {
+		t.Fatal("unusable candidates did not stop at the retry bound")
+	}
+}
 
 func TestAutomaticRequestUsesPrivateManifestAndDoesNotCollideOnEmptyActivation(t *testing.T) {
 	if _, err := exec.LookPath("python"); err != nil {

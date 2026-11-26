@@ -180,6 +180,8 @@ def validate(cfg):
     pw = cfg.get("password", "")
     if len(pw) < 8 or not all(re.search(p, pw) for p in [r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]"]):
         raise PipelineError("password_requires_four_character_classes", "usage")
+    if re.search(r"([\s\S])\1\1", pw):
+        raise PipelineError("password_repeated_characters", "usage")
     if sum(bool(cfg.get(k)) for k in ("graph_token_file", "email_code_file", "code_pool_config", "otpgmail_order_file")) != 1:
         raise PipelineError("choose_one_email_code_source", "usage")
     if not Path(cfg.get("graph_token_file") or cfg.get("email_code_file") or cfg.get("code_pool_config") or cfg.get("otpgmail_order_file")).is_absolute():

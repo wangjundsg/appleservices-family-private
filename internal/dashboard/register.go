@@ -163,6 +163,12 @@ func strongRegistrationPassword(value string) bool {
 	if len(value) < 8 || len(value) > 256 {
 		return false
 	}
+	characters := []rune(value)
+	for i := 2; i < len(characters); i++ {
+		if characters[i] == characters[i-1] && characters[i] == characters[i-2] {
+			return false
+		}
+	}
 	for _, pattern := range []string{`[A-Z]`, `[a-z]`, `[0-9]`, `[^A-Za-z0-9]`} {
 		if !regexp.MustCompile(pattern).MatchString(value) {
 			return false
@@ -201,7 +207,7 @@ func validateRegistration(body registerRequest) error {
 		return errors.New("当前建号流程不支持该邮箱域名")
 	}
 	if !strongRegistrationPassword(body.Password) {
-		return errors.New("密码需至少 8 位，包含大小写字母、数字和特殊字符")
+		return errors.New("密码需至少 8 位，包含大小写字母、数字和特殊字符，不能连续重复同一字符 3 次")
 	}
 	if _, ok := registrationCountries[body.PhoneCC]; !ok {
 		return errors.New("不支持的号码国家")

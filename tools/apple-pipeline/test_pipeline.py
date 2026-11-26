@@ -116,6 +116,14 @@ class PipelineTests(unittest.TestCase):
         cfg = config(); cfg["password"] = "NoSpecial123"
         with self.assertRaises(p.PipelineError): p.validate(cfg)
 
+    def test_repeated_password_characters_are_rejected_before_resources(self):
+        for password in ("Valid-aaa1B", "Valid-111aB", "Valid-!!!a1B"):
+            cfg = config(); cfg["password"] = password
+            with self.assertRaisesRegex(p.PipelineError,"password_repeated_characters"):
+                p.validate(cfg)
+        cfg = config(); cfg["password"] = "Valid-aa11!!B"
+        p.validate(cfg)
+
     def test_duplicate_run_and_second_job_for_same_account_do_not_run_again(self):
         manifest = self.root / "request.json"
         cfg = config()
