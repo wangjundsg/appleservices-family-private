@@ -16,6 +16,18 @@ const flow = require("./account-flow.cjs");
 
 const MAILBOX = "111@abc-temp-2026.shop";
 
+test("final creation rejection stops a phone screen after successful OTP verification", () => {
+  const summary = flow.summarizeHTTP({ url: "https://appleid.apple.com/account", status: 400,
+    body: JSON.stringify({ hasError: true, service_errors: [{ code: "-34607001" }] }) });
+  assert.equal(summary.error_code, "-34607001");
+  assert.equal(flow.creationRejected({ method: "POST", ...summary }), true);
+  assert.equal(flow.creationRejected({ method: "POST", ...summary, status: 200 }), true);
+  assert.equal(flow.creationRejected({ method: "GET", ...summary }), false);
+  assert.equal(flow.creationRejected({ method: "POST", ...summary, path: "/account/verification/phone" }), false);
+  assert.equal(flow.creationRejected({ method: "POST", path: "/account", status: 201, error_code: "" }), false);
+  assert.equal(flow.creationRejected({ method: "POST", path: "/account", status: 503, error_code: "" }), true);
+});
+
 // A mail shaped like the ones the temp-mailbox API returns: `source` is the
 // sender, `address` the recipient.
 function codeMail(overrides = {}) {

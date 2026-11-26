@@ -88,7 +88,7 @@ func (w *workflow) once(ctx context.Context, name, next string, body any, apply 
 			w.state.HTTPStatus = pe.Status
 			w.state.ErrorCodes = pe.Codes
 			for _, code := range pe.Codes {
-				if name == "validate" && code == "-34607001" {
+				if (name == "validate" || name == "finalize") && code == "-34607001" {
 					w.state.Failure = "server_rejected_34607001"
 				}
 			}

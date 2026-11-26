@@ -1168,14 +1168,31 @@ async function resendEmailCode(page, frame) {
   // validate/captcha response body into run.jsonl, which echoed the submitted
   // identifier and the captcha verdict. Only status, path and an Apple error
   // code are kept now.
-  page.on("response", async (res) => {
+  let creationFailure = null;
+  const creationResponses = [];
+  async function checkCreationFailure() {
+    await Promise.all(creationResponses);
+    if (!creationFailure) return;
+    const err = new Error(`creation_rejected:${creationFailure.path}:${creationFailure.status}:${creationFailure.error_code}`);
+    err.state = "unknown";
+    err.closeReason = "creation-rejected";
+    throw err;
+  }
+  page.on("response", (res) => {
     const u = res.url();
-    if (!/account\/validate|validation\/appleid|captcha/.test(u)) return;
-    let body = "";
-    try {
-      body = await res.text();
-    } catch {}
-    note("http", flow.summarizeHTTP({ url: u, status: res.status(), body }));
+    const method = res.request().method();
+    const path = new URL(u).pathname;
+    const creation = method === "POST" && (path === "/account" || path === "/account/validate");
+    if (!creation && !/account\/validate|validation\/appleid|captcha/.test(u)) return;
+    const response = (async () => {
+      let body = "";
+      try { body = await res.text(); } catch {}
+      const summary = flow.summarizeHTTP({ url: u, status: res.status(), body });
+      if (flow.creationRejected({ method, ...summary })) creationFailure = summary;
+      note("http", summary);
+    })();
+    if (creation) creationResponses.push(response);
+    else void response.catch(() => {});
   });
 
   // Screenshot helper. `maskAuth` paints a black block over the authentication
@@ -1531,6 +1548,7 @@ async function resendEmailCode(page, frame) {
   for (let step = 1; step <= 8; step += 1) {
     const current = await widgetFrame(page);
     const text = (await widgetText(page)).replace(/\s+/g, " ");
+    await checkCreationFailure();
     if (!current) {
       // The widget can disappear because the flow finished (Apple lands on the
       // account page) or because the session died. Only the explicit terminal
@@ -1643,6 +1661,7 @@ async function resendEmailCode(page, frame) {
       break;
     }
     phoneSubmitted = verdict === "phone_step";
+    await checkCreationFailure();
     await fillDigits(current, code);
     // Review A2: mask the authentication inputs before this screenshot.
     await shot(`0${step + 1}-code-filled`, { maskAuth: true });
@@ -1650,6 +1669,7 @@ async function resendEmailCode(page, frame) {
     await sleep(9000);
     await shot(`0${step + 1}-after`, { maskAuth: true });
   }
+  await checkCreationFailure();
   if (!finalEvidence) finalEvidence = "no-terminal-screen";
 
   // Consult the outcome before refunding: unknown/waiting/likely-success still own the number.

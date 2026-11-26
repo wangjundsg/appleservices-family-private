@@ -180,6 +180,7 @@ function errorCodeFromBody(body) {
   };
   push(parsed.errorCode);
   push(parsed.serviceErrors && parsed.serviceErrors[0] && parsed.serviceErrors[0].code);
+  push(parsed.service_errors && parsed.service_errors[0] && parsed.service_errors[0].code);
   push(parsed.code);
   return numbers[0] || "";
 }
@@ -197,6 +198,12 @@ function summarizeHTTP({ url = "", status = 0, body = "" } = {}) {
     path = String(url || "").split("?")[0];
   }
   return { status: Number(status) || 0, path, error_code: errorCodeFromBody(body) };
+}
+
+// A rejected creation response takes precedence over a stale OTP screen.
+function creationRejected({ method, path, status, error_code } = {}) {
+  return method === "POST" && (path === "/account" || path === "/account/validate") &&
+    (Number(status) >= 400 || Boolean(error_code));
 }
 
 // ---- screen classification (review B4) ------------------------------------
@@ -262,6 +269,7 @@ module.exports = {
   PASSWORD_ENV,
   SCREEN_STATES,
   classifyScreen,
+  creationRejected,
   clickTimeoutOutcome,
   codeLogEntry,
   errorCodeFromBody,

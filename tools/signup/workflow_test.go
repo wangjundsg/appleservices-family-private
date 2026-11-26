@@ -466,6 +466,38 @@ func TestValidationRefusalRetainsStatusWithoutReplaying(t *testing.T) {
 	}
 }
 
+func TestFinalCreationRefusalRetainsStatusWithoutReplaying(t *testing.T) {
+	requests := 0
+	f := &strictSignup{}
+	inner := f.handler(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/account" {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		requests++
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"hasError":true,"service_errors":[{"code":"-34607001"}]}`)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "job.json")
+	toPhoneVerified(t, path, server.URL)
+	for attempt := 0; attempt < 2; attempt++ {
+		rc, receipt := invokeSignup(t, path, server.URL, "-stage", "finalize")
+		field := "reason"
+		if attempt == 1 {
+			field = "failure"
+		}
+		if rc == 0 || receipt["state"] != "needs_review" || receipt[field] != "server_rejected_34607001" || receipt["httpStatus"] != float64(400) || requests != 1 {
+			t.Fatal(receipt, requests)
+		}
+	}
+	st, err := loadState(path)
+	if err != nil || st.Created || !st.EmailDone || !st.PhoneDone {
+		t.Fatal("final refusal must retain verified channels without claiming creation", err)
+	}
+}
+
 func TestCredentialArgumentsAndHelpCannotExposeSecrets(t *testing.T) {
 	const marker = "private-fixture-marker"
 	t.Setenv("APPLESERVICES_SIGNUP_PASSWORD", marker)
