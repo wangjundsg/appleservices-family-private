@@ -1,5 +1,17 @@
 # 协议B（Rust / sentinel-rs）接入工作台：排查与施工方案
 
+> ## ⚠ 目标工作台更正（2026-11-26 23:2x）
+>
+> 本文最初把「工作台」认成了 Apple 的 18741 dashboard（`D:\appleservices-family-private`），**认错了**。
+>
+> 真正的协议B 落地目标工作台是 **`D:\Workbench\apps\gpt-free-service`**（`python web.py --port 50694`，
+> UI 在 `webui/templates/index.html:2391-2395`，方式下拉已有 `roxy_selenium` / `protocol`）。
+>
+> **施工一律以 `D:\Workbench\apps\gpt-free-service\docs\PROTOCOL-B-SENTINEL-RS-2026-11-26.md` 为准。**
+>
+> 本文只保留两节作参考：§3「8788 取码契约」与 §1.2/§6「sentinel-rs CLI 与二进制前置」。
+> 其它关于 `/api/register`、`registration_method.go`、`pipeline.py` 的内容不适用于本次接入。
+
 日期：2026-11-26（23:0x 更新）　状态：**只做排查与方案，未改任何工作台代码、未构建、未注册、未发请求。**
 
 - 证据口径：只读源码 + 只读原型仓库（`.cache/sentinel-rs-src`，commit `f222371`）+ 只读 8788 源码（`D:\Workbench\sources\iCloud-Privacy-Mail-v2`）+ 本机工具链探测 + 现有测试基线。
