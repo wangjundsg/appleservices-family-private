@@ -25,11 +25,14 @@ class FakeJob:
         self.folder = folder
         self.method = "protocol"
         self.cfg = {"job_id": "reg-1", "email": "fixture@example.test", "password": "Fixture-only123!",
+                    "egress_mode": "direct", "roxy": {},
                     "account_country": "US", "sms": {"phone": "7700900123", "phonecc": "GB"},
                     "protocol": {"emailCode": str(folder / "email-code.txt"),
                                  "phoneCode": str(folder / "phone-code.txt")}}
         self.status = {"job_id": "reg-1", "stage": "create", "status": "queued",
                        "active_run_id": "run-1", **status}
+
+    env = pipeline.Job.env
 
 
 def script(path: Path, body: str) -> Path:
@@ -147,6 +150,35 @@ class AdapterContractTest(unittest.TestCase):
         outcome=adapter.create(FakeJob(self.folder))
         self.assertEqual(outcome.get('state'),'waiting_input')
         self.assertEqual(outcome.get('stage'),'email-sent')
+
+    def test_executor_uses_job_proxy_in_create_and_resume(self):
+        job = FakeJob(self.folder)
+        job.cfg['egress_mode'] = 'roxy'
+        job.cfg['roxy']['proxyInfo'] = {'host': '127.0.0.1', 'port': 1080,
+            'proxyUserName': 'fixture-user', 'proxyPassword': 'fixture:p@ss'}
+        adapter = self.adapter('''
+            import json, os
+            expected = 'socks5://fixture-user:fixture%3Ap%40ss@127.0.0.1:1080'
+            assert os.environ.get('HTTPS_PROXY') == expected
+            assert os.environ.get('HTTP_PROXY') == expected
+            assert os.environ.get('NO_PROXY') == 'localhost,127.0.0.1'
+            assert 'ALL_PROXY' not in os.environ
+            print(json.dumps({'ok': True, 'accountExists': False}))
+        ''')
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://parent.invalid:9999',
+                                    'ALL_PROXY': 'http://parent.invalid:9999'}):
+            for action in (adapter.create, adapter.resume):
+                self.assertEqual(action(job)['outcome'], 'not_applied')
+
+    def test_direct_executor_does_not_inherit_parent_proxy(self):
+        adapter = self.adapter('''
+            import json, os
+            assert not any(k.upper() in {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'} for k in os.environ)
+            print(json.dumps({'ok': True, 'accountExists': False}))
+        ''')
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://parent.invalid:9999'}):
+            for action in (adapter.create, adapter.resume):
+                self.assertEqual(action(FakeJob(self.folder))['outcome'], 'not_applied')
 
     def test_explicit_manual_captcha_file_reaches_executor_with_bounded_wait(self):
         job=FakeJob(self.folder)

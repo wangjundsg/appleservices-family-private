@@ -121,13 +121,13 @@ class SignupAdapter:
         self.binary = binary or os.environ.get("APPLESERVICES_SIGNUP_BIN") or "bin/signup.exe"
 
     # -- process ----------------------------------------------------------
-    def _run(self, context: ExecutorContext, args: list[str], password: str) -> tuple[int, dict]:
+    def _run(self, context: ExecutorContext, args: list[str], password: str, environment: Mapping[str, str]) -> tuple[int, dict]:
         path = Path(self.binary)
         if not path.is_file():
             raise AdapterError("protocol_adapter_missing")
         # A .py stand-in runs through this interpreter; the shipped binary does not.
         command = ([sys.executable, str(path)] if path.suffix == ".py" else [str(path)]) + args
-        env = dict(os.environ)
+        env = dict(environment)
         env.pop("APPLESERVICES_PROTOCOL_ADAPTER", None)  # never re-enter
         env.pop("YESCAPTCHA_KEY", None)  # a site challenge requires user interaction
         env["APPLESERVICES_SIGNUP_PASSWORD"] = password
@@ -213,16 +213,17 @@ class SignupAdapter:
                 "failure": reason,
                 "http_status": receipt.get("httpStatus")}
 
-    def _invoke(self, context: ExecutorContext, args: list[str], password: str) -> dict:
+    def _invoke(self, context: ExecutorContext, args: list[str], job) -> dict:
+        password = job.cfg.get("password")
         if not isinstance(password, str) or not password:
             raise AdapterError("protocol_password_required")
-        code, receipt = self._run(context, args, password)
+        code, receipt = self._run(context, args, password, job.env())
         return validate_outcome(self._outcome(context, code, receipt), context)
 
     # -- adapter API ------------------------------------------------------
     def create(self, job) -> dict:
         context = replace(ExecutorContext.from_job(job), action="create")
-        return self._invoke(context, self._arguments(job, context), job.cfg.get("password"))
+        return self._invoke(context, self._arguments(job, context), job)
 
     def _arguments(self, job, context):
         sms = job.cfg.get("sms") or {}
@@ -252,7 +253,7 @@ class SignupAdapter:
 
     def resume(self, job, inputs=None) -> dict:
         context = replace(ExecutorContext.from_job(job), action="resume")
-        return self._invoke(context, self._arguments(job, context), job.cfg.get("password"))
+        return self._invoke(context, self._arguments(job, context), job)
 
     def cancel(self, job) -> dict:
         context = ExecutorContext.from_job(job)

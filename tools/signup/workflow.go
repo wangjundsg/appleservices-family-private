@@ -201,6 +201,23 @@ func (w *workflow) getCaptcha(ctx context.Context) (*captcha, error) {
 	}
 	c, err := w.session.RequestCaptcha(ctx)
 	if err != nil {
+		w.state.Failure = "captcha_request_failed"
+		w.state.Status = "needs_review"
+		w.state.HTTPStatus = 0
+		w.state.ErrorCodes = nil
+		var pe *ProtocolError
+		if errors.As(err, &pe) {
+			w.state.HTTPStatus = pe.Status
+			w.state.ErrorCodes = pe.Codes
+			if pe.Status == 423 || pe.Status == 429 {
+				w.state.Status = "rate_limited"
+				w.state.CooldownUntil = time.Now().Add(rateLimitCooldown)
+			}
+		}
+		// Keep rotated session state and the rejection, never the response body.
+		if saveErr := w.save(); saveErr != nil {
+			return nil, errors.New("state_write_failed_after_request")
+		}
 		return nil, errors.New("captcha_request_failed")
 	}
 	w.state.Captcha = c
