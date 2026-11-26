@@ -146,14 +146,28 @@ async function selectField(locator, value, label, { choose, log = () => {} } = {
 }
 
 // Use the native select's keyboard behavior; no DOM value assignment.
-async function selectByKeyboard(locator, value) {
-  const index = await locator.evaluate((el, wanted) => Array.from(el.options)
-    .filter(option => !option.disabled && !option.parentElement.disabled)
-    .findIndex(option => option.value === wanted), String(value));
+async function selectByKeyboard(locator, value, {sleep = ms => new Promise(r => setTimeout(r, ms)), stepMs = 0, settleMs = 0} = {}) {
+  const {index, current, total} = await locator.evaluate((el, wanted) => {
+    const options = Array.from(el.options).filter(option => !option.disabled && !option.parentElement.disabled);
+    return {index: options.findIndex(option => option.value === wanted),
+      current: options.findIndex(option => option.selected), total: options.length};
+  }, String(value));
   if (index < 0) throw new Error("select_option_unavailable");
-  await locator.press("Home", { timeout: 5000 });
-  for (let i = 0; i < index; i++) await locator.press("ArrowDown", { timeout: 5000 });
+  let start = current;
+  if (start < 0 || index + 1 < Math.abs(index - start)) {
+    await locator.press("Home", {timeout: 5000}); start = 0;
+    if (stepMs) await sleep(stepMs);
+  }
+  if (total - index < Math.abs(index - start)) {
+    await locator.press("End", {timeout: 5000}); start = total - 1;
+    if (stepMs) await sleep(stepMs);
+  }
+  for (let i = 0; i < Math.abs(index - start); i++) {
+    await locator.press(index > start ? "ArrowDown" : "ArrowUp", {timeout: 5000});
+    if (stepMs) await sleep(stepMs);
+  }
   await locator.press("Enter", { timeout: 5000 });
+  if (settleMs) await sleep(settleMs);
 }
 
 // ---- B: the submit button -------------------------------------------------
@@ -165,14 +179,15 @@ const SUBMIT_LABELS = Object.freeze(["continue", "继续", "繼續", "tiếp t�
 // Controls that must never be mistaken for the submit button. "Mã Mới" /
 // "Send a new code" / "换一张" all mean "throw the captcha away and draw
 // another", which is the worst possible thing to press after typing a code.
-const NOT_SUBMIT = /换一张|換一張|new code|ma moi|refresh|another code/i;
+const NOT_SUBMIT = /换一张|換一張|新验证码|新驗證碼|重新发送|重新傳送|发送新验证码|new code|ma moi|refresh|another code|resend/i;
 
 const isNotSubmit = (text) => NOT_SUBMIT.test(fold(text)) || NOT_SUBMIT.test(String(text == null ? "" : text));
 
-const textOf = async (locator) =>
-  String((await locator.innerText({ timeout: 2000 }).catch(() => "")) || "")
-    .replace(/\s+/g, " ")
-    .trim();
+const textOf = async (locator) => {
+  let text = await locator.innerText({timeout:2000}).catch(()=>"");
+  if (!text && typeof locator.getAttribute === "function") text = await locator.getAttribute("aria-label").catch(()=>"");
+  return String(text || "").replace(/\s+/g," ").trim();
+};
 
 // findSubmit resolves the button to press, in the order the user asked for:
 // a real `button[type="submit"]` first, then the label match. Coordinates are
@@ -184,6 +199,7 @@ async function findSubmit(frame, { labels = SUBMIT_LABELS, log = () => {} } = {}
   const typedCount = await typed.count().catch(() => 0);
   for (let i = 0; i < typedCount; i += 1) {
     const candidate = typed.nth(i);
+    if (typeof candidate.isVisible === "function" && !await candidate.isVisible()) continue;
     const text = await textOf(candidate);
     if (isNotSubmit(text)) {
       excluded.push(text);
@@ -197,6 +213,7 @@ async function findSubmit(frame, { labels = SUBMIT_LABELS, log = () => {} } = {}
   const wanted = labels.map((label) => fold(label));
   for (let i = 0; i < count; i += 1) {
     const candidate = all.nth(i);
+    if (typeof candidate.isVisible === "function" && !await candidate.isVisible()) continue;
     const text = await textOf(candidate);
     if (!text || isNotSubmit(text)) continue;
     const hay = fold(text);
@@ -267,6 +284,8 @@ const RESEND_LABELS = Object.freeze([
   "send new code",
   "resend code",
   "重新发送",
+  "发送新验证码",
+  "重新发送验证码",
   "重新傳送",
   "gửi lại",
   "gửi mã mới",
@@ -299,7 +318,11 @@ function channelCode(picked) {
 
 // Keep both delivery windows, but never request another verification message.
 // Legacy callers may still supply `resend`; it is deliberately ignored.
-async function emailCodeWindow({ waitCode, now = Date.now, deadline = Infinity, firstMs = 300000, secondMs = 300000 } = {}) {
+async function emailCodeWindow({ waitCode, resend, resendEnabled = false, now = Date.now, deadline = Infinity, firstMs = 300000, secondMs = 300000 } = {}) {
+  if (resendEnabled) {
+    const result = await phoneCodeWindow({waitCode, resend, now, deadline, firstMs, secondMs});
+    return {...result, rescanned: Boolean(result.resent.ok)};
+  }
   const started = now();
   // Individual readers accept at most five minutes; retain two bounded windows.
   const wait = async ms => {
@@ -335,7 +358,7 @@ async function phoneCodeWindow({ waitCode, resend, now = Date.now, deadline = In
   };
   let picked = await wait(firstMs);
   let resent = { asked: false, ok: false, how: "not-needed" };
-  if (!channelCode(picked) && now() < deadline) {
+  if (!picked?.advanced && !channelCode(picked) && now() < deadline) {
     resent = await resend();
     if (resent && resent.ok) picked = await wait(secondMs);
   }
@@ -345,8 +368,9 @@ async function phoneCodeWindow({ waitCode, resend, now = Date.now, deadline = In
     code,
     resent,
     waitedMs: now() - started,
-    timedOut: !code,
-    replace: !code && Boolean(resent && resent.ok) && now() < deadline,
+    advanced: Boolean(picked?.advanced),
+    timedOut: !code && !picked?.advanced,
+    replace: !code && !picked?.advanced && Boolean(resent && resent.ok) && now() < deadline,
   };
 }
 
@@ -374,6 +398,16 @@ async function phoneMenuAction(frame, labels, click, sleep = ms => new Promise(r
   }
   if (!action.ok) throw new Error("phone_action_not_found");
   await click(action.locator);
+}
+
+async function refreshCaptcha(frame, {timeout = 10000, click = locator => locator.click({timeout})} = {}) {
+  const button = frame.getByRole("button", {name:/^(新验证码|新驗證碼|换一张|換一張|New Code|New code|Refresh CAPTCHA)$/i});
+  if (await button.count() !== 1) throw new Error("captcha_refresh_unavailable");
+  const before = await frame.locator("img").evaluateAll(images => images.map(i=>i.src));
+  await frame.locator('input[name="captcha"]').fill("");
+  await click(button);
+  await frame.waitForFunction(old => [...document.querySelectorAll("img")].some((img,index)=>
+    img.complete && img.naturalWidth > 0 && img.src !== old[index]), before, {timeout});
 }
 
 // findAction is the text-matched finder used for "send it again": a button or a
@@ -433,6 +467,7 @@ module.exports = {
   normalizeCloseReason,
   phoneCodeWindow,
   phoneMenuAction,
+  refreshCaptcha,
   freshSMSCode,
   onceAction,
   selectField,

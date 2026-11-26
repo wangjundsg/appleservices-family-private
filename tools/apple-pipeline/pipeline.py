@@ -209,10 +209,10 @@ def validate(cfg):
         raise PipelineError("residential_socks5_required", "usage")
     if cfg.get("accept_terms") is not True:
         raise PipelineError("terms_consent_required", "usage")
-    if cfg.get("captcha_solver") not in (None, "manual", "yes"):
+    if cfg.get("captcha_solver") not in (None, "manual", "yes", "local-first"):
         raise PipelineError("unsupported_captcha_solver", "usage")
     solver_name, solver_key = resolve_captcha(cfg)
-    if solver_name != "yes" and cfg.get("captcha_solver") != "manual":
+    if solver_name != "yes" and cfg.get("captcha_solver") not in ("manual", "local-first"):
         # No key anywhere: fail loudly rather than parking the job on a human.
         raise PipelineError("captcha_key_required", "usage")
     snake, camel = cfg.get("registration_method"), cfg.get("registrationMethod")
@@ -412,6 +412,39 @@ class Job:
         atomic(handoff, {**purchased, "previous_activation": request["previous_activation"]})
         self.update(reason="replacement_number_ready", acquisition_id=request["acquisition_id"])
 
+    def replace_email(self):
+        if self.cfg.get("browser_mode") != "local" or not self.cfg.get("otpgmail_order_file") or not self.allow_purchase:
+            raise PipelineError("replacement_email_requires_input", "waiting_input")
+        handoff = self.folder / "replacement-email.json"
+        intent = self.folder / "replacement-email-intent.json"
+        if not intent.exists():
+            atomic(intent, {"previous_email": self.cfg["email"], "source_file": self.cfg["otpgmail_order_file"],
+                            "acquisition_id": secrets.token_hex(16), "max_price_vnd": 700})
+        previous = read(intent)["previous_email"]
+        if not handoff.exists():
+            code, _ = self.process(["node", "tools/capture/otpgmail-purchase.cjs", str(intent), str(handoff)], 60)
+            if code != 0 or not handoff.exists():
+                raise PipelineError("replacement_email_purchase_unconfirmed", "needs_review")
+        result = read(handoff)
+        new_email = result.get("email", "")
+        order_file = self.folder / "replacement-otpgmail-order.json"
+        order = read(order_file)
+        if (result.get("previous_email") != previous or self.cfg["email"] not in (previous,new_email)
+                or not re.fullmatch(r"[A-Za-z0-9._%+-]+@gmail\.com", new_email) or new_email.lower() == previous.lower()
+                or Path(result.get("order_file", "")).resolve() != order_file.resolve() or order.get("email") != new_email):
+            raise PipelineError("replacement_email_invalid", "needs_review")
+        reservation = STATE / "accounts" / (hashlib.sha256(new_email.lower().encode()).hexdigest() + ".json")
+        with lock(reservation.with_suffix(".lock")):
+            if reservation.exists() and read(reservation) != self.cfg["job_id"]:
+                raise PipelineError("account_already_has_a_job", "needs_review")
+            atomic(reservation,self.cfg["job_id"])
+        self.cfg.setdefault("sms_account_email",previous)
+        self.cfg.update(email=new_email,otpgmail_order_file=str(order_file))
+        atomic(self.folder / "input.json",self.cfg)
+        self.update(reason="replacement_email_ready",email_replacements=1)
+        # Publish readiness only after identity/reservation updates are durable.
+        atomic(self.folder / "replacement-email-ready.json",result)
+
     def protocol_step(self, waiting=None, action=None):
         """One delegation to the adapter: create the first time, resume afterwards.
 
@@ -561,6 +594,12 @@ class Job:
                             try: event = json.loads(line)
                             except ValueError: continue
                             state = event.get("state")
+                            if self.cfg.get("browser_mode") == "local" and self.status["stage"] == "create" and state in {"email_step", "phone_step", "form_advanced"}:
+                                self.update(status="running",reason={"email_step":"awaiting_email","phone_step":"awaiting_sms","form_advanced":"form_running"}[state])
+                            if state == "replacement_email_required":
+                                if code_mode or self.method != "browser":
+                                    raise PipelineError("replacement_wrong_stage", "needs_review")
+                                self.replace_email()
                             if state == "replacement_number_required":
                                 if code_mode or self.method != "browser":
                                     raise PipelineError("replacement_wrong_stage", "needs_review")
@@ -633,7 +672,8 @@ class Job:
                    "sms-api": sms.get("api", "https://api.grizzlysms.com/stubs/handler_api.php"),
                    "outdir": str(self.folder), **browser_input, "activation-expires-at": sms["expires_at"],
                    "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt"),
-                   "replacement-number-file": str(self.folder / "replacement-number.json")}
+                   "replacement-number-file": str(self.folder / "replacement-number.json"),
+                   "replacement-email-file": str(self.folder / "replacement-email-ready.json")}
             birthday = dt.date.fromisoformat(self.cfg.get("birthday", "1992-07-18"))
             inp.update({"first": self.cfg.get("first", "James"), "last": self.cfg.get("last", "Carter"),
                         "birth-month": f"{birthday.month:02d}", "birth-day": f"{birthday.day:02d}",
@@ -644,6 +684,9 @@ class Job:
             else: inp["await-email-code"] = self.cfg["email_code_file"]
             if resolve_captcha(self.cfg)[0] == "yes":
                 inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
+            elif self.cfg.get("captcha_solver") == "local-first":
+                inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/ocr.py"])
+                inp["captcha-fallback-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
             atomic(self.folder / "create-input.json", inp)
             if local_proxy is None:
                 code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)
@@ -671,7 +714,9 @@ class Job:
             try:
                 return self.create()
             except PipelineError as error:
-                safe = error.reason == "number_cannot_receive_followup" or (error.reason == "registration_rejected" and self.status.get("creation_rejected"))
+                # A local creator exit is never permission to open another form.
+                safe = error.reason == "number_cannot_receive_followup" or (
+                    self.cfg.get("browser_mode") != "local" and error.reason == "registration_rejected" and self.status.get("creation_rejected"))
                 if not self.cfg["sms"].get("auto_purchase") or not safe or self.status.get("cleanup_pending"):
                     raise
                 self.settle_number()
@@ -832,7 +877,7 @@ class Job:
             # The hold code explains this refusal; the job keeps the reason that
             # made it unresolved.
             extra = {}
-            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason
+            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason and prior not in {"form_running", "stage_started"}
                     and error.reason not in {"gsa_account_repair_required", "apple_sms_verify_precondition_failed"}):
                 extra["hold_reason"] = error.reason
                 self.update(status=error.state, reason=prior, cooldown_until=cooldown, **extra)
@@ -867,7 +912,7 @@ class Job:
             self.update(active=False)
 
     def supply(self):
-        return Supply(ROOT / "state" / "sms-supply", self.cfg["email"], atomic, lock, sms_call)
+        return Supply(ROOT / "state" / "sms-supply", self.cfg.get("sms_account_email", self.cfg["email"]), atomic, lock, sms_call)
 
     def panel_call(self, action, **body):
         bridge = self.cfg["panel_bridge"]

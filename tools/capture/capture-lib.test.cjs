@@ -18,6 +18,14 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 
 const lib = require("./capture-lib.cjs");
+
+test("native OCR does not block browser events and bounds solver time",async()=>{
+  let ticked=false;const timer=setTimeout(()=>{ticked=true;},10);
+  const result=await lib.runCaptchaCommandAsync([process.execPath,"-e","setTimeout(()=>process.stdout.write('aB3D'),80)"],"fixture.png");
+  clearTimeout(timer);assert.equal(ticked,true);assert.equal(result.text,"aB3D");
+  const timeout=await lib.runCaptchaCommandAsync([process.execPath,"-e","setInterval(()=>{},100)"],"fixture.png",{timeoutMs:50});
+  assert.equal(timeout.ok,false);assert.equal(timeout.text,"");
+});
 const refund = require("./refund.cjs");
 
 // ---- §4.3: --captcha-cmd parsing -------------------------------------------

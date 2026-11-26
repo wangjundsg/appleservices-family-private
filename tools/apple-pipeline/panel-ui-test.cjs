@@ -9,7 +9,7 @@ async page => {
     const request = route.request(), url = new URL(request.url());
     let value;
     if (url.pathname === '/api/register/config') {
-      value={purchaseEnabled,subscriptionEnabled:purchaseEnabled,familyOrganizers:mothers,budgetConfigured:purchaseEnabled,mailboxConfigured:true};
+      value={purchaseEnabled,subscriptionEnabled:purchaseEnabled,familyOrganizers:mothers,budgetConfigured:purchaseEnabled,mailboxConfigured:true,smsConfigured:true,resources:{phoneCountry:'PT',durationHours:0}};
     } else if (url.pathname === '/api/register' && request.method() === 'POST') {
       submitted = request.postDataJSON();
       job = {jobId:'reg-20261114-abcdefabcdefabcd',state:'waiting_input',stage:'creating',startedAt:new Date().toISOString(),elapsedMs:12000,active:true,canRetry:false,automatic:submitted.automatic,familyRole:submitted.family?.role};
@@ -29,6 +29,7 @@ async page => {
   await page.locator('#registerForm').waitFor({state:'visible'});
   check(await page.locator('.registration-card').evaluate(e => getComputedStyle(e).opacity === '1'),'registration card invisible');
   const form = page.locator('#registerForm');
+  await form.locator('[name=browserMode]').selectOption('local');
   check(await page.locator('#registerSubmit').isDisabled(),'automatic purchase enabled without configured switch');
   check(await form.locator('[name=email]').isHidden(),'automatic mode asks for manual mailbox');
   await form.locator('[name=automatic]').uncheck();
@@ -55,6 +56,7 @@ async page => {
   await page.locator('#registerSubmit').click();
   await page.locator('#registerCodeForm').waitFor({state:'visible'});
   check(submitted && submitted.egress.mode==='direct' && !('platformKey' in submitted),'wrong registration contract');
+  check(submitted.browserMode==='local' && submitted.captchaProvider==='local-first','local OCR policy was not frozen into the request');
   check(await form.locator('[name=password]').inputValue() === '', 'password retained after submission');
   await page.locator('#registerEmailCode').fill('654321');
   await page.locator('#registerCodeForm button').click();

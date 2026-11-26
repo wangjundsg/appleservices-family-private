@@ -1,7 +1,7 @@
 """Image-challenge solver with a local-first fallback chain.
 
 Order:
-  1. local OCR (free, fast, ~20% exact match)
+  1. local OCR (accepted only when confidence and model agreement pass)
   2. remote solver (paid, only when the local read is unusable)
   3. caller refreshes the image and retries
 
@@ -56,21 +56,8 @@ def post_json(url: str, payload: dict, timeout: int = 30) -> dict:
 
 
 def local_ocr(path: str) -> str:
-    """Same model the pipeline already uses; empty string means 'no usable read'."""
-    try:
-        import ddddocr  # noqa: F401
-    except Exception:
-        return ""
-    try:
-        import ddddocr as d
-
-        with open(path, "rb") as handle:
-            raw = handle.read()
-        text = (d.DdddOcr(show_ad=False, beta=True).classification(raw) or "").strip()
-        text = "".join(ch for ch in text if ch.isalnum())
-        return text if len(text) >= 4 else ""
-    except Exception:
-        return ""
+    from ocr import read_local
+    return read_local(path)
 
 
 def solve_yes(key: str, image_b64: str, timeout: int) -> str:
@@ -163,8 +150,8 @@ def preprocess(path: str, scale: int = 4) -> bytes:
     Apple's image challenge is 160x70 with heavy noise; at native size the online
     readers confuse B/R and 8/3 often enough that a five-attempt run can burn out
     on near misses (2026-11-14: OCR answered DHCBR for DhCBB). A 4x LANCZOS
-    upscale with a contrast stretch costs milliseconds and lifts the exact-match
-    rate noticeably. Falls back to the raw bytes when Pillow is unavailable.
+    upscale with a contrast stretch is retained for compatibility; its accuracy
+    needs a labelled evaluation set. Falls back to raw bytes without Pillow.
     """
     try:
         from PIL import Image, ImageEnhance, ImageOps
@@ -249,8 +236,8 @@ def main() -> int:
         print(f"solver: {type(exc).__name__}", file=sys.stderr)
         text = ""
 
-    text = "".join(ch for ch in text if ch.isalnum())
-    if len(text) < 4:
+    from ocr import valid_text
+    if not valid_text(text):
         print("", end="")
         return 1
     print(text, end="")

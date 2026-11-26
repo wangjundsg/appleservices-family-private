@@ -16,7 +16,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawnSync, execFile } = require("node:child_process");
 
 // One solve may legitimately take a few seconds against an online provider; a
 // solver that needs longer than this is stuck and the run has to move on.
@@ -175,6 +175,17 @@ function runCaptchaCommand(cmd, pngPath, options = {}) {
   return done({ ok: true, text });
 }
 
+async function runCaptchaCommandAsync(cmd, pngPath, options = {}) {
+  const started=Date.now();
+  let argv;
+  try { argv=captchaArgv(cmd); } catch { return {ok:false,text:"",error:"bad_captcha_cmd",ms:Date.now()-started}; }
+  if(!pngPath)return {ok:false,text:"",error:"missing_image",ms:Date.now()-started};
+  const timeout=Number.isFinite(options.timeoutMs) && options.timeoutMs>0 ? options.timeoutMs : CAPTCHA_CMD_TIMEOUT_MS;
+  return new Promise(resolve=>execFile(argv[0],[...argv.slice(1),String(pngPath)],
+    {encoding:"utf8",timeout,windowsHide:true,maxBuffer:1<<20},(error,stdout)=>resolve({
+      ok:!error,text:error?"":String(stdout||"").trim(),error:error?(error.killed?"solver_timeout":"solver_failed"):"",ms:Date.now()-started})));
+}
+
 // ---- captcha image selection (run-20261113 §4.4) --------------------------
 
 // The size window the old heuristic used: a real 126x56 captcha is small, and
@@ -275,6 +286,7 @@ module.exports = {
   captchaArgv,
   pickCaptchaImage,
   runCaptchaCommand,
+  runCaptchaCommandAsync,
   sha256Hex,
   splitCommand,
 };

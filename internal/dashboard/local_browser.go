@@ -26,11 +26,13 @@ func validateBrowserSelection(body registerRequest) error {
 		if body.RegistrationMethod == methodProtocol || (body.Egress.Mode != "local" && body.Egress.Mode != "direct") {
 			return errors.New("本机 Chrome 只使用本机代理或直连")
 		}
-		if body.CaptchaProvider != "manual" {
-			return errors.New("本机 Chrome 的图形校验需在场人工完成")
+		if body.CaptchaProvider != "manual" && body.CaptchaProvider != "local-first" {
+			return errors.New("本机 Chrome 使用本机 OCR 优先或人工图形校验")
 		}
 	} else if body.Egress.Mode != "direct" && body.Egress.Mode != "roxy" {
 		return errors.New("Forge 只使用已保存的固定代理或直连")
+	} else if body.CaptchaProvider == "local-first" {
+		return errors.New("本机 OCR 优先仅用于本机 Chrome")
 	}
 	return nil
 }

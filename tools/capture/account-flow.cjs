@@ -237,14 +237,22 @@ function classifyScreen({ text = "", url = "", email = "", phone = "" } = {}) {
   const literalEmail = String(email || "").trim();
   const phoneDigits = String(phone || "").replace(/\D/g, "");
   const bodyDigits = body.replace(/\D/g, "");
+  // Delivery headings outrank account identifiers quoted in the page footer.
+  if (/验证(?:你的|您的)?(?:电话|手机)号码|驗證(?:你的|您的)?(?:電話|手機)號碼|verify your (?:phone|mobile) number/i.test(body)) return "phone_step";
+  if (/验证(?:你的|您的)?(?:电子邮件|邮箱)地址|驗證(?:你的|您的)?(?:電子郵件|郵箱)地址|verify your email/i.test(body)) return "email_step";
   const asksEmail = EMAIL_DELIVERY.test(body) || (literalEmail.length > 3 && body.includes(literalEmail));
   const asksPhone = PHONE_DELIVERY.test(body) || (phoneDigits.length >= 7 && bodyDigits.includes(phoneDigits.slice(-8)));
   const askingForCode = asksEmail || asksPhone;
   if (!askingForCode && SUCCESS_URL.test(String(url || ""))) return "success";
   if (!askingForCode && SUCCESS_TEXT.test(body)) return "success";
-  if (asksEmail) return "email_step";
   if (asksPhone) return "phone_step";
+  if (asksEmail) return "email_step";
   return "unknown";
+}
+
+function captchaAdvanced({state, captchaPresent, creationFormPresent, codeInputs}) {
+  if(captchaPresent || creationFormPresent)return false;
+  return state === "success" || (["email_step","phone_step"].includes(state) && codeInputs >= 4);
 }
 
 // ---- click timeout (review A3) --------------------------------------------
@@ -269,6 +277,7 @@ module.exports = {
   PASSWORD_ENV,
   SCREEN_STATES,
   classifyScreen,
+  captchaAdvanced,
   creationRejected,
   clickTimeoutOutcome,
   codeLogEntry,

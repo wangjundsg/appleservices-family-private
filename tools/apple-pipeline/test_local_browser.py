@@ -7,6 +7,17 @@ p = fixtures.p
 class LocalBrowserTests(unittest.TestCase):
     setUp = fixtures.PipelineTests.setUp
 
+    def test_creator_failure_never_restarts_local_browser_or_buys_again(self):
+        self.job.cfg.update(browser_mode="local", egress_mode="direct")
+        self.job.cfg["sms"]["auto_purchase"] = True
+        self.job.status["creation_rejected"] = True
+        with patch.object(self.job,"create",side_effect=p.PipelineError("registration_rejected","failed")) as create, \
+             patch.object(self.job,"settle_number") as settle:
+            with self.assertRaisesRegex(p.PipelineError,"registration_rejected"):
+                self.job.create_with_replacement()
+        self.assertEqual(create.call_count,1)
+        settle.assert_not_called()
+
     def test_local_input_rejection_does_not_replace_or_settle_number(self):
         self.job.cfg.update(browser_mode="local", egress_mode="direct", captcha_solver="manual", handoff="dashboard")
         self.job.cfg["sms"].update(auto_purchase=True, can_get_another_sms=True)
@@ -37,6 +48,43 @@ class LocalBrowserTests(unittest.TestCase):
             self.job.run()
         settle.assert_not_called()
         self.assertEqual(self.job.status["reason"],"registration_input_invalid")
+
+    def test_local_first_ocr_does_not_require_key_or_skip_local(self):
+        self.job.cfg.update(browser_mode="local",egress_mode="direct",captcha_solver="local-first")
+        with patch.object(self.job,"number"),patch.object(self.job,"process",return_value=(0,{})):
+            self.job.create()
+        command=p.json.loads(p.read(self.root/"create-input.json")["captcha-cmd"])
+        self.assertIn("tools/captcha/ocr.py",command)
+        self.assertNotIn("--skip-local",command)
+        fallback=p.json.loads(p.read(self.root/"create-input.json")["captcha-fallback-cmd"])
+        self.assertIn("--skip-local",fallback)
+
+    def test_email_replacement_rebinds_identity_and_reader_but_keeps_sms_ledger(self):
+        old=self.job.cfg["email"]
+        self.job.cfg.update(browser_mode="local",otpgmail_order_file=str(self.root/"old-mail.json"))
+        self.job.allow_purchase=True
+        def acquire(*args):
+            p.atomic(self.root/"replacement-otpgmail-order.json",{"email":"newfixture@gmail.com"})
+            p.atomic(self.root/"replacement-email.json",{"previous_email":old,"email":"newfixture@gmail.com",
+                "order_file":str(self.root/"replacement-otpgmail-order.json")})
+            return 0,{}
+        with patch.object(p,"STATE",self.root/"isolated-state"),patch.object(self.job,"process",side_effect=acquire) as buy:
+            self.job.replace_email()
+            self.job.replace_email()
+        self.assertEqual(buy.call_count,1)
+        self.assertEqual(self.job.cfg["email"],"newfixture@gmail.com")
+        self.assertEqual(self.job.cfg["sms_account_email"],old)
+        self.assertEqual(p.read(self.root/"input.json")["email"],"newfixture@gmail.com")
+        self.assertTrue((self.root/"replacement-email-ready.json").exists())
+        self.assertEqual(self.job.status["email_replacements"],1)
+
+    def test_email_replacement_without_purchase_authority_does_not_spend(self):
+        self.job.cfg.update(browser_mode="local",otpgmail_order_file=str(self.root/"old-mail.json"))
+        self.job.allow_purchase=False
+        with patch.object(self.job,"process") as buy:
+            with self.assertRaisesRegex(p.PipelineError,"replacement_email_requires_input"):
+                self.job.replace_email()
+        buy.assert_not_called()
     def test_local_browser_uses_existing_executor_without_forge(self):
         self.job.cfg.update(browser_mode="local", egress_mode="local", local_browser_proxy="http://127.0.0.1:7897", captcha_solver="manual")
         self.job.cfg["roxy"] = {}

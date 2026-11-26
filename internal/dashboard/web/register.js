@@ -124,7 +124,7 @@
     if(field('mode').selectedOptions[0]?.disabled) field('mode').value=local?'local':'roxy';
     const fixed=field('mode').value==='roxy';
     $('registerPortLabel').hidden=!fixed;field('proxyPort').disabled=!fixed;
-    $('registerBrowserHint').textContent=local?'本机 Chrome 独立打开窗口，图形校验需在场人工完成。方式与代理保存到当前任务。':'Forge 管理浏览器窗口与环境，沿用现有流程。方式与代理保存到当前任务。';
+    $('registerBrowserHint').textContent=local?'本机 Chrome 独立打开窗口。本机 OCR 识别不出时连续换图最多 3 次，再用已配置的远程识别兜底；失败自动重试，最多 4 轮。方式与代理保存到当前任务。':'Forge 管理浏览器窗口与环境，沿用现有流程。方式与代理保存到当前任务。';
   }
   field('browserMode').addEventListener('change',()=>{browserMode();try{localStorage.setItem('registrationBrowserMode',field('browserMode').value);}catch{}});
   field('mode').addEventListener('change',browserMode);
@@ -140,7 +140,7 @@
       const manual=automatic ? {} : {email:field('email').value.trim(),password:field('password').value,phone:field('phone').value,platform:field('platform').value,activation:field('activation').value,expiresAt:expiry.toISOString(),...(retryOf ? {retryOf}: {})};
       const role=field('familyRole').value;
       const family={role,...(role==='member'?{organizer:field('organizer').value}:{}),...(role==='organizer'?{region:field('familyRegion').value,acceptSubscription:field('acceptSubscription').checked}:{})};
-      const result=await api('',{automatic,...manual,family,browserMode:field('browserMode').value,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:field('browserMode').value==='local'?'manual':'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
+      const result=await api('',{automatic,...manual,family,browserMode:field('browserMode').value,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:field('browserMode').value==='local'?'local-first':'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
       selected=result.jobId; retryOf=''; field('password').value=''; $('registerRetryNote').hidden=true;
       field('acceptSubscription').checked=false;familySelected=false;
       showForm(false); notice(automatic ? '任务已提交，邮箱和短信验证码将自动读取。' : '任务已提交。请留意邮箱验证码；短信由接码平台读取。');

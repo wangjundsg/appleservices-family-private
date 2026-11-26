@@ -185,7 +185,7 @@ func validateRegistration(body registerRequest) error {
 		if len(body.PhoneCC) != 2 || !strings.Contains("|GB|CA|ID|US|VN|PL|CO|PT|", "|"+body.PhoneCC+"|") {
 			return errors.New("不支持的自动购号国家")
 		}
-		if !body.AcceptTerms || (body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual") {
+		if !body.AcceptTerms || (body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual" && body.CaptchaProvider != "local-first") {
 			return errors.New("请确认条款和验证码配置")
 		}
 		if body.Egress.Mode == "roxy" && (body.Egress.ProxyPort < 1 || body.Egress.ProxyPort > 65535) {
@@ -218,7 +218,7 @@ func validateRegistration(body registerRequest) error {
 	if body.Egress.Mode == "roxy" && (body.Egress.ProxyPort < 1 || body.Egress.ProxyPort > 65535) {
 		return errors.New("代理端口必须在 1–65535 之间")
 	}
-	if body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual" {
+	if body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual" && body.CaptchaProvider != "local-first" {
 		return errors.New("当前面板使用 YesCaptcha")
 	}
 	if !body.AcceptTerms {

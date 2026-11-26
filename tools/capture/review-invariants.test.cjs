@@ -103,7 +103,7 @@ test("B4: the run exits on its state, and the state is the last log record", () 
   assert.match(source, /if \(verdict === "success"\)/);
   assert.match(source, /finalState = "waiting_input"/);
   // The failure handler names its outcome too, including a pre-run refusal.
-  assert.match(source, /e && e\.state === "usage" \? "usage" : "failed"/);
+  assert.match(source, /\["unknown", "usage", "waiting_input"\]\.includes\(e\.state\)/);
 });
 
 // ---- B5: the mailbox check is the shared three-way match ------------------
@@ -149,7 +149,8 @@ test("§4.8: repeated captures are hashed and the breaker fires before OCR", () 
   assert.match(source, /new lib\.CaptchaTracker\(/, "no breaker is armed");
   assert.match(source, /lib\.sha256Hex\(/, "the capture is not hashed");
   const stuck = source.indexOf('at: "captcha_image_stuck"');
-  const ocr = source.indexOf("lib.runCaptchaCommand(");
+  const ocr = source.lastIndexOf("lib.runCaptchaCommand(");
+  assert.match(source, /captchaSession\.readChallenge\(/, "native path must use the tested refresh budget");
   assert.ok(stuck > 0, "the breaker never reports captcha_image_stuck");
   assert.ok(stuck < ocr, "the breaker fires after the solver was already paid");
   assert.match(source, /duplicates:/, "the duplicate count is not logged");

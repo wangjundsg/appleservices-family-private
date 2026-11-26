@@ -102,4 +102,4 @@ if (require.main===module) {
     }
   })();
 }
-module.exports={inspect,pollCode,pickCode};
+module.exports={inspect,pollCode,pickCode,loadKey};

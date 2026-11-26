@@ -15,6 +15,11 @@ func TestLocalBrowserSelectionIndependentOfForge(t *testing.T) {
 	if err := validateBrowserSelection(body); err != nil {
 		t.Fatal(err)
 	}
+	body.CaptchaProvider = "local-first"
+	if err := validateBrowserSelection(body); err != nil {
+		t.Fatal("local-first OCR rejected", err)
+	}
+	body.CaptchaProvider = "manual"
 	body.BrowserMode = "forge"
 	if validateBrowserSelection(body) == nil {
 		t.Fatal("Forge accepted local routing")

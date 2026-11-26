@@ -549,9 +549,9 @@ test("wiring B: the submit is resolved by the shared finder, not by a loose sele
   assert.ok(gate > 0 && forced > gate, "the force-click is no longer behind the readback");
 });
 
-test("wiring C: the email step waits without wiring any resend action", () => {
+test("wiring C: only the native path enables bounded email resend", () => {
   assert.match(source, /mech\.emailCodeWindow\(/, "the email step has no grace window");
-  assert.doesNotMatch(source, /resendEmailCode|mech\.RESEND_LABELS/, "an automatic resend action remains wired");
+  assert.match(source, /nativeMode \? \{firstMs:180000,secondMs:180000,resendEnabled:true,resend:resendEmailCode\}/);
   // The pickers take the window they are given instead of owning a fixed one.
   assert.match(source, /graphEmailCode\(emailRequestedAt, windowMs\)/);
   const sentAt=source.indexOf('emailRequestedAt = Date.now();',source.indexOf('submissionMayHaveLanded = true;'));

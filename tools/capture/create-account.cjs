@@ -67,11 +67,12 @@ const { createHash } = require("node:crypto");
 if (require.main !== module) throw new Error("create_account_is_cli_use_flow_mechanics");
 function executorVersion() {
   const files = ["create-account.cjs", "flow-mechanics.cjs", "account-flow.cjs", "capture-lib.cjs",
-    "registration-lifecycle.cjs", "mail-reader.cjs", "otpgmail.cjs"];
+    "registration-lifecycle.cjs", "mail-reader.cjs", "otpgmail.cjs", "captcha-session.cjs"];
   return { entry: __filename, node: process.version,
     files: Object.fromEntries(files.map(file => [file,
       createHash("sha256").update(fs.readFileSync(path.join(__dirname, file))).digest("hex")])),
-    automaticResend: {email: false, phone: {afterMs: 300000, maxPerNumber: 1, replaceAfterMs: 600000}}, fieldReadback: true, maxFieldCorrections: 1 };
+    automaticResend: {local: {email: true, afterMs: 180000, maxPerResource: 1, replaceAfterMs: 360000},
+      forge: {email: false, phone: {afterMs: 300000, maxPerNumber: 1, replaceAfterMs: 600000}}}, fieldReadback: true, maxFieldCorrections: 1 };
 }
 const executor = executorVersion();
 if (process.argv.includes("--version")) {
@@ -84,6 +85,7 @@ const privateInput = lifecycle.readInput(process.env.APPLESERVICES_CREATE_INPUT)
 let leaseDeadline = Infinity;
 const lib = require("./capture-lib.cjs");
 const mech = require("./flow-mechanics.cjs");
+const captchaSession = require("./captcha-session.cjs");
 const mailReader = require("./mail-reader.cjs");
 const preflight = require("./preflight.cjs");
 const refund = require("./refund.cjs");
@@ -120,7 +122,7 @@ function flagOn(name) {
 }
 
 const outdir = path.resolve(arg("outdir", ".cache/acct"));
-const email = String(arg("email", ""));
+let email = String(arg("email", ""));
 const jwt = String(arg("jwt", ""));
 let phone = String(arg("phone", ""));
 let activation = String(arg("activation", ""));
@@ -146,6 +148,7 @@ const password = passwordResolution.password;
 // one attempt at a time (16 empty OCR rounds). It is validated at the top of the
 // run body, before the first network call.
 const captchaCmdFlag = String(arg("captcha-cmd", "") || "");
+const captchaFallbackFlag = String(arg("captcha-fallback-cmd", "") || "");
 // Senders a verification mail may come from; Apple's own domains by default.
 // --mail-from keeps the check configurable without weakening it (review B5).
 const mailFrom = String(arg("mail-from", "") || "")
@@ -188,7 +191,7 @@ function note(kind, data) {
 // A write failure is reported but never masks the outcome that is being logged.
 function writeRunLog() {
   try {
-    fs.writeFileSync(path.join(outdir, "run.jsonl"), log.map((x) => JSON.stringify(x)).join("\n"), "utf8");
+    fs.writeFileSync(path.join(outdir, "run.jsonl"), log.map((x) => JSON.stringify(x)).join("\n") + "\n", "utf8");
   } catch (e) {
     console.error("run.jsonl write failed:", clip(e && e.message ? e.message : e, 160));
   }
@@ -317,7 +320,7 @@ const awaitEmailFile = String(arg("await-email-code", ""));
 // code is read out of the registration mailbox itself (see graph-mail.cjs).
 const graphTokenFile = String(arg("graph-token-file", ""));
 const codePoolConfig = String(arg("code-pool-config", ""));
-const otpGmailOrderFile = String(arg("otpgmail-order-file", ""));
+let otpGmailOrderFile = String(arg("otpgmail-order-file", ""));
 const usedEmailMessages = [];
 let emailRequestedAt = Date.now();
 async function poolEmailCode(timeoutMs) {
@@ -686,6 +689,8 @@ async function widgetText(page) {
 // sentence, so the English check walked straight past it and spent four
 // captcha rounds on a form Apple had already rejected).
 const HARD_REFUSAL_PHRASES = [
+  "此时无法创建你的账户", "此时无法创建您的账户", "目前无法创建你的账户", "目前无法创建您的账户",
+  "暂时无法创建", "無法建立你的帳號", "無法建立您的帳號",
   "cannot be created at this time",
   "impossible de creer",
   "no se puede crear",
@@ -716,9 +721,9 @@ async function hardRefusal(frame, pageText) {
 // Picking from a real dropdown: click it open, wait like a person reading the
 // list, choose, then let the widget settle before the next field.
 async function selectHuman(locator, value, label = "") {
-  await locator.click({ timeout: 15000 }).catch(() => {});
+  await locator.click({ timeout: 15000 });
   await sleep(300 + Math.floor(Math.random() * 500));
-  await mech.selectByKeyboard(locator, value);
+  await mech.selectByKeyboard(locator, value, nativeMode ? {sleep, stepMs: 100, settleMs: 300} : {});
   await sleep(250 + Math.floor(Math.random() * 450));
   if (label) note("step", { at: "selected", field: label, value: String(value) });
 }
@@ -742,9 +747,9 @@ async function selectIfNeeded(locator, value, label = "") {
 async function typeHuman(locator, text, label = "") {
   const value = String(text == null ? "" : text);
   if (!value) return;
-  await locator.click({ timeout: 15000 }).catch(() => {});
+  await locator.click({ timeout: 15000 });
   for (const ch of value) {
-    await locator.pressSequentially(ch, { timeout: 5000 }).catch(() => {});
+    await locator.pressSequentially(ch, { timeout: 5000 });
     // Real typing is uneven: a quick burst, then a pause to think.
     await sleep(120 + Math.floor(Math.random() * 230));
     if (Math.random() < 0.12) await sleep(400 + Math.floor(Math.random() * 700));
@@ -757,13 +762,15 @@ async function fillDigits(frame, code) {
   const boxes = frame.locator('input[type="tel"]');
   const count = await boxes.count();
   note("code-boxes", { count });
-  if (count >= code.length) {
+  if (count === code.length) {
     for (let i = 0; i < code.length; i += 1) {
-      await boxes.nth(i).pressSequentially(code[i], { timeout: 5000 }).catch(() => {});
+      await mech.fillField(boxes.nth(i), code[i], "verification_code", {
+        type: async (locator, value) => {await locator.pressSequentially(value, {timeout:5000}); if(nativeMode)await sleep(100);}});
     }
-  } else {
-    await boxes.first().pressSequentially(code, { timeout: 5000 }).catch(() => {});
-  }
+  } else if (count === 1) {
+    await mech.fillField(boxes.first(), code, "verification_code", {type: async (locator,value) => {
+      await locator.pressSequentially(value,{timeout:5000,delay:nativeMode?100:0});}});
+  } else throw new Error("verification_input_ambiguous");
   await sleep(800);
 }
 
@@ -822,9 +829,87 @@ async function captchaLocator(fr, { state = "failed", tag = "" } = {}) {
   return { locator: fr.locator("img").nth(pick.index), pick };
 }
 
+const nativeCaptchaTracker = new lib.CaptchaTracker();
+async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
+  const answerFile = path.resolve(awaitCaptcha || ".cache/captcha-answer.txt");
+  const deadline = Math.min(Date.now() + timeoutMs, leaseDeadline);
+  const progress = async () => {
+    const current = await widgetFrame(page);
+    const state = flow.classifyScreen({text: await widgetText(page), url: page.url(), email, phone});
+    return flow.captchaAdvanced({state,
+      captchaPresent: current && await current.locator('input[name="captcha"]').count() > 0,
+      creationFormPresent: current && await current.locator('input[name="appleId"]').count() > 0,
+      codeInputs: current ? await current.locator('input[type="tel"]').count() : 0});
+  };
+  const manual = async until => waitFor(async () => {
+    if (await progress()) return {advanced:true};
+    if (!fs.existsSync(answerFile)) return "";
+    const answer=fs.readFileSync(answerFile,"utf8").trim();
+    if (answer === ":refresh") return {refresh:true};
+    return /^[A-Za-z0-9]{3,6}$/.test(answer) ? {answer} : "";
+  }, Math.max(0,until-Date.now()), "captcha");
+  return captchaSession.readChallenge({
+    progress,
+    available: () => Date.now() < deadline,
+    clear: () => fs.rmSync(answerFile, {force:true}),
+    log: data => note("step", {tag,...data}),
+    capture: async () => {
+      let found;
+      const until = Math.min(Date.now()+10000, deadline);
+      while (Date.now() < until) {
+        const pick = lib.pickCaptchaImage(await observeCaptchaImages(fr));
+        if (pick.ok) {found={pick,locator:fr.locator("img").nth(pick.index)};break;}
+        await sleep(250);
+      }
+      if (!found) {
+        note("step",{at:"captcha-unavailable",tag});
+        throw Object.assign(new Error("captcha_image_unavailable"),{captchaUnavailable:true});
+      }
+      const png = path.join(outdir,"captcha.png");
+      // Retain source pixels when the page already exposes a data image.
+      const src = await found.locator.getAttribute("src");
+      const data = /^data:image\/(?:png|jpeg);base64,([A-Za-z0-9+/=]+)$/.exec(src || "");
+      if (data) fs.writeFileSync(png,Buffer.from(data[1],"base64"));
+      else await found.locator.screenshot({path:png,scale:"css"});
+      const digest=lib.sha256Hex(fs.readFileSync(png));
+      const gate=nativeCaptchaTracker.observe(digest);
+      if(gate.stuck) {
+        note("step",{at:"captcha_image_stuck",duplicates:gate.duplicates});
+        throw Object.assign(new Error("captcha_image_stuck"),{state:"unknown",closeReason:"captcha-exhausted"});
+      }
+      return {png,digest};
+    },
+    recognize: captchaCmdFlag ? async ({png}) => {
+      if (Date.now() >= deadline) return "";
+      const result = await lib.runCaptchaCommandAsync(captchaCmdFlag,png,{timeoutMs:Math.min(20000,deadline-Date.now())});
+      note("step",{at:"ocr-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms});
+      return result.ok ? result.text : "";
+    } : null,
+    fallback: captchaFallbackFlag ? async ({png}) => {
+      if(Date.now() >= deadline)return "";
+      const result=await lib.runCaptchaCommandAsync(captchaFallbackFlag,png,{timeoutMs:Math.min(75000,deadline-Date.now())});
+      note("step",{at:"ocr-remote-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms});
+      return result.ok ? result.text : "";
+    } : null,
+    manual: () => manual(deadline),
+    refresh: async () => {
+      if (Date.now() >= deadline) throw Object.assign(new Error("captcha_attempt_deadline"),{state:"unknown",closeReason:"captcha-exhausted"});
+      await mech.refreshCaptcha(fr,{click:locator=>mech.clickElement(locator,{mouse:page.mouse,sleep})});
+    },
+  });
+}
+
 // Apple can show the image captcha on any step, including the phone step
 // ("Security Code Error"). Solve it the same way as on the first form.
 async function solveCaptcha(page, fr, tag) {
+  if (nativeMode) {
+    const result = await nativeCaptchaAnswer(page, fr, tag, 180000);
+    if (result.advanced) return "advanced";
+    await fillIfNeeded(fr.locator('input[name="captcha"]'),result.answer,"captcha");
+    await clickContinue(page,fr,tag);
+    await sleep(1000);
+    return result.answer;
+  }
   const answerFile = path.resolve(arg("await-captcha", ".cache/captcha-answer.txt"));
   fs.rmSync(answerFile, { force: true });
   const { locator, pick } = await captchaLocator(fr, { state: "unknown", tag });
@@ -933,7 +1018,7 @@ async function clickContinue(page, frame, tag = "") {
     form_visible: after.formVisible,
     same_screen: sameScreen,
   });
-  if (verdict !== "retry") {
+  if (verdict !== "retry" || nativeMode) {
     const err = new Error(`click timed out and the submission result is unknown (${tag || "continue"})`);
     err.state = "unknown";
     err.evidence = `click-timeout:${tag || "continue"}`;
@@ -975,9 +1060,9 @@ async function clickContinue(page, frame, tag = "") {
 
   // run-20261113 §4.3: a malformed --captcha-cmd is refused here, not after 16
   // empty OCR rounds.
-  if (captchaCmdFlag) {
+  for (const command of [captchaCmdFlag, captchaFallbackFlag].filter(Boolean)) {
     try {
-      lib.captchaArgv(captchaCmdFlag);
+      lib.captchaArgv(command);
     } catch (e) {
       const err = new Error("bad_captcha_cmd");
       err.state = "usage";
@@ -1429,6 +1514,7 @@ async function clickContinue(page, frame, tag = "") {
 
   // A wrong captcha does not burn anything: Apple just refreshes the image and
   // stays on the form. Loop until the form is behind us.
+  async function submitCreateForm() {
   const answerFile = path.resolve(awaitCaptcha || ".cache/captcha-answer.txt");
   let submitted = false;
   // Set once the form has actually been submitted, so a captcha that never
@@ -1442,6 +1528,17 @@ async function clickContinue(page, frame, tag = "") {
     const fr = await widgetFrame(page);
     if (!fr) break;
     await fillForm(fr);
+    let answer = "";
+    if (nativeMode) {
+      const result = await nativeCaptchaAnswer(page,fr,`create-${attempt}`);
+      if (result.advanced) {
+        submitted = true;
+        submissionMayHaveLanded = true;
+        note("step",{at:"manual-captcha-progress",state:"form_advanced"});
+        break;
+      }
+      answer = result.answer;
+    } else {
     fs.rmSync(answerFile, { force: true });
 
     // The captcha has to be loaded before anything is screenshotted or solved
@@ -1509,7 +1606,6 @@ async function clickContinue(page, frame, tag = "") {
     // second, so a rejected captcha only costs one more round trip. Fall back
     // to a human/answer file when OCR returns nothing usable. The command may be
     // an interpreter plus arguments (run §4.3); runCaptchaCommand never throws.
-    let answer = "";
     const ocrCmd = arg("captcha-cmd", "");
     if (ocrCmd) {
       const ocr = lib.runCaptchaCommand(String(ocrCmd), png);
@@ -1540,9 +1636,11 @@ async function clickContinue(page, frame, tag = "") {
       err.closeReason = "captcha-exhausted";
       throw err;
     }
+    }
     note("step", { at: "captcha-answer", attempt, accepted: Boolean(answer), length: answer ? answer.length : 0 });
 
-    await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha_inline");
+    if(nativeMode)await fillIfNeeded(fr.locator('input[name="captcha"]'),answer,"captcha_inline");
+    else await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha_inline");
     await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
     submitAttempted = true;
@@ -1605,6 +1703,62 @@ async function clickContinue(page, frame, tag = "") {
     err.evidence = "captcha-never-accepted";
     err.closeReason = "captcha-exhausted";
     throw err;
+  }
+  }
+  await submitCreateForm();
+  let emailReplaced = false;
+  async function resendEmailCode() {
+    const marker = path.join(outdir,`email-${lib.sha256Hex(email).slice(0,16)}-resend.json`);
+    await mech.onceAction(marker, async () => {
+      const current = await widgetFrame(page);
+      const action = await mech.findAction(current,mech.RESEND_LABELS);
+      if (!action.ok) throw new Error("email_resend_not_found");
+      await mech.clickElement(action.locator,{mouse:page.mouse,sleep});
+    });
+    note("step",{at:"email-resend",count:1});
+    return {asked:true,ok:true,how:"resend-email"};
+  }
+  async function replaceEmail() {
+    const handoff = String(arg("replacement-email-file",""));
+    if (!nativeMode || emailReplaced || !otpGmailOrderFile || !handoff) return false;
+    const current = await widgetFrame(page);
+    const back = await mech.findAction(current,["后退","返回","後退","返回上一步","Back","Go back"]);
+    if (!back.ok) return false;
+    await mech.onceAction(path.join(outdir,"email-replace.json"),async()=>{
+      await mech.clickElement(back.locator,{mouse:page.mouse,sleep});
+    });
+    const form = await widgetFrame(page);
+    await form.locator('input[name="appleId"]').waitFor({state:"visible",timeout:15000});
+    // Confirm the full editable form before requesting another paid mailbox.
+    if (!await form.locator('input[name="phoneNumber"]').count() || !await form.locator('input[name="password"]').count())
+      throw Object.assign(new Error("email_replacement_form_unavailable"),{state:"waiting_input"});
+    note("step",{state:"replacement_email_required"});
+    const next = await waitFor(async()=>{
+      if (!fs.existsSync(handoff))return "";
+      const value=JSON.parse(fs.readFileSync(handoff,"utf8"));
+      return value;
+    },60000,"replacement-email");
+    if (!next || next.previous_email!==email || !/^[A-Za-z0-9._%+-]+@gmail\.com$/.test(next.email||"") ||
+      next.email.toLowerCase()===email.toLowerCase() || path.resolve(next.order_file||"")!==path.join(outdir,"replacement-otpgmail-order.json"))
+      throw Object.assign(new Error("replacement_email_invalid"),{state:"waiting_input"});
+    email=next.email;
+    otpGmailOrderFile=next.order_file;
+    usedEmailMessages.length=0;
+    emailReplaced=true;
+    await submitCreateForm();
+    note("step",{at:"replacement-email-submitted"});
+    return true;
+  }
+  async function waitForVerification(expected,picker,windowMs) {
+    if (!nativeMode) return picker(windowMs);
+    const deadline=Math.min(Date.now()+windowMs,leaseDeadline);
+    while(Date.now()<deadline) {
+      const state=flow.classifyScreen({text:await widgetText(page),url:page.url(),email,phone});
+      if (["email_step","phone_step","success"].includes(state) && state!==expected) return {advanced:true};
+      const hit=await picker(Math.min(10000,Math.max(0,deadline-Date.now())));
+      if(hit)return hit;
+    }
+    return null;
   }
   // A person does not land on Continue the instant the last field is filled:
   // drift the pointer, settle, then commit.
@@ -1687,10 +1841,13 @@ async function clickContinue(page, frame, tag = "") {
     if (verdict === "email_step") {
       // Continue polling through both windows; do not request another message.
       const window = await mech.emailCodeWindow({
-        waitCode: (windowMs) => emailPicker(windowMs),
+        waitCode: (windowMs) => waitForVerification("email_step",emailPicker,windowMs),
         deadline: leaseDeadline,
         log: note,
+        ...(nativeMode ? {firstMs:180000,secondMs:180000,resendEnabled:true,resend:resendEmailCode} : {}),
       });
+      if (window.advanced) continue;
+      if (nativeMode && window.replace && await replaceEmail()) continue;
       note("step", {
         at: "email-window",
         waited_ms: window.waitedMs,
@@ -1702,15 +1859,17 @@ async function clickContinue(page, frame, tag = "") {
       emailWindow = window;
     } else {
       const window = await mech.phoneCodeWindow({
-        waitCode: ms => waitFor(smsCode, ms, "sms-code"),
+        waitCode: ms => waitForVerification("phone_step",windowMs=>waitFor(smsCode,windowMs,"sms-code"),ms),
         deadline: leaseDeadline,
         resend: () => phoneAction(page, mech.PHONE_RESEND_LABELS, "resend"),
+        ...(nativeMode ? {firstMs:180000,secondMs:180000} : {}),
       });
+      if (window.advanced) continue;
       picked = window.picked;
       if (window.replace && await replacePhone(page)) continue;
     }
     let code = picked && typeof picked === "object" ? String(picked.code || "") : String(picked || "");
-    if (!code && verdict === "email_step") {
+    if (!code && verdict === "email_step" && !nativeMode) {
       const late = await lifecycle.retainInput({
         deadline: leaseDeadline,
         notify: () => note("step", { at: verdict, state: "waiting_input", expires_at: new Date(leaseDeadline).toISOString() }),
@@ -1795,7 +1954,7 @@ async function clickContinue(page, frame, tag = "") {
   // Review B4: a thrown error is a named outcome too — `unknown` when a submit
   // may have landed, `failed` when it provably did not, `usage` when the run was
   // refused before it started — and it is the last record of run.jsonl either way.
-  let state = e && e.state === "unknown" ? "unknown" : e && e.state === "usage" ? "usage" : "failed";
+  let state = e && ["unknown", "usage", "waiting_input"].includes(e.state) ? e.state : "failed";
   // Once the SMS code has been typed in, Apple navigates away and the widget
   // iframe we hold is destroyed. Reporting "failed" there mislabels a created
   // account (run-20261113d run 5), so the torn handle becomes its own state and
