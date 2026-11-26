@@ -52,6 +52,22 @@ class AutomaticCodeTests(unittest.TestCase):
         with patch.object(p.subprocess,'run',side_effect=receive):
             self.assertEqual(self.job.collect_inputs(),{'email':'009999'})
 
+    def test_otpgmail_order_reaches_shared_reader_without_a_purchase_or_resend(self):
+        self.job.cfg.pop('code_pool_config')
+        self.job.cfg['otpgmail_order_file']=str(self.folder/'otpgmail-order.json')
+        p.validate(self.job.cfg)
+        def receive(args,**kwargs):
+            request=json.loads(kwargs['input'])
+            self.assertEqual(request['reader'],'otpgmail')
+            self.assertEqual(request['file'],self.job.cfg['otpgmail_order_file'])
+            self.assertEqual(request['mailbox'],self.job.cfg['email'])
+            p.atomic(request['output'],{'challenge_id':request['challenge_id'],'code':'001234',
+                'message_id':'otpgmail:fixture','received_at':p.iso()})
+            return SimpleNamespace(returncode=0,stdout='{"found":true}')
+        with patch.object(p.subprocess,'run',side_effect=receive) as run:
+            self.assertEqual(self.job.collect_inputs(),{'email':'001234'})
+        self.assertEqual(run.call_count,1)
+
     def test_absent_mail_remains_waiting_without_a_code_file(self):
         with patch.object(p.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='{"found":false}')):
             self.assertEqual(self.job.collect_inputs(),{})

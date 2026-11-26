@@ -296,10 +296,11 @@ const awaitEmailFile = String(arg("await-email-code", ""));
 // code is read out of the registration mailbox itself (see graph-mail.cjs).
 const graphTokenFile = String(arg("graph-token-file", ""));
 const codePoolConfig = String(arg("code-pool-config", ""));
+const otpGmailOrderFile = String(arg("otpgmail-order-file", ""));
 const usedEmailMessages = [];
 let emailRequestedAt = Date.now();
 async function poolEmailCode(timeoutMs) {
-  const hit = await mailReader.readCode({reader:'outlook', file:codePoolConfig, mailbox:email,
+  const hit = await mailReader.readCode({reader:otpGmailOrderFile?'otpgmail':'outlook', file:otpGmailOrderFile||codePoolConfig, mailbox:email,
     recipient:email, source:'registration', since:emailRequestedAt,
     timeoutMs:Math.max(0,Math.min(timeoutMs,leaseDeadline-Date.now())), excluded:usedEmailMessages});
   if (hit) usedEmailMessages.push(hit.messageId);
@@ -1592,7 +1593,7 @@ async function resendEmailCode(page, frame) {
     // Priority: a Graph mailbox is unattended, the manual file is a human, and
     // the legacy temp-mail API is the fallback when neither was given. Each
     // picker now takes the window it is given: mechanism C owns the timing.
-    const emailPicker = codePoolConfig
+    const emailPicker = otpGmailOrderFile || codePoolConfig
       ? (windowMs) => poolEmailCode(windowMs)
       : graphTokenFile
       ? (windowMs) => graphEmailCode(emailRequestedAt, windowMs)

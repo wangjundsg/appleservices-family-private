@@ -158,9 +158,9 @@ def validate(cfg):
     pw = cfg.get("password", "")
     if len(pw) < 8 or not all(re.search(p, pw) for p in [r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]"]):
         raise PipelineError("password_requires_four_character_classes", "usage")
-    if sum(bool(cfg.get(k)) for k in ("graph_token_file", "email_code_file", "code_pool_config")) != 1:
+    if sum(bool(cfg.get(k)) for k in ("graph_token_file", "email_code_file", "code_pool_config", "otpgmail_order_file")) != 1:
         raise PipelineError("choose_one_email_code_source", "usage")
-    if not Path(cfg.get("graph_token_file") or cfg.get("email_code_file") or cfg.get("code_pool_config")).is_absolute():
+    if not Path(cfg.get("graph_token_file") or cfg.get("email_code_file") or cfg.get("code_pool_config") or cfg.get("otpgmail_order_file")).is_absolute():
         raise PipelineError("mailbox_code_source_requires_absolute_path", "usage")
     if cfg.get("graph_token_file") and not Path(cfg["graph_token_file"]).is_file():
         raise PipelineError("mailbox_token_file_missing", "usage")
@@ -568,7 +568,8 @@ class Job:
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
                    "expected-locale": roxy["locale"], "expected-timezone": roxy["timeZone"],
                    "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt")}
-            if self.cfg.get("code_pool_config"): inp["code-pool-config"] = self.cfg["code_pool_config"]
+            if self.cfg.get("otpgmail_order_file"): inp["otpgmail-order-file"] = self.cfg["otpgmail_order_file"]
+            elif self.cfg.get("code_pool_config"): inp["code-pool-config"] = self.cfg["code_pool_config"]
             elif self.cfg.get("graph_token_file"): inp["graph-token-file"] = self.cfg["graph_token_file"]
             else: inp["await-email-code"] = self.cfg["email_code_file"]
             if resolve_captcha(self.cfg)[0] == "yes":
@@ -989,9 +990,9 @@ class Job:
                 raise PipelineError("mail_exclusions_invalid","needs_review")
         if not result.exists():
             if kind=="email":
-                source=self.cfg.get("code_pool_config") or self.cfg.get("graph_token_file")
+                source=self.cfg.get("otpgmail_order_file") or self.cfg.get("code_pool_config") or self.cfg.get("graph_token_file")
                 if not source:return False
-                request={"reader":"outlook" if self.cfg.get("code_pool_config") else "graph","file":source,
+                request={"reader":"otpgmail" if self.cfg.get("otpgmail_order_file") else "outlook" if self.cfg.get("code_pool_config") else "graph","file":source,
                          "mailbox":self.cfg["email"],"since":since*1000,"excluded":seen,
                          "challenge_id":identity,"output":str(result.resolve())}
                 try:
