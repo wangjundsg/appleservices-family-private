@@ -206,6 +206,11 @@ func run() (runErr error) {
 			}
 			status.VerificationRequired = false
 		}
+		var route *gsa.RoutePreflightError
+		if errors.As(runErr, &route) {
+			status.FailureStage = "verification-preflight-" + route.Stage
+			status.FailureReason = status.FailureStage
+		}
 		if err := status.save(*dir); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -417,8 +422,14 @@ func run() (runErr error) {
 					case "resend-sms":
 						if time.Since(lastSent) < time.Minute {
 							result.Message = "请间隔一分钟再重发短信"
-						} else if login.RequestCode(factor) != nil {
-							result.Message = "短信发送失败，请稍后重试"
+						} else if err := login.RequestCode(factor); err != nil {
+							var route *gsa.RoutePreflightError
+							if errors.As(err, &route) {
+								result.Stage = "verification-preflight-" + route.Stage
+								result.Message = "验证码网络预检失败（" + route.Stage + "）；未发送短信。"
+							} else {
+								result.Message = "短信发送失败，请稍后重试"
+							}
 						} else {
 							lastSent = time.Now()
 							result.OK = true

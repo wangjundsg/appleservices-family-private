@@ -251,6 +251,9 @@ func TestSMSSubmitUsesTheRequestedPhone(t *testing.T) {
 	c := NewClient(headerProvider{})
 	discoveries := 0
 	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "HEAD" {
+			return &http.Response{StatusCode: 404, Body: http.NoBody}, nil
+		}
 		if r.URL.Hostname() != "gsa.apple.com" {
 			t.Error("SMS verification used a different authentication host")
 		}
@@ -282,6 +285,9 @@ func TestExplicitSMSPhoneStaysBoundWithoutMetadata(t *testing.T) {
 	c := NewClient(headerProvider{})
 	requests := 0
 	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "HEAD" {
+			return &http.Response{StatusCode: 404, Body: http.NoBody}, nil
+		}
 		requests++
 		if r.Method == "GET" {
 			t.Fatal("explicit phone selection unexpectedly fetched metadata")
@@ -313,6 +319,9 @@ func TestSMSLimitStopsBeforeSendingAndRedactsResponse(t *testing.T) {
 	c := NewClient(headerProvider{})
 	requests := 0
 	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "HEAD" {
+			return &http.Response{StatusCode: 404, Body: http.NoBody}, nil
+		}
 		requests++
 		if r.Method != "GET" || r.URL.Path != "/auth" {
 			t.Fatal("sent SMS after Apple rejected number discovery")

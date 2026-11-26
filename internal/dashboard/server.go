@@ -36,6 +36,7 @@ type Config struct {
 	Port                                                 int
 	AllowPurchase                                        bool
 	AllowSubscription                                    bool
+	ManualStart                                          bool
 }
 type Server struct {
 	config     Config
@@ -304,8 +305,10 @@ func maskAccount(appleID string) string {
 
 func (s *Server) URL() string { return "http://" + s.listener.Addr().String() }
 func (s *Server) Serve(ctx context.Context) error {
-	go s.maintainRegistrations(ctx)
-	go s.maintainCNFamily(ctx)
+	if !s.config.ManualStart {
+		go s.maintainRegistrations(ctx)
+		go s.maintainCNFamily(ctx)
+	}
 	go func() { <-ctx.Done(); s.http.Close() }()
 	err := s.http.Serve(s.listener)
 	if errors.Is(err, http.ErrServerClosed) {
@@ -968,15 +971,19 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	if _, err := nativeadi.Environment(); err != nil {
 		return control.Result{Stage: "native-proxy", Message: "ADI 代理配置无效：请为 APPLESERVICES_NATIVE_HTTP_PROXY 配置带端口的 HTTP/HTTPS 代理，不能直接填入 SOCKS 地址。"}
 	}
+	if _, err := os.Stat(s.config.Worker); err != nil {
+		return control.Result{Message: "缺少后台程序，请重新运行启动脚本"}
+	}
 	s.setLaunching(account, true)
 	defer s.setLaunching(account, false)
+	if result := s.activationNetworkPreflight(ctx, dir); !result.OK {
+		s.setMessage(account, result.Message)
+		return result
+	}
 	if current.Running {
 		if err := s.stopIn(ctx, dir); err != nil {
 			return control.Result{Message: err.Error()}
 		}
-	}
-	if _, err := os.Stat(s.config.Worker); err != nil {
-		return control.Result{Message: "缺少后台程序，请重新运行启动脚本"}
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return control.Result{Message: "无法写入本机状态目录"}
@@ -1049,6 +1056,12 @@ func lastProcessError(path string) string {
 		}
 		// Never forward arbitrary stderr (which can contain credentials).
 		switch {
+		case strings.Contains(line, "verification_preflight_connect"), strings.Contains(line, "verification_preflight_tls"), strings.Contains(line, "verification_preflight_http"):
+			for _, phase := range []string{"connect", "tls", "http"} {
+				if strings.Contains(line, "verification_preflight_"+phase) {
+					return "验证码路由预检失败（GSA/" + phase + "）；未发送验证码。"
+				}
+			}
 		case strings.Contains(line, "native_tls_handshake_failed"):
 			return "ADI 网络 TLS 握手失败，请检查 ADI 专用 HTTP 代理配置；该错误本身不代表账号密码被拒绝。"
 		case strings.Contains(line, "native_network_timeout"), strings.Contains(line, "native_connection_failed"):
@@ -1131,6 +1144,9 @@ func verificationNeedsAttention(reason string) bool {
 }
 
 func (s *Server) Bootstrap(ctx context.Context, appleID, password string) {
+	if s.config.ManualStart {
+		return
+	}
 	dir := s.config.Dir
 	if account := s.lookup(""); account != nil {
 		dir = account.Dir
@@ -1238,6 +1254,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/network-config":
+			json.NewEncoder(w).Encode(networkConfiguration())
+			return
 		case r.Method == "POST" && r.URL.Path == "/api/mail-bridge/accounts":
 			s.serveMailBridgeAccounts(w, r)
 			return

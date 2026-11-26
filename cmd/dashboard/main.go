@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/Laky-64/appleservices/internal/dashboard"
@@ -20,6 +21,8 @@ func main() {
 	port := flag.Int("port", 18741, "loopback dashboard port")
 	allowPurchase := flag.Bool("allow-purchase", false, "allow paid number purchases with an explicit configured budget")
 	allowSubscription := flag.Bool("allow-subscription", false, "allow organizer registration to buy the existing allowlisted 50GB monthly plan")
+	manualStart := flag.Bool("manual-start", false, "start panel without restoring workers or running background account jobs")
+	networkPreflight := flag.Bool("network-preflight", false, "check activation routes without opening accounts, logging in or sending codes, then exit")
 	flag.Parse()
 	absDir, _ := filepath.Abs(*dir)
 	absRepo, _ := filepath.Abs(*repo)
@@ -28,7 +31,17 @@ func main() {
 	absMacPushSetup, _ := filepath.Abs(*macPushSetup)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port, RepoRoot: absRepo, AllowPurchase: *allowPurchase, AllowSubscription: *allowSubscription})
+	if *networkPreflight {
+		checks := dashboard.CheckActivationNetwork(ctx, absLibrary, *python)
+		json.NewEncoder(os.Stdout).Encode(checks)
+		for _, check := range checks {
+			if !check.OK {
+				os.Exit(1)
+			}
+		}
+		return
+	}
+	server, err := dashboard.New(dashboard.Config{Dir: absDir, Worker: absWorker, Library: absLibrary, Python: *python, MacPushSetup: absMacPushSetup, Port: *port, RepoRoot: absRepo, AllowPurchase: *allowPurchase, AllowSubscription: *allowSubscription, ManualStart: *manualStart})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

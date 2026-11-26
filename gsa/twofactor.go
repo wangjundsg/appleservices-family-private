@@ -163,6 +163,9 @@ func (c *Client) twoFactorHeaders(dsid, idmsToken string) (map[string]string, er
 }
 
 func (c *Client) RequestTrustedDeviceCode(dsid, idmsToken string) error {
+	if err := c.preflightSecondFactor(); err != nil {
+		return err
+	}
 	headers, err := c.twoFactorHeaders(dsid, idmsToken)
 	if err != nil {
 		return err
@@ -317,6 +320,10 @@ func parseTrustedPhoneID(body []byte) (int, error) {
 }
 
 func (c *Client) RequestSMSCode(dsid, idmsToken string) error {
+	// Discovery itself may deliver a code (HTTP 201), so check before fetching it.
+	if err := c.preflightSecondFactor(); err != nil {
+		return err
+	}
 	phoneID, err := c.fetchTrustedPhoneID(dsid, idmsToken)
 	if err != nil {
 		return err
@@ -325,7 +332,7 @@ func (c *Client) RequestSMSCode(dsid, idmsToken string) error {
 		c.smsPhoneID = phoneID
 		return nil
 	}
-	return c.RequestSMSCodeForPhone(dsid, idmsToken, phoneID)
+	return c.requestSMSCodeForPhone(dsid, idmsToken, phoneID)
 }
 
 // RequestSMSCodeForPhone is an explicit diagnostic for a selected phone ID.
@@ -334,7 +341,13 @@ func (c *Client) RequestSMSCodeForPhone(dsid, idmsToken string, phoneID int) err
 	if phoneID <= 0 {
 		return errors.New("gsa: positive trusted phone id required")
 	}
+	if err := c.preflightSecondFactor(); err != nil {
+		return err
+	}
+	return c.requestSMSCodeForPhone(dsid, idmsToken, phoneID)
+}
 
+func (c *Client) requestSMSCodeForPhone(dsid, idmsToken string, phoneID int) error {
 	headers, err := c.twoFactorHeaders(dsid, idmsToken)
 	if err != nil {
 		return err

@@ -34,6 +34,9 @@ func TestSMSDiscovery201DoesNotSendAnotherCode(t *testing.T) {
 	c := NewClient(headerProvider{})
 	requests := 0
 	c.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "HEAD" {
+			return &http.Response{StatusCode: 404, Body: http.NoBody}, nil
+		}
 		requests++
 		if r.Method != "GET" || r.URL.Path != "/auth" {
 			t.Error("sent a second SMS after automatic delivery")
