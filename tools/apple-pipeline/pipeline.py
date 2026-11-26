@@ -697,6 +697,9 @@ class Job:
             if self.cfg.get("browser_mode") == "local" and code != 0 and re.fullmatch(r"field_mismatch:[a-z_]+|email_field_mismatch", (outcome or {}).get("evidence", "")):
                 self.update(create_exit_code=code, creation_rejected=False)
                 raise PipelineError("registration_field_mismatch", "needs_review")
+            if self.cfg.get("browser_mode") == "local" and code != 0 and re.fullmatch(r"captcha_[a-z_]+", (outcome or {}).get("evidence", "")):
+                self.update(create_exit_code=code, creation_rejected=False)
+                raise PipelineError("registration_captcha_unresolved", "needs_review")
             self.update(create_exit_code=code, creation_rejected=code == 1)
             if code == 2:
                 self.update(registration_started=False)

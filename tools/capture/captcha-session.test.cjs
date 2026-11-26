@@ -51,3 +51,25 @@ test("remote failure is bounded and never requests human input",async()=>{
     fallback:async()=>{remotes++;return "";},manual:()=>{throw Error("must not wait for a person");},maxRounds:2}),/captcha_attempt_limit/);
   assert.equal(remotes,2);
 });
+
+test("unchanged refreshes reach remote fallback after three attempts without repeating local OCR",async()=>{
+  let refreshes=0,locals=0,remotes=0;
+  const result=await readChallenge({capture:async()=>({digest:"same"}),clear:()=>{},
+    recognize:async()=>{locals++;return "";},refresh:async()=>{refreshes++;return {changed:false};},
+    fallback:async()=>{remotes++;return "Ab3D";}});
+  assert.equal(result.answer,"Ab3D");assert.equal(refreshes,3);assert.equal(locals,1);assert.equal(remotes,1);
+});
+
+test("a failed fallback never pays again for the same stuck image",async()=>{
+  let refreshes=0,remotes=0;
+  await assert.rejects(readChallenge({capture:async()=>({digest:"same"}),clear:()=>{},recognize:async()=>"",
+    refresh:async()=>{refreshes++;return {changed:false};},fallback:async()=>{remotes++;return "";}}),/captcha_image_stuck/);
+  assert.equal(refreshes,6);assert.equal(remotes,1);
+});
+
+test("remote image budget is shared across challenge invocations",async()=>{
+  const remoteDigests=new Set(["already-paid"]);let remotes=0;
+  await assert.rejects(readChallenge({remoteDigests,capture:async()=>({digest:"already-paid"}),clear:()=>{},
+    recognize:async()=>"",refresh:async()=>({changed:false}),fallback:async()=>{remotes++;return "Ab3D";}}),/captcha_image_stuck/);
+  assert.equal(remotes,0);
+});

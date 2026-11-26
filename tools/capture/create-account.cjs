@@ -734,14 +734,15 @@ async function selectHuman(locator, value, label = "") {
 // so read the field first and leave it alone when it is already right.
 // A is flow-mechanics.fillField; this wrapper only supplies the typer and the
 // log sink, so the rule itself is unit-tested against a fake locator.
+const blurField = locator => nativeMode ? locator.blur({timeout:5000}) : locator.press("Tab",{timeout:5000});
 async function fillIfNeeded(locator, value, label = "") {
-  return mech.fillField(locator, value, label, { type: typeHuman, log: note,
+  return mech.fillField(locator, value, label, { type: typeHuman, log: note, blur: blurField,
     normalize: label === "phone_number" ? value => String(value).replace(/\D/g, "") : String });
 }
 
 // The same read-first rule for the three birthday dropdowns.
 async function selectIfNeeded(locator, value, label = "") {
-  return mech.selectField(locator, value, label, { choose: selectHuman, log: note });
+  return mech.selectField(locator, value, label, { choose: selectHuman, log: note, blur: blurField });
 }
 
 async function typeHuman(locator, text, label = "") {
@@ -765,10 +766,11 @@ async function fillDigits(frame, code) {
   if (count === code.length) {
     for (let i = 0; i < code.length; i += 1) {
       await mech.fillField(boxes.nth(i), code[i], "verification_code", {
+        blur: blurField,
         type: async (locator, value) => {await locator.pressSequentially(value, {timeout:5000}); if(nativeMode)await sleep(100);}});
     }
   } else if (count === 1) {
-    await mech.fillField(boxes.first(), code, "verification_code", {type: async (locator,value) => {
+    await mech.fillField(boxes.first(), code, "verification_code", {blur: blurField, type: async (locator,value) => {
       await locator.pressSequentially(value,{timeout:5000,delay:nativeMode?100:0});}});
   } else throw new Error("verification_input_ambiguous");
   await sleep(800);
@@ -829,7 +831,7 @@ async function captchaLocator(fr, { state = "failed", tag = "" } = {}) {
   return { locator: fr.locator("img").nth(pick.index), pick };
 }
 
-const nativeCaptchaTracker = new lib.CaptchaTracker();
+const nativeRemoteCaptchas = new Set();
 async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
   const answerFile = path.resolve(awaitCaptcha || ".cache/captcha-answer.txt");
   const deadline = Math.min(Date.now() + timeoutMs, leaseDeadline);
@@ -849,6 +851,7 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     return /^[A-Za-z0-9]{3,6}$/.test(answer) ? {answer} : "";
   }, Math.max(0,until-Date.now()), "captcha");
   return captchaSession.readChallenge({
+    remoteDigests: nativeRemoteCaptchas,
     progress,
     available: () => Date.now() < deadline,
     clear: () => fs.rmSync(answerFile, {force:true}),
@@ -872,11 +875,6 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
       if (data) fs.writeFileSync(png,Buffer.from(data[1],"base64"));
       else await found.locator.screenshot({path:png,scale:"css"});
       const digest=lib.sha256Hex(fs.readFileSync(png));
-      const gate=nativeCaptchaTracker.observe(digest);
-      if(gate.stuck) {
-        note("step",{at:"captcha_image_stuck",duplicates:gate.duplicates});
-        throw Object.assign(new Error("captcha_image_stuck"),{state:"unknown",closeReason:"captcha-exhausted"});
-      }
       return {png,digest};
     },
     recognize: captchaCmdFlag ? async ({png}) => {
@@ -894,7 +892,11 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     manual: () => manual(deadline),
     refresh: async () => {
       if (Date.now() >= deadline) throw Object.assign(new Error("captcha_attempt_deadline"),{state:"unknown",closeReason:"captcha-exhausted"});
-      await mech.refreshCaptcha(fr,{click:locator=>mech.clickElement(locator,{mouse:page.mouse,sleep})});
+      try {
+        return await mech.refreshCaptcha(fr,{click:locator=>mech.clickElement(locator,{mouse:page.mouse,sleep})});
+      } catch (error) {
+        throw Object.assign(error,{state:"unknown",evidence:error.evidence || "captcha_refresh_failed",closeReason:"captcha-exhausted"});
+      }
     },
   });
 }
@@ -1466,9 +1468,10 @@ async function clickContinue(page, frame, tag = "") {
     // build is day, month, year. Index-based selection sent the day value to the
     // month select and stalled for 30s without submitting anything; the stable
     // handle is the data-testid each of them carries.
+    if (nativeMode) await selectIfNeeded(fr.locator('select[data-testid="select-year"]'), birthYear, "birth_year");
     await selectIfNeeded(fr.locator('select[data-testid="select-month"]'), birthMonth, "birth_month");
     await selectIfNeeded(fr.locator('select[data-testid="select-day"]'), birthDay, "birth_day");
-    await selectIfNeeded(fr.locator('select[data-testid="select-year"]'), birthYear, "birth_year");
+    if (!nativeMode) await selectIfNeeded(fr.locator('select[data-testid="select-year"]'), birthYear, "birth_year");
     note("step", {
       at: "identity",
       first: firstName,
@@ -1644,7 +1647,7 @@ async function clickContinue(page, frame, tag = "") {
 
     if(nativeMode)await fillIfNeeded(fr.locator('input[name="captcha"]'),answer,"captcha_inline");
     else await typeHuman(fr.locator('input[name="captcha"]'), answer, "captcha_inline");
-    await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
+    if (!nativeMode) await fr.locator('input[name="captcha"]').press("Tab").catch(() => {});
     await sleep(1200);
     submitAttempted = true;
     submissionMayHaveLanded = true;

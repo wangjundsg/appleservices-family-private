@@ -6,6 +6,45 @@ const path = require("node:path");
 const mech = require("./flow-mechanics.cjs");
 const chrome = process.env.TEST_CHROME_EXE || "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
+test("native field blur never focuses the empty email or phone help control", {skip:!fs.existsSync(chrome)}, async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:false});
+  try {
+    const page=await browser.newPage();
+    await page.route("**/*",r=>r.abort());
+    await page.setContent(`<select name="year"><option value="">Year</option><option value="1992">1992</option></select>
+      <input name="email" onfocus="window.unwanted++"><input name="phone"><button onfocus="window.unwanted++">Phone help</button>
+      <script>window.unwanted=0;</script>`);
+    const blur=locator=>locator.blur();
+    await mech.selectField(page.locator('[name="year"]'),"1992","birth_year",{blur,choose:async(l,v)=>{
+      await l.click();await mech.selectByKeyboard(l,v,{stepMs:100,settleMs:300});}});
+    assert.equal(await page.evaluate(()=>window.unwanted),0,"year selection visited the empty email");
+    await mech.fillField(page.locator('[name="phone"]'),"912345678","phone_number",{blur,type:(l,v)=>l.pressSequentially(v)});
+    assert.equal(await page.evaluate(()=>window.unwanted),0,"phone entry focused the help button");
+  }finally{await browser.close();}
+});
+
+test("CAPTCHA refresh survives blur-driven replacement of its button", {skip:!fs.existsSync(chrome)},async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:true});
+  try{
+    const page=await browser.newPage();
+    await page.setContent(`<img><input name="captcha"><button>新验证码</button><script>
+      let n=0;const next=()=>{const c=document.createElement('canvas');c.width=126;c.height=56;const x=c.getContext('2d');x.fillStyle=++n%2?'red':'blue';x.fillRect(0,0,126,56);document.querySelector('img').src=c.toDataURL();};
+      next();document.querySelector('button').onclick=next;
+      document.querySelector('input').onblur=()=>{const old=document.querySelector('button'),fresh=old.cloneNode(true);fresh.onclick=next;old.replaceWith(fresh);};
+      </script>`);
+    const before=await page.locator("img").getAttribute("src");
+    await mech.refreshCaptcha(page,{timeout:500});
+    assert.notEqual(await page.locator("img").getAttribute("src"),before);
+    await page.locator("input").fill("OLD1");
+    const again=await page.locator("img").getAttribute("src");
+    await mech.refreshCaptcha(page,{timeout:500});
+    assert.equal(await page.locator("input").inputValue(),"");
+    assert.notEqual(await page.locator("img").getAttribute("src"),again);
+  }finally{await browser.close();}
+});
+
 for (const headless of [true, false]) test(`real Chrome long country list skips hidden options (headless=${headless})`, {skip: !fs.existsSync(chrome)}, async () => {
   const {chromium} = require(path.resolve(__dirname, "../../.tools/js/node_modules/playwright-core"));
   const browser = await chromium.launch({executablePath:chrome, headless});
@@ -91,7 +130,7 @@ test("real Chrome: Chinese then English CAPTCHA refresh clears old answer and re
       assert.equal(await page.locator('input[name="captcha"]').inputValue(),"");
       assert.notEqual(await page.locator("img").getAttribute("src"),before);
       await page.locator("button").evaluate(el=>el.onclick=()=>{});
-      await assert.rejects(mech.refreshCaptcha(page,{timeout:200}),/Timeout/);
+      assert.deepEqual(await mech.refreshCaptcha(page,{timeout:200}),{changed:false});
     }
   }finally{await browser.close();}
 });

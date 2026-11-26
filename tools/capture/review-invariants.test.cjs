@@ -17,6 +17,30 @@ const { test } = require("node:test");
 const dir = __dirname;
 const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
 
+test("native field helpers use blur without tabbing to an adjacent control", async()=>{
+  const source=read("create-account.cjs");
+  const definition=source.match(/const blurField = [^\n]+/)[0];
+  const blur=new Function("nativeMode",definition+";return blurField;")(true);
+  let blurred=false;
+  await blur({blur:async()=>{blurred=true;},press:()=>{throw Error("unexpected Tab");}});
+  assert.equal(blurred,true);
+  for(const name of ["fillIfNeeded","selectIfNeeded","fillDigits"]) {
+    const block=source.slice(source.indexOf(`async function ${name}(`));
+    assert.match(block.slice(0,block.indexOf("\n}")),/blur: blurField/);
+  }
+  assert.match(source,/if \(!nativeMode\) await fr\.locator\('input\[name="captcha"\]'\)\.press\("Tab"\)/);
+});
+
+test("native birthday completes year before month and day, without touching email",async()=>{
+  const source=read("create-account.cjs"),start=source.indexOf("  const fillForm = async (fr) => {");
+  const body=source.slice(start,source.indexOf("\n  };",start)+5),calls=[];
+  const fillForm=new Function("noAutofill","nativeMode","selectIfNeeded","arg","fillIfNeeded","firstName","lastName","birthYear","birthMonth","birthDay",body+";return fillForm;")(
+    async()=>{},true,async(_l,_v,label)=>{calls.push(label);if(label==="birth_day")throw Error("birthday-complete");},
+    (_n,fallback)=>fallback,async(_l,_v,label)=>{calls.push(label);},"First","Last","1992","07","18");
+  await assert.rejects(fillForm({locator:selector=>selector}),/birthday-complete/);
+  assert.deepEqual(calls,["country","first_name","last_name","birth_year","birth_month","birth_day"]);
+});
+
 test("native country failure stops before writing either name", async () => {
   const source=read("create-account.cjs");
   const start=source.indexOf("  const fillForm = async (fr) => {");

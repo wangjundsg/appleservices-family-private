@@ -95,7 +95,7 @@ async function readField(locator, label) {
   catch { throw fieldError(label); }
 }
 
-async function fillField(locator, value, label, { type, log = () => {}, normalize = String } = {}) {
+async function fillField(locator, value, label, { type, log = () => {}, normalize = String, blur = locator => locator.press("Tab", {timeout:5000}) } = {}) {
   const want = String(value == null ? "" : value);
   let have = await readField(locator, label);
   if (normalize(have) === normalize(want)) {
@@ -112,7 +112,7 @@ async function fillField(locator, value, label, { type, log = () => {}, normaliz
       }
       await type(locator, want, label);
       // Blur triggers the form's own validation before the readback.
-      await locator.press("Tab", { timeout: 5000 });
+      await blur(locator);
     } catch { throw fieldError(label); }
     have = await readField(locator, label);
     if (normalize(have) === normalize(want)) {
@@ -124,7 +124,7 @@ async function fillField(locator, value, label, { type, log = () => {}, normaliz
 }
 
 // selectField is the same read-first rule for the three birthday dropdowns.
-async function selectField(locator, value, label, { choose, log = () => {} } = {}) {
+async function selectField(locator, value, label, { choose, log = () => {}, blur = locator => locator.press("Tab", {timeout:5000}) } = {}) {
   const want = String(value == null ? "" : value);
   const have = await readField(locator, label);
   if (have === want) {
@@ -135,7 +135,7 @@ async function selectField(locator, value, label, { choose, log = () => {} } = {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await choose(locator, want, label);
-      await locator.press("Tab", { timeout: 5000 });
+      await blur(locator);
     } catch { throw fieldError(label); }
     if (await readField(locator, label) === want) {
       log("step", { at: "field-verified", field: label, corrected: attempt === 1 });
@@ -399,12 +399,22 @@ async function phoneMenuAction(frame, labels, click, sleep = ms => new Promise(r
 
 async function refreshCaptcha(frame, {timeout = 10000, click = locator => locator.click({timeout})} = {}) {
   const button = frame.getByRole("button", {name:/^(新验证码|新驗證碼|换一张|換一張|New Code|New code|Refresh CAPTCHA)$/i});
-  if (await button.count() !== 1) throw new Error("captcha_refresh_unavailable");
+  if (await button.count() !== 1) throw Object.assign(new Error("captcha_refresh_unavailable"),{state:"unknown",evidence:"captcha_refresh_unavailable",closeReason:"captcha-exhausted"});
   const before = await frame.locator("img").evaluateAll(images => images.map(i=>i.src));
-  await frame.locator('input[name="captcha"]').fill("");
+  const input = frame.locator('input[name="captcha"]');
+  if (await input.inputValue()) await input.fill("");
+  // Blur validation can replace the refresh button between mousedown and click.
+  // Finish it first, then resolve the button again through its locator.
+  await input.blur();
   await click(button);
-  await frame.waitForFunction(old => [...document.querySelectorAll("img")].some((img,index)=>
-    img.complete && img.naturalWidth > 0 && img.src !== old[index]), before, {timeout});
+  try {
+    await frame.waitForFunction(old => [...document.querySelectorAll("img")].some((img,index)=>
+      img.complete && img.naturalWidth > 0 && img.src !== old[index]), before, {timeout});
+    return {changed:true};
+  } catch (error) {
+    if (error.name !== "TimeoutError") throw error;
+    return {changed:false};
+  }
 }
 
 // findAction is the text-matched finder used for "send it again": a button or a
