@@ -133,8 +133,8 @@ class Supply:
                     start=dt.datetime.fromisoformat(result["activationTime"])
                     end=dt.datetime.fromisoformat(result.get("activationEndTime") or result["activationEnd"])
                     duration=(end-start).total_seconds()
-                    expected = duration_hours*3600 if duration_hours else 3600 if provider=="hero" and country in {"PL","CO","US"} else 1800
-                    slack=60 if duration_hours or (provider=="hero" and country in {"PL","CO","US"}) else 0
+                    expected = duration_hours*3600 if duration_hours else 3600 if provider=="hero" and country in {"PL","CO","US","PT"} else 1800
+                    slack=60 if duration_hours or (provider=="hero" and country in {"PL","CO","US","PT"}) else 0
                     if not 0 < duration <= expected+slack: raise ValueError()
                     if (duration_hours or (provider=="hero" and country in {"PL","CO","US"})) and duration < expected-60: raise ValueError()
                     followup=result.get("canGetAnotherSms",False)

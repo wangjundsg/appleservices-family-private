@@ -17,7 +17,7 @@
   resourceField('durationHours').addEventListener('change',rentalConsent);
   function renderResources(view) {
     const settings=view.settings;
-    for(const name of ['credentialFile','orderFile','phoneCountry','durationHours','proxyPort']) resourceField(name).value=settings[name]|| (name==='durationHours'?'0':'');
+    for(const name of ['credentialFile','orderFile','phoneCountry','durationHours','proxyPort','localBrowserProxy']) resourceField(name).value=settings[name]|| (name==='durationHours'?'0':'');
     resourceField('acceptRentalPriceChange').checked=!!settings.acceptRentalPriceChange;
     resourceField('maxPrice').value=view.purchase.maxPrice||'';resourceField('maxTotal').value=view.purchase.maxTotal||'';
     resourceField('proxyProfile').replaceChildren(...view.proxyProfiles.map(p=>new Option(p.name,p.id)));
@@ -38,6 +38,7 @@
     resourceBusy=true;const button=resourceForm.querySelector('button[type=submit]');button.disabled=true;
     try {
       const settings={mailProvider:'otpgmail',smsProvider:'hero',credentialFile:resourceField('credentialFile').value.trim(),orderFile:resourceField('orderFile').value.trim(),phoneCountry:resourceField('phoneCountry').value,durationHours:Number(resourceField('durationHours').value),acceptRentalPriceChange:resourceField('acceptRentalPriceChange').checked,proxyProfile:resourceField('proxyProfile').value,proxyPort:Number(resourceField('proxyPort').value)};
+      settings.localBrowserProxy=resourceField('localBrowserProxy').value.trim();
       const purchase={maxPrice:resourceField('maxPrice').value.trim(),maxTotal:resourceField('maxTotal').value.trim(),currency:'USD'};
       renderResources(await api('/resources',{settings,purchase}));
       for(const id of ['resourceMailResult','resourceSMSResult','resourceProxyResult']) {$(id).textContent='设置已更改，请重新查询';delete $(id).dataset.ok;}
@@ -117,7 +118,18 @@
     field('password').setCustomValidity(value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value) ? '' : '密码需至少 8 位，包含大小写字母、数字和特殊字符');
   }
   field('password').addEventListener('input',validatePassword);
-  field('mode').addEventListener('change',() => { const direct=field('mode').value==='direct'; $('registerPortLabel').hidden=direct; field('proxyPort').disabled=direct; });
+  function browserMode() {
+    const local=field('browserMode').value==='local';
+    for(const option of field('mode').options) option.disabled=(option.value==='roxy' && local)||(option.value==='local' && !local);
+    if(field('mode').selectedOptions[0]?.disabled) field('mode').value=local?'local':'roxy';
+    const fixed=field('mode').value==='roxy';
+    $('registerPortLabel').hidden=!fixed;field('proxyPort').disabled=!fixed;
+    $('registerBrowserHint').textContent=local?'本机 Chrome 独立打开窗口，图形校验需在场人工完成。方式与代理保存到当前任务。':'Forge 管理浏览器窗口与环境，沿用现有流程。方式与代理保存到当前任务。';
+  }
+  field('browserMode').addEventListener('change',()=>{browserMode();try{localStorage.setItem('registrationBrowserMode',field('browserMode').value);}catch{}});
+  field('mode').addEventListener('change',browserMode);
+  try {const saved=localStorage.getItem('registrationBrowserMode');if(['local','forge'].includes(saved))field('browserMode').value=saved;}catch{}
+  browserMode();
   form.addEventListener('submit', async event => {
     event.preventDefault(); validatePassword(); if (!form.reportValidity() || submitting) return;
     const expiry = new Date(field('expiresAt').value);
@@ -128,7 +140,7 @@
       const manual=automatic ? {} : {email:field('email').value.trim(),password:field('password').value,phone:field('phone').value,platform:field('platform').value,activation:field('activation').value,expiresAt:expiry.toISOString(),...(retryOf ? {retryOf}: {})};
       const role=field('familyRole').value;
       const family={role,...(role==='member'?{organizer:field('organizer').value}:{}),...(role==='organizer'?{region:field('familyRegion').value,acceptSubscription:field('acceptSubscription').checked}:{})};
-      const result=await api('',{automatic,...manual,family,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
+      const result=await api('',{automatic,...manual,family,browserMode:field('browserMode').value,phonecc:field('phonecc').value,acceptTerms:field('acceptTerms').checked,captchaProvider:field('browserMode').value==='local'?'manual':'yes',egress:{mode:field('mode').value,proxyPort:Number(field('proxyPort').value)}});
       selected=result.jobId; retryOf=''; field('password').value=''; $('registerRetryNote').hidden=true;
       field('acceptSubscription').checked=false;familySelected=false;
       showForm(false); notice(automatic ? '任务已提交，邮箱和短信验证码将自动读取。' : '任务已提交。请留意邮箱验证码；短信由接码平台读取。');
@@ -137,7 +149,7 @@
     finally { submitting=false; automaticMode(); }
   });
   function render(job) {
-    $('registerState').textContent=(stageNames[job.stage] || '处理')+' · '+(stateNames[job.state] || '待核实');
+    $('registerState').textContent=(job.browserMode==='local'?'本机 Chrome':'Forge')+' · '+(stageNames[job.stage] || '处理')+' · '+(stateNames[job.state] || '待核实');
     $('registerElapsed').textContent='用时 '+Math.max(0,Math.floor(job.elapsedMs/60000))+' 分 '+Math.max(0,Math.floor(job.elapsedMs/1000)%60)+' 秒';
     const index=job.stage==='done' ? stages.length:stages.indexOf(job.stage);
     for (const li of $('registerStages').children) {
@@ -195,6 +207,7 @@
   $('registerRetry').addEventListener('click',()=> {
     if(!confirm('重试将创建新任务，需要重新购买号码。确认准备新的号码？')) return;
     retryOf=selected;
+    field('browserMode').value=jobs.find(job=>job.jobId===selected)?.browserMode||'forge';browserMode();
     field('automatic').checked=false; automaticMode();
     for(const name of ['password','phone','activation','expiresAt']) field(name).value='';
     $('registerRetryNote').hidden=false; showForm(true); field('email').focus();

@@ -23,6 +23,7 @@ import (
 var resourceProbe string
 
 type resourceSettings struct {
+	LocalBrowserProxy       string `json:"localBrowserProxy"`
 	MailProvider            string `json:"mailProvider"`
 	CredentialFile          string `json:"credentialFile"`
 	OrderFile               string `json:"orderFile"`
@@ -283,6 +284,11 @@ func (s *Server) saveResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := body.Settings
+	if v.LocalBrowserProxy != "" && !validLocalBrowserProxy(v.LocalBrowserProxy) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"message": "本机浏览器代理须为带端口的本机 HTTP、HTTPS 或 SOCKS5 地址，不可包含凭据"})
+		return
+	}
 	if v.MailProvider != "otpgmail" || v.SMSProvider != "hero" || len(v.PhoneCountry) != 2 || !strings.Contains("|PL|CO|US|PT|", "|"+v.PhoneCountry+"|") ||
 		(v.DurationHours != 0 && v.DurationHours != 24) || (v.ProxyProfile != "current" && v.ProxyProfile != "711" && v.ProxyProfile != "dataimpulse") ||
 		v.ProxyPort < 0 || v.ProxyPort > 65535 || !filepath.IsAbs(v.CredentialFile) || (v.OrderFile != "" && !filepath.IsAbs(v.OrderFile)) ||

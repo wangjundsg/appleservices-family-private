@@ -8,6 +8,8 @@ param(
     [string]$Python = 'python',
     [string]$RepoRoot = (Split-Path $PSScriptRoot -Parent),
     [int]$Port = 18741,
+    [string]$RegisterConfig = '',
+    [switch]$AllowPurchase,
     [switch]$PreflightOnly,
     [switch]$ValidateOnly
 )
@@ -42,15 +44,26 @@ $taskEnvironment = @{
     APPLESERVICES_NETWORK_CONFIG_SOURCE = $taskConfigPath
     APPLESERVICES_NETWORK_CONFIG_SHA256 = (Get-FileHash -LiteralPath $taskConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
 }
+if ($AllowPurchase -and !$RegisterConfig) { throw 'Purchasing requires an explicit registration configuration.' }
+if ($RegisterConfig) {
+    $taskRegisterConfig = (Resolve-Path -LiteralPath $RegisterConfig).Path
+    try { $null = Get-Content -LiteralPath $taskRegisterConfig -Raw | ConvertFrom-Json } catch { throw 'Registration configuration is not valid JSON.' }
+    . (Join-Path $PSScriptRoot 'apple-pipeline/provider-environment.ps1')
+    $taskProviderEnvironment = Get-AppleProviderEnvironment -Root $taskRepo
+    foreach ($taskProviderName in $taskProviderEnvironment.Keys) { $taskEnvironment[$taskProviderName] = $taskProviderEnvironment[$taskProviderName] }
+    $taskEnvironment.APPLESERVICES_REGISTER_CONFIG = $taskRegisterConfig
+}
 $taskReceipt = [ordered]@{
     dashboard_sha256 = (Get-FileHash -LiteralPath $taskDashboard -Algorithm SHA256).Hash.ToLowerInvariant()
     worker_sha256 = (Get-FileHash -LiteralPath $taskWorker -Algorithm SHA256).Hash.ToLowerInvariant()
     library_sha256 = (Get-FileHash -LiteralPath $taskLibrary -Algorithm SHA256).Hash.ToLowerInvariant()
     config_source = $taskConfigPath; config_sha256 = $taskEnvironment.APPLESERVICES_NETWORK_CONFIG_SHA256
     manual_start = $true; port = $Port
+    registration_configured = [bool]$RegisterConfig; purchase_enabled = [bool]$AllowPurchase
 }
 if ($ValidateOnly) { $taskReceipt | ConvertTo-Json; return }
 $taskArgs = @('-dir', $taskState, '-repo', $taskRepo, '-worker', $taskWorker, '-adi-dll', $taskLibrary, '-python', $Python, '-port', "$Port", '-manual-start')
+if ($AllowPurchase) { $taskArgs += '-allow-purchase' }
 if ($PreflightOnly) { $taskArgs += '-network-preflight' }
 # Start-Process joins ArgumentList; quote each path rather than relying on spaces.
 $taskQuotedArgs = foreach ($taskArg in $taskArgs) {

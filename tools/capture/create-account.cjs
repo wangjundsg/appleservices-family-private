@@ -165,6 +165,8 @@ const egressIP = String(arg("egress-ip", ""));
 // measuring against.
 const cdpPort = String(arg("cdp-port", ""));
 const attachMode = Boolean(cdpPort);
+const nativeMode = flagOn("native-browser");
+const browserCheck = flagOn("browser-check");
 
 const log = [];
 const clip = (text, max) => String(text || "").slice(0, max);
@@ -960,7 +962,7 @@ async function clickContinue(page, frame, tag = "") {
   // before the first network request. It goes through the same failure handler as
   // everything else, which is what lets --auto-refund cancel a number that was
   // already bought for this run (run-20261113 §4.7).
-  if (!passwordResolution.password) {
+  if (!passwordResolution.password && !browserCheck) {
     const err = new Error("missing_required_argument: --password");
     err.state = "usage";
     err.report = flow.missingPasswordReport(
@@ -1019,12 +1021,13 @@ async function clickContinue(page, frame, tag = "") {
   // Resolve the fingerprint before a browser exists: a profile another stage
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
-  await captureSMSBaseline();
-  const frozen = attachMode ? null : loadProfile();
+  if ((nativeMode && attachMode) || (browserCheck && !nativeMode)) throw new Error("native_browser_mode_invalid");
+  if (!browserCheck) await captureSMSBaseline();
+  const frozen = attachMode || nativeMode ? null : loadProfile();
   const profile = frozen ? frozen.profile : null;
   if (attachMode) {
     note("step", { at: "fingerprint-attach", cdp_port: cdpPort, owned_by: "roxy" });
-  } else {
+  } else if (!nativeMode) {
     note("step", {
       at: "fingerprint",
       file: frozen.file,
@@ -1045,7 +1048,7 @@ async function clickContinue(page, frame, tag = "") {
     // Autofill is off at the browser level as well: a saved credential in the
     // profile rewrote the address box once already (group B, 2026-11-14).
     args: [
-      "--disable-blink-features=AutomationControlled",
+      ...(!nativeMode ? ["--disable-blink-features=AutomationControlled"] : []),
       "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
       "--disable-renderer-backgrounding",
       "--disable-backgrounding-occluded-windows",
@@ -1105,7 +1108,7 @@ async function clickContinue(page, frame, tag = "") {
   // rebuilt from the UA that goes out (never hand-typed), and the exit address
   // is whatever the caller already measured with --egress-ip; this script does
   // not probe the network itself. Other fields are written back untouched.
-  if (!attachMode) {
+  if (!attachMode && !nativeMode) {
     const actual = {
       ...(profile.actual || {}),
       engine: `chrome-${(/Chrome\/(\d+)/.exec(profile.ua) || [])[1]}`,
@@ -1152,6 +1155,10 @@ async function clickContinue(page, frame, tag = "") {
       timeZone: observed ? observed.timeZone : "",
       screen: observed ? observed.screen : "",
     });
+  } else if (nativeMode) {
+    context = await browser.newContext({viewport: null});
+    page = await context.newPage();
+    note("step", {at: "browser-started", mode: "local"});
   } else {
   context = await browser.newContext({
     locale: profile.locale,
@@ -1207,6 +1214,12 @@ async function clickContinue(page, frame, tag = "") {
     page = await context.newPage();
   }
   livePage = page;
+  if (browserCheck) {
+    const observed = await page.evaluate(() => ({webdriver: navigator.webdriver, ua: navigator.userAgent}));
+    note("step", {state: "browser_ready", mode: "local", ...observed});
+    await browser.close();
+    process.exit(0);
+  }
   // What the browser actually reports. In attach mode the block above already
   // wrote it; in standalone mode this is the only measurement of the identity
   // that went out, because the profile file is what we asked for, not proof.

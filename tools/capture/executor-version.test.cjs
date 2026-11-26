@@ -44,3 +44,23 @@ test("real startup receipt identifies the same executor without network or crede
     fs.rmSync(dir, {recursive: true, force: true});
   }
 });
+
+test("native Chrome startup uses the existing CLI without fingerprint overrides or provider requests", {skip: !fs.existsSync("C:/Program Files/Google/Chrome/Application/chrome.exe")}, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "creation-native-check-"));
+  try {
+    const result = spawnSync(process.execPath, [entry, "--native-browser", "--browser-check", "--outdir", dir], {
+      encoding: "utf8", timeout: 20000,
+      env: {...process.env, APPLESERVICES_CREATE_INPUT: "", APPLESERVICES_PASSWORD: ""},
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const events = fs.readFileSync(path.join(dir, "run.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse);
+    const ready = events.find(row => row.state === "browser_ready");
+    assert.equal(ready.mode, "local");
+    assert.equal(ready.webdriver, true);
+    assert.ok(!fs.existsSync(path.join(dir, "profile.json")));
+  } finally {
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(dir).startsWith("creation-native-check-"));
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});

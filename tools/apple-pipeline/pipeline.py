@@ -144,6 +144,28 @@ def account_country(cfg):
     return COUNTRIES[country]
 
 
+def local_browser_proxy(cfg):
+    if cfg.get("browser_mode", "forge") not in {"forge", "local"}:
+        raise PipelineError("invalid_browser_mode", "usage")
+    if cfg.get("browser_mode") != "local":
+        return None
+    mode = cfg.get("egress_mode")
+    if mode == "direct":
+        return ""
+    value = cfg.get("local_browser_proxy", "")
+    try:
+        url = urllib.parse.urlsplit(value)
+        valid = (mode == "local" and url.scheme in {"http", "https", "socks5"}
+                 and url.hostname in {"127.0.0.1", "localhost", "::1"}
+                 and url.port and 0 < url.port < 65536 and not url.username and not url.password
+                 and not url.path and not url.query and not url.fragment)
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise PipelineError("local_browser_proxy_invalid", "usage")
+    return value
+
+
 def validate(cfg):
     job_path(cfg.get("job_id"))
     account_country(cfg)
@@ -178,11 +200,12 @@ def validate(cfg):
         raise PipelineError("number_purchase_country_dial_code_and_price_required", "usage")
     roxy = cfg.get("roxy", {})
     proxy = roxy.get("proxyInfo", {})
-    if not all(roxy.get(k) for k in ("token", "workspaceId", "projectId", "locale", "timeZone")):
+    local_proxy = local_browser_proxy(cfg)
+    if local_proxy is None and not all(roxy.get(k) for k in ("token", "workspaceId", "projectId", "locale", "timeZone")):
         raise PipelineError("roxy_settings_required", "usage")
-    if cfg.get("egress_mode", "roxy") not in {"roxy", "direct"}:
+    if local_proxy is None and cfg.get("egress_mode", "roxy") not in {"roxy", "direct"}:
         raise PipelineError("invalid_egress_mode", "usage")
-    if cfg.get("egress_mode") != "direct" and (proxy.get("protocol", "").upper() != "SOCKS5" or not proxy.get("host") or not 0 < int(proxy.get("port", 0)) < 65536):
+    if local_proxy is None and cfg.get("egress_mode") != "direct" and (proxy.get("protocol", "").upper() != "SOCKS5" or not proxy.get("host") or not 0 < int(proxy.get("port", 0)) < 65536):
         raise PipelineError("residential_socks5_required", "usage")
     if cfg.get("accept_terms") is not True:
         raise PipelineError("terms_consent_required", "usage")
@@ -293,11 +316,14 @@ class Job:
         if _solver_key: env["YESCAPTCHA_KEY"] = _solver_key
         for key in list(env):
             if key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: env.pop(key)
-        proxy = self.cfg["roxy"].get("proxyInfo", {})
+        local_proxy = local_browser_proxy(self.cfg)
+        proxy = self.cfg.get("roxy", {}).get("proxyInfo", {})
         user = urllib.parse.quote(str(proxy.get("proxyUserName", "")), safe="")
         password = urllib.parse.quote(str(proxy.get("proxyPassword", "")), safe="")
         auth = f"{user}:{password}@" if user else ""
-        if self.cfg.get("egress_mode") != "direct":
+        if local_proxy:
+            env.update(HTTP_PROXY=local_proxy, HTTPS_PROXY=local_proxy, NO_PROXY="localhost,127.0.0.1")
+        elif local_proxy is None and self.cfg.get("egress_mode") != "direct":
             address = f"socks5://{auth}{proxy['host']}:{proxy['port']}"
             env.update(HTTP_PROXY=address, HTTPS_PROXY=address, NO_PROXY="localhost,127.0.0.1")
         profile = self.folder / "profile.json"
@@ -575,32 +601,37 @@ class Job:
 
     def create(self):
         country = account_country(self.cfg)
+        local_proxy = local_browser_proxy(self.cfg)
         self.number()
-        sms, roxy = self.cfg["sms"], self.cfg["roxy"]
+        sms, roxy = self.cfg["sms"], self.cfg.get("roxy", {})
         if sms.get("auto_purchase") and not sms.get("can_get_another_sms"):
             raise PipelineError("number_cannot_receive_followup", "failed")
         remaining = timestamp(sms["expires_at"]) - time.time()
         if remaining <= 0: raise PipelineError("activation_expired", "waiting_input")
         self.update(reason="browser_create_pending")
-        proxy = {} if self.cfg.get("egress_mode") == "direct" else {"proxyInfo": roxy["proxyInfo"]}
-        resource = self.forge("create", projectId=roxy["projectId"], windowName="apple-" + self.cfg["job_id"],
-                              os="Windows", locale=roxy["locale"], timeZone=roxy["timeZone"], **proxy)
-        if not resource.get("dirId"): raise PipelineError("browser_identity_missing")
-        atomic(self.folder / "browser.json", {"dirId": resource["dirId"]})
+        proxy = {} if local_proxy is not None or self.cfg.get("egress_mode") == "direct" else {"proxyInfo": roxy["proxyInfo"]}
+        if local_proxy is None:
+            resource = self.forge("create", projectId=roxy["projectId"], windowName="apple-" + self.cfg["job_id"],
+                                  os="Windows", locale=roxy["locale"], timeZone=roxy["timeZone"], **proxy)
+            if not resource.get("dirId"): raise PipelineError("browser_identity_missing")
+            atomic(self.folder / "browser.json", {"dirId": resource["dirId"]})
         try:
-            opened = self.forge("open", dirId=resource["dirId"], args=[
-                "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
-                "--disable-background-timer-throttling"], headless=False)
-            port = opened.get("debuggingPort") or str(opened.get("debuggerAddress", "")).rsplit(":", 1)[-1]
-            if not str(port).isdigit() or not 0 < int(port) < 65536:
-                raise PipelineError("browser_port_missing")
+            browser_input = {"native-browser": True, "headed": True, "proxy": local_proxy}
+            if local_proxy is None:
+                opened = self.forge("open", dirId=resource["dirId"], args=[
+                    "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
+                    "--disable-background-timer-throttling"], headless=False)
+                port = opened.get("debuggingPort") or str(opened.get("debuggerAddress", "")).rsplit(":", 1)[-1]
+                if not str(port).isdigit() or not 0 < int(port) < 65536:
+                    raise PipelineError("browser_port_missing")
+                browser_input = {"cdp-port": str(port), "expected-locale": roxy["locale"],
+                                 "expected-timezone": roxy["timeZone"],
+                                 "expected-egress-country": self.cfg.get("account_country", "US")}
             inp = {"email": self.cfg["email"], "password": self.cfg["password"], "phone": str(sms["phone"]),
                    "country": country,
                    "phonecc": sms["phonecc"], "activation": str(sms["activation"]), "hero-key": sms["key"],
                    "sms-api": sms.get("api", "https://api.grizzlysms.com/stubs/handler_api.php"),
-                   "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
-                   "expected-locale": roxy["locale"], "expected-timezone": roxy["timeZone"],
-                   "expected-egress-country": self.cfg.get("account_country", "US"),
+                   "outdir": str(self.folder), **browser_input, "activation-expires-at": sms["expires_at"],
                    "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt"),
                    "replacement-number-file": str(self.folder / "replacement-number.json")}
             birthday = dt.date.fromisoformat(self.cfg.get("birthday", "1992-07-18"))
@@ -614,8 +645,9 @@ class Job:
             if resolve_captcha(self.cfg)[0] == "yes":
                 inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
             atomic(self.folder / "create-input.json", inp)
-            code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)
-            if code != 0: raise PipelineError("browser_preflight_failed", "failed")
+            if local_proxy is None:
+                code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)
+                if code != 0: raise PipelineError("browser_preflight_failed", "failed")
             self.update(reason="form_running")
             self.update(registration_started=True)
             code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
@@ -628,7 +660,8 @@ class Job:
             else:
                 raise PipelineError("registration_rejected", "usage" if code == 2 else "failed")
         finally:
-            self.cleanup_browser()
+            if local_proxy is None:
+                self.cleanup_browser()
 
     def create_with_replacement(self):
         for attempt in range(2):

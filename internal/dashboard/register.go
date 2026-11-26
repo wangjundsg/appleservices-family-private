@@ -33,6 +33,7 @@ type registerRequest struct {
 	PhoneCC            string             `json:"phonecc"`
 	Platform           string             `json:"platform"`
 	RegistrationMethod string             `json:"registrationMethod,omitempty"`
+	BrowserMode        string             `json:"browserMode,omitempty"`
 	Activation         string             `json:"activation"`
 	ExpiresAt          time.Time          `json:"expiresAt"`
 	AcceptTerms        bool               `json:"acceptTerms"`
@@ -87,6 +88,8 @@ var activationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 var registrationOTPPattern = regexp.MustCompile(`^[0-9]{6}$`)
 var registrationRatePattern = regexp.MustCompile(`tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423`)
 var registerMessages = map[string]string{
+	"invalid_browser_mode":                   "浏览器方式无效，请核对当前任务。",
+	"local_browser_proxy_invalid":            "本机 Chrome 代理配置无效，请核对已保存的地址和端口。",
 	"gsa_account_repair_required":            "请在 Apple 官方账户页面或受信任设备上完成提示的账号设置。",
 	"apple_sms_verify_precondition_failed":   "Apple 未接受本次短信验证（HTTP 412），请到官方账户页面核对提示。",
 	"server_rejected_34607001":               "Apple 拒绝本次注册校验（-34607001），任务已停止并保留回执。",
@@ -168,6 +171,9 @@ func strongRegistrationPassword(value string) bool {
 }
 
 func validateRegistration(body registerRequest) error {
+	if err := validateBrowserSelection(body); err != nil {
+		return err
+	}
 	if err := body.Family.validate(); err != nil {
 		return err
 	}
@@ -178,11 +184,8 @@ func validateRegistration(body registerRequest) error {
 		if len(body.PhoneCC) != 2 || !strings.Contains("|GB|CA|ID|US|VN|PL|CO|PT|", "|"+body.PhoneCC+"|") {
 			return errors.New("不支持的自动购号国家")
 		}
-		if !body.AcceptTerms || body.CaptchaProvider != "yes" {
+		if !body.AcceptTerms || (body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual") {
 			return errors.New("请确认条款和验证码配置")
-		}
-		if body.Egress.Mode != "direct" && body.Egress.Mode != "roxy" {
-			return errors.New("请选择出口方式")
 		}
 		if body.Egress.Mode == "roxy" && (body.Egress.ProxyPort < 1 || body.Egress.ProxyPort > 65535) {
 			return errors.New("代理端口无效")
@@ -211,13 +214,10 @@ func validateRegistration(body registerRequest) error {
 	if body.Platform != "grizzly" && body.Platform != "hero" {
 		return errors.New("不支持的接码平台")
 	}
-	if body.Egress.Mode != "direct" && body.Egress.Mode != "roxy" {
-		return errors.New("请选择直连或 Roxy 代理")
-	}
 	if body.Egress.Mode == "roxy" && (body.Egress.ProxyPort < 1 || body.Egress.ProxyPort > 65535) {
 		return errors.New("代理端口必须在 1–65535 之间")
 	}
-	if body.CaptchaProvider != "yes" {
+	if body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual" {
 		return errors.New("当前面板使用 YesCaptcha")
 	}
 	if !body.AcceptTerms {
@@ -278,11 +278,6 @@ func (s *Server) registerSettings() (registerSettings, error) {
 		return settings, errors.New("服务端尚未配置 registration-config.json")
 	}
 	s.resourceDefaults(&settings)
-	for _, key := range []string{"token", "workspaceId", "projectId"} {
-		if value, ok := settings.Roxy[key].(string); !ok || strings.TrimSpace(value) == "" {
-			return settings, errors.New("服务端 Forge 配置不完整")
-		}
-	}
 	return settings, nil
 }
 
@@ -302,6 +297,9 @@ func retryableReceipt(receipt pipelineReceipt) bool {
 func (s *Server) startRegistration(body registerRequest) (string, error) {
 	s.registerMu.Lock()
 	defer s.registerMu.Unlock()
+	if body.BrowserMode == "" {
+		body.BrowserMode = "forge"
+	}
 	if err := validateRegistration(body); err != nil {
 		return "", err
 	}
@@ -327,6 +325,15 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if body.BrowserMode == "forge" {
+		for _, key := range []string{"token", "workspaceId", "projectId"} {
+			if value, ok := settings.Roxy[key].(string); !ok || strings.TrimSpace(value) == "" {
+				return "", errors.New("服务端 Forge 配置不完整")
+			}
+		}
+	} else if body.Egress.Mode == "local" && !validLocalBrowserProxy(settings.Resources.LocalBrowserProxy) {
+		return "", errors.New("请先保存本机 Chrome 的代理地址，须为带端口的本机 HTTP、HTTPS 或 SOCKS5 地址")
+	}
 	if body.Automatic {
 		if !s.config.AllowPurchase {
 			return "", errors.New("真实购号默认关闭；价格商定并配置后需显式 --allow-purchase")
@@ -350,7 +357,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if key == "" && !body.Automatic {
 		return "", errors.New("服务端缺少所选接码平台的 API_KEY 环境变量")
 	}
-	if os.Getenv("YESCAPTCHA_KEY") == "" {
+	if body.CaptchaProvider == "yes" && os.Getenv("YESCAPTCHA_KEY") == "" {
 		return "", errors.New("服务端缺少 YESCAPTCHA_KEY 环境变量")
 	}
 	if _, err := exec.LookPath(s.config.Python); err != nil {
@@ -427,6 +434,9 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	id := "reg-" + time.Now().Format("20060102") + "-" + hex.EncodeToString(random)
 	folder := s.registerFolder(id)
 	roxy := settings.Roxy
+	if roxy == nil {
+		roxy = map[string]any{}
+	}
 	accountCountry := "US"
 	if body.Family.Role == "organizer" || body.Family.Role == "member" {
 		accountCountry = body.Family.Region
@@ -460,11 +470,18 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		"account_country":     "US",
 		"registration_method": method,
 		"registrationMethod":  method,
+		"browser_mode":        body.BrowserMode,
 		"family":              body.Family,
 		"handoff":             "dashboard", "panel_bridge": map[string]string{"url": s.URL() + "/api/register/" + id + "/handoff", "token": s.token},
-		"email_code_file": filepath.Join(folder, "email-code.txt"), "captcha_solver": "yes", "yescaptcha_key": os.Getenv("YESCAPTCHA_KEY"),
+		"email_code_file": filepath.Join(folder, "email-code.txt"), "captcha_solver": body.CaptchaProvider,
 		"egress_mode": body.Egress.Mode, "roxy": roxy,
 		"sms": map[string]any{"api": api, "key": key, "activation": body.Activation, "phone": body.Phone, "phonecc": body.PhoneCC, "expires_at": body.ExpiresAt.Format(time.RFC3339)}}
+	if body.BrowserMode == "local" && body.Egress.Mode == "local" {
+		manifest["local_browser_proxy"] = settings.Resources.LocalBrowserProxy
+	}
+	if body.BrowserMode == "local" {
+		manifest["roxy"] = map[string]any{}
+	}
 	if body.Automatic {
 		delete(manifest, "email_code_file")
 		if settings.Resources.MailProvider == "otpgmail" {
@@ -552,12 +569,16 @@ func (s *Server) registerView(id string) map[string]any {
 	var receipt pipelineReceipt
 	folder := s.registerFolder(id)
 	var request struct {
-		Family registrationFamily `json:"family"`
-		SMS    struct {
+		BrowserMode string             `json:"browser_mode"`
+		Family      registrationFamily `json:"family"`
+		SMS         struct {
 			Auto bool `json:"auto_purchase"`
 		} `json:"sms"`
 	}
 	_ = readRegisterJSON(filepath.Join(folder, "request.json"), &request)
+	if request.BrowserMode == "" {
+		request.BrowserMode = "forge"
+	}
 	_ = readRegisterJSON(filepath.Join(folder, "panel.json"), &meta)
 	err := readRegisterJSON(filepath.Join(folder, "result.json"), &receipt)
 	if err != nil {
@@ -588,7 +609,7 @@ func (s *Server) registerView(id string) map[string]any {
 		end = *meta.FinishedAt
 	}
 	return map[string]any{"jobId": id, "state": state, "stage": stage, "startedAt": meta.StartedAt, "elapsedMs": end.Sub(meta.StartedAt).Milliseconds(),
-		"automatic": request.SMS.Auto, "handoffComplete": receipt.HandoffComplete, "familyRole": request.Family.Role, "familyComplete": receipt.FamilyComplete,
+		"automatic": request.SMS.Auto, "browserMode": request.BrowserMode, "handoffComplete": receipt.HandoffComplete, "familyRole": request.Family.Role, "familyComplete": receipt.FamilyComplete,
 		"message":  registerMessages[receipt.Reason],
 		"exitCode": meta.ExitCode, "active": active, "canRetry": !request.SMS.Auto && retryableReceipt(receipt), "imported": meta.Imported || receipt.HandoffComplete, "spend": receipt.Spend,
 		"refundPending": receipt.RefundPending, "refundDeferred": receipt.RefundDeferred, "refundConfirmed": receipt.RefundConfirmed,

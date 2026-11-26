@@ -50,6 +50,13 @@ class SupplyTests(unittest.TestCase):
         self.assertEqual(result["phone"],"912345678")
         self.assertEqual(result["phonecc"],"PT")
 
+    def test_portugal_accepts_observed_hour_lease(self):
+        self.call.return_value=receipt(phoneNumber="351912345678",countryCode="117",activationEnd="2026-11-15 02:00:00")
+        result=self.supply.purchase("pt-hour","PT",{**POLICY,"providers":["hero"]},allow=True)
+        remaining=p.timestamp(result["expires_at"])-p.time.time()
+        self.assertGreater(remaining,3500)
+        self.assertLessEqual(remaining,3600)
+
     def test_timeout_persists_unknown_and_blocks_new_job(self):
         self.call.side_effect=TimeoutError()
         for job in ("job","other-job"):

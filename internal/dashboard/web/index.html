@@ -52,6 +52,7 @@
           <label>单账号累计预算（USD）<input name="maxTotal" inputmode="decimal" placeholder="未配置"></label>
           <label>固定代理配置<select name="proxyProfile"><option value="current">现有配置</option></select></label>
           <label>固定代理端口<input name="proxyPort" type="number" min="1" max="65535" placeholder="沿用现有配置"></label>
+          <label>本机 Chrome 代理<input name="localBrowserProxy" autocomplete="off" placeholder="本机代理 URL，包含实际监听端口"></label>
         </div>
         <label class="register-consent" id="resourceRentalConsent"><input name="acceptRentalPriceChange" type="checkbox">接受一天租期下单价格可能变化；Hero 此接口不提供价格硬上限。</label>
         <p class="cache-note">邮箱凭据仅由本机当前 Windows 用户解密。代理密码不在页面显示；已有任务保持原订单和出口。</p>
@@ -73,10 +74,12 @@
         <label>接码平台<select name="platform"><option value="hero">Hero SMS</option><option value="grizzly">Grizzly SMS</option></select></label>
         <label>已购买的激活 ID<input name="activation" pattern="[A-Za-z0-9_\-]{1,100}" maxlength="100" autocomplete="off" required></label>
         <label>号码到期时间（本机时区）<input name="expiresAt" type="datetime-local" required aria-describedby="registerExpiryHint"></label>
-        <label>网络出口<select name="mode"><option value="roxy">已保存的固定代理</option><option value="direct">直连</option></select></label>
+        <label>浏览器方式<select name="browserMode"><option value="local">本机 Chrome</option><option value="forge">Forge 指纹浏览器</option></select></label>
+        <label>网络出口<select name="mode"><option value="local">已保存的本机代理</option><option value="roxy">已保存的固定代理</option><option value="direct">直连</option></select></label>
         <label id="registerPortLabel">SOCKS5 端口<input name="proxyPort" type="number" min="1" max="65535" value="10005" required></label>
       </div>
       <p id="registerPasswordHint" class="cache-note">密码至少 8 位，包含大小写字母、数字和特殊字符。</p>
+      <p id="registerBrowserHint" class="cache-note">本机 Chrome 独立打开窗口，图形校验需在场人工完成。方式与代理保存到当前任务。</p>
       <p id="registerExpiryHint" class="cache-note">按接码平台的实际到期时间填写。请保持邮箱可用，流程中需要输入邮箱验证码。</p>
       <label class="register-consent"><input name="acceptTerms" type="checkbox" required>我同意为此账号接受 Apple 和 iCloud 服务条款</label>
       <label id="registerSubscriptionConsent" class="register-consent"><input name="acceptSubscription" type="checkbox">允许本母号使用 50GB 方案：国区 CNY 6.00/月需在场完成付款，随后关闭自动续费；美区 USD 0.99/月（另计税费）仍按原流程。</label>
