@@ -285,7 +285,7 @@ const PHONE_RESEND_LABELS = Object.freeze([
   "reenviar sms", "reenviar mensagem", "reenviar código", "reenviar codigo",
 ]);
 const PHONE_REPLACE_LABELS = Object.freeze([
-  "use a different number", "使用其他号码", "使用其他電話號碼", "使用其他電話",
+  "use a different number", "使用其他号码", "使用其他电话号码", "使用其他電話號碼", "使用其他電話",
   "usar um número diferente", "usar outro número", "usar um numero diferente", "usar outro numero",
 ]);
 

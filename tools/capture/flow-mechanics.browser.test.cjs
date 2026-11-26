@@ -48,6 +48,7 @@ test("real Chrome: localized SMS menu selects resend and replacement, never Call
     for(const [help,resend,replace] of [
       ["Didn't get a code?","Resend Text","Use a Different Number"],
       ["没有收到验证码？","重新发送短信","使用其他号码"],
+      ["没有收到验证码？","重新发送短信","使用其他电话号码"],
       ["Não recebeu um código?","Reenviar SMS","Usar outro número"]]) {
       await page.setContent(`<button onclick="document.querySelector('#menu').hidden=false">${help}</button>
         <div id="menu" hidden><button onclick="window.sent++;this.parentNode.hidden=true">${resend}</button>
