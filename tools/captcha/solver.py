@@ -178,9 +178,28 @@ def preprocess(path: str, scale: int = 4) -> bytes:
         img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
         import io
 
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+        # The online readers reject payloads above a few hundred KB
+        # (ERROR_ZERO_CAPTCHA_FILESIZE), and a 4x LANCZOS PNG of a noisy
+        # challenge blows past that. Re-encode as JPEG and shrink until it fits.
+        limit = 90_000
+        for quality in (90, 80, 70, 60, 50):
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            data = buf.getvalue()
+            import base64 as _b64
+
+            if len(_b64.b64encode(data)) <= limit:
+                return data
+        while img.width > 80:
+            img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=60, optimize=True)
+            data = buf.getvalue()
+            import base64 as _b64
+
+            if len(_b64.b64encode(data)) <= limit:
+                return data
+        return data
     except Exception:
         with open(path, "rb") as handle:
             return handle.read()
