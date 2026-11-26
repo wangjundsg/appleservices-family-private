@@ -651,7 +651,10 @@ class Job:
             self.update(reason="form_running")
             self.update(registration_started=True)
             code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
-            self.update(create_exit_code=code, creation_rejected=code in (1, 2))
+            self.update(create_exit_code=code, creation_rejected=code == 1)
+            if code == 2:
+                self.update(registration_started=False)
+                raise PipelineError("registration_input_invalid", "usage")
             if self.cfg.get("handoff") == "dashboard" and code not in (0, 1, 2):
                 raise PipelineError("registration_requires_readback", "needs_review")
             if code not in (1, 2):
@@ -677,7 +680,7 @@ class Job:
                 if attempt == 1:
                     raise PipelineError("account_number_limit", "needs_review") from None
                 sms = self.cfg["sms"]
-                self.cfg["sms"] = {k:sms[k] for k in ("auto_purchase","phonecc","max_price","max_total","currency")}
+                self.cfg["sms"] = {k:sms[k] for k in ("auto_purchase","phonecc","max_price","max_total","currency","providers","duration_hours","accept_rental_price_change") if k in sms}
                 atomic(self.folder / "input.json", self.cfg)
                 self.update(registration_started=False, creation_rejected=False, reason="replacement_number_pending")
 
@@ -775,6 +778,9 @@ class Job:
             stage = self.status["stage"]
             if (self.method != "protocol" and resume and stage == "create"
                     and self.status["attempts"].get("create")):
+                if (self.status.get("create_exit_code") == 2 and self.status.get("registration_started") is False
+                        and not self.status.get("account_created")):
+                    self.update(status="usage", reason="registration_input_invalid")
                 self.cleanup_browser()
                 if self.status["status"] not in {"failed", "usage"}:
                     if not self.cfg["sms"].get("activation"):
@@ -842,7 +848,7 @@ class Job:
                 except PipelineError as e:
                     self.update(status=e.state, reason=e.reason)
                 if self.status["status"] == "queued": self.run()
-            if error.state not in {"needs_review", "waiting_input", "unknown"}:
+            if error.state not in {"needs_review", "waiting_input", "unknown"} and error.reason != "registration_input_invalid":
                 self.settle_number()
             else:
                 self.update(refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
@@ -853,7 +859,8 @@ class Job:
         finally:
             # A waiting job keeps its number: releasing it here would invalidate the
             # code the operator is about to receive. Unknown outcomes keep it too.
-            withholding = self.status.get("status") in {"waiting_input", "unknown", "needs_review"}
+            withholding = (self.status.get("status") in {"waiting_input", "unknown", "needs_review"}
+                           or self.status.get("reason") == "registration_input_invalid")
             if self.cfg["sms"].get("auto_purchase") and not withholding:
                 try: self.settle_number()
                 except Exception: self.update(refund_pending=True)

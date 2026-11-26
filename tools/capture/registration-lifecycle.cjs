@@ -12,8 +12,8 @@ function readInput(file) {
 function expiry(value, now = Date.now()) {
   if (!value) return Infinity;
   const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed) || parsed <= now || parsed > now + 30 * 60_000) {
-    throw new Error("activation expiry must be in the next 30 minutes");
+  if (!Number.isFinite(parsed) || parsed <= now || parsed > now + 24 * 60 * 60_000) {
+    throw new Error("activation expiry must be within the supported 24-hour lease");
   }
   return parsed;
 }

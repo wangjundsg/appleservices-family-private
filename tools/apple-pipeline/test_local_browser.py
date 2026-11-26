@@ -6,6 +6,37 @@ p = fixtures.p
 
 class LocalBrowserTests(unittest.TestCase):
     setUp = fixtures.PipelineTests.setUp
+
+    def test_local_input_rejection_does_not_replace_or_settle_number(self):
+        self.job.cfg.update(browser_mode="local", egress_mode="direct", captcha_solver="manual", handoff="dashboard")
+        self.job.cfg["sms"].update(auto_purchase=True, can_get_another_sms=True)
+        with patch.object(self.job, "number"), patch.object(self.job, "process", return_value=(2, {"state":"usage"})), \
+             patch.object(self.job, "settle_number") as settle, patch.object(self.job, "replace_number") as replace:
+            with self.assertRaisesRegex(p.PipelineError, "registration_input_invalid"):
+                self.job.create_with_replacement()
+        settle.assert_not_called()
+        replace.assert_not_called()
+        self.assertFalse(self.job.status["registration_started"])
+        self.assertFalse(self.job.status["creation_rejected"])
+
+    def test_input_rejection_is_resumable_in_original_task_without_login(self):
+        self.job.cfg.update(browser_mode="local", egress_mode="direct", handoff="dashboard")
+        self.job.status.update(stage="create",status="needs_review",attempts={"create":1},create_exit_code=2,registration_started=False)
+        with patch.object(self.job, "claim_number"), patch.object(self.job, "cleanup_browser"), \
+             patch.object(self.job, "create_with_replacement", side_effect=lambda:self.job.update(status="ready")) as create, \
+             patch.object(self.job, "authenticate") as login:
+            self.job.run(resume=True)
+        create.assert_called_once()
+        login.assert_not_called()
+
+    def test_input_usage_preserves_paid_number_at_task_exit(self):
+        self.job.cfg["sms"]["auto_purchase"]=True
+        with patch.object(self.job, "claim_number"), \
+             patch.object(self.job, "create_with_replacement", side_effect=p.PipelineError("registration_input_invalid","usage")), \
+             patch.object(self.job, "settle_number") as settle:
+            self.job.run()
+        settle.assert_not_called()
+        self.assertEqual(self.job.status["reason"],"registration_input_invalid")
     def test_local_browser_uses_existing_executor_without_forge(self):
         self.job.cfg.update(browser_mode="local", egress_mode="local", local_browser_proxy="http://127.0.0.1:7897", captcha_solver="manual")
         self.job.cfg["roxy"] = {}

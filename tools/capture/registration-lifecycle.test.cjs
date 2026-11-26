@@ -37,3 +37,12 @@ test("driver sets the lease once and checks both country fields before a submit"
   assert.match(source, /phoneSubmitted = verdict === "phone_step"/);
   assert.match(source, /!lifecycle.refundable\(reason\)/);
 });
+
+test("provider hour and day leases retain their actual deadlines", () => {
+  const now=Date.now();
+  for(const duration of [3600000,86400000]) {
+    const end=now+duration;
+    assert.equal(expiry(new Date(end).toISOString(),now),end);
+  }
+  assert.throws(()=>expiry(new Date(now+90000000).toISOString(),now));
+});

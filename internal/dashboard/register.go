@@ -88,6 +88,7 @@ var activationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 var registrationOTPPattern = regexp.MustCompile(`^[0-9]{6}$`)
 var registrationRatePattern = regexp.MustCompile(`tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423`)
 var registerMessages = map[string]string{
+	"registration_input_invalid":             "本地创建参数未通过检查，尚未提交注册；保留原号码，修正后继续原任务。",
 	"invalid_browser_mode":                   "浏览器方式无效，请核对当前任务。",
 	"local_browser_proxy_invalid":            "本机 Chrome 代理配置无效，请核对已保存的地址和端口。",
 	"gsa_account_repair_required":            "请在 Apple 官方账户页面或受信任设备上完成提示的账号设置。",
