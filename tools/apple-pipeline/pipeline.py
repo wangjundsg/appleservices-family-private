@@ -144,7 +144,11 @@ def validate(cfg):
     account_country(cfg)
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", cfg.get("email", "")):
         raise PipelineError("email_required", "usage")
-    if cfg["email"].rsplit("@", 1)[1].lower() in {"outlook.com", "icloud.com"}:
+    blocked = cfg.get("blocked_mailbox_domains")
+    if blocked is None:
+        blocked = ["icloud.com"]
+    blocked = {str(d).lower() for d in blocked}
+    if cfg["email"].rsplit("@", 1)[1].lower() in blocked:
         raise PipelineError("unsupported_registration_mailbox", "usage")
     pw = cfg.get("password", "")
     if len(pw) < 8 or not all(re.search(p, pw) for p in [r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]"]):
