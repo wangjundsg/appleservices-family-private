@@ -14,6 +14,7 @@ spec.loader.exec_module(p)
 
 def config():
     return {"job_id": "test-job", "email": "owner@example.test", "password": "Test-Only123!", "accept_terms": True,
+            "first": "Audrey", "last": "Bennett", "birthday": "1994-03-09",
             "email_code_file": str(Path(tempfile.gettempdir()) / "unused-test-code.txt"), "sms": {"activation": "test-activation", "key": "test-key", "phonecc": "GB",
             "phone": "7700900123", "expires_at": p.iso(p.time.time() + 600)},
             "roxy": {"token": "test-token", "workspaceId": "test-workspace", "projectId": "test-project",
@@ -392,6 +393,13 @@ class PipelineTests(unittest.TestCase):
         data=p.read(self.root/"create-input.json")
         self.assertEqual(data["country"],"USA")
         self.assertEqual(data["phonecc"],"GB")
+
+    def test_browser_receives_frozen_identity(self):
+        with patch.object(self.job,"forge",return_value={"dirId":"fixture-browser","debuggingPort":12345}),patch.object(self.job,"process",return_value=(0,{})),patch.object(self.job,"cleanup_browser"):
+            self.job.create()
+        data=p.read(self.root/"create-input.json")
+        self.assertEqual({key:data[key] for key in ("first","last","birth-month","birth-day","birth-year")},
+                         {"first":"Audrey","last":"Bennett","birth-month":"03","birth-day":"09","birth-year":"1994"})
 
     def test_browser_launch_receives_background_flags_and_uses_shared_executor(self):
         with patch.object(self.job,"forge",return_value={"dirId":"fixture-browser","debuggingPort":12345}) as forge,patch.object(self.job,"process",return_value=(0,{})) as process,patch.object(self.job,"cleanup_browser"):

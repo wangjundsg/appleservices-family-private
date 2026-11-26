@@ -205,6 +205,10 @@ func TestRegisterRunsExistingPipelineWithoutSecretArguments(t *testing.T) {
 	if manifest["account_country"] != "US" {
 		t.Fatal("ordinary registration did not retain the US account region")
 	}
+	identity := registrationIdentity{First: manifest["first"].(string), Last: manifest["last"].(string), Birthday: manifest["birthday"].(string)}
+	if !validRegistrationIdentity(identity, time.Now()) {
+		t.Fatal("registration did not freeze a valid adult identity", identity)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for s.registerView(answer.JobID)["exitCode"].(*int) == nil && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -226,8 +230,20 @@ func TestRegisterRunsExistingPipelineWithoutSecretArguments(t *testing.T) {
 	body.RetryOf = answer.JobID
 	body.Activation = "new-activation"
 	data, _ = json.Marshal(body)
-	if registerTestCall(s, "POST", "/api/register", string(data)).Code != 202 {
+	retryResponse := registerTestCall(s, "POST", "/api/register", string(data))
+	if retryResponse.Code != 202 {
 		t.Fatal("proven failure retry rejected")
+	}
+	var retryAnswer struct {
+		JobID string `json:"jobId"`
+	}
+	_ = json.Unmarshal(retryResponse.Body.Bytes(), &retryAnswer)
+	var retryManifest map[string]any
+	if err := readRegisterJSON(filepath.Join(s.registerFolder(retryAnswer.JobID), "request.json"), &retryManifest); err != nil {
+		t.Fatal(err)
+	}
+	if retryManifest["first"] != identity.First || retryManifest["last"] != identity.Last || retryManifest["birthday"] != identity.Birthday {
+		t.Fatal("retry changed the account identity")
 	}
 	// Wait for every stub before the temporary workspace is removed.
 	for time.Now().Before(deadline) {

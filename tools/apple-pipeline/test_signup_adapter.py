@@ -25,6 +25,7 @@ class FakeJob:
         self.folder = folder
         self.method = "protocol"
         self.cfg = {"job_id": "reg-1", "email": "fixture@example.test", "password": "Fixture-only123!",
+                    "first": "Audrey", "last": "Bennett", "birthday": "1994-03-09",
                     "egress_mode": "direct", "roxy": {},
                     "account_country": "US", "sms": {"phone": "7700900123", "phonecc": "GB"},
                     "protocol": {"emailCode": str(folder / "email-code.txt"),
@@ -190,6 +191,12 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(args[args.index('-captcha-answer-file')+1],str(target.resolve()))
         self.assertEqual(args[args.index('-captcha-wait')+1],'60s')
         self.assertNotIn('-captcha-answer',args)
+
+    def test_frozen_identity_reaches_protocol_executor(self):
+        job=FakeJob(self.folder)
+        args=sa.SignupAdapter(binary='unused')._arguments(job,sa.ExecutorContext.from_job(job))
+        for flag, value in (("-first","Audrey"),("-last","Bennett"),("-birthday","1994-03-09")):
+            self.assertEqual(args[args.index(flag)+1],value)
 
     def test_manual_captcha_file_must_not_alias_state_or_leave_task(self):
         job=FakeJob(self.folder)

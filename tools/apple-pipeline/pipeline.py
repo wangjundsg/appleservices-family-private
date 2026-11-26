@@ -570,6 +570,10 @@ class Job:
                    "outdir": str(self.folder), "cdp-port": str(port), "activation-expires-at": sms["expires_at"],
                    "expected-locale": roxy["locale"], "expected-timezone": roxy["timeZone"],
                    "sms-code-out": str(self.folder / "create-sms.txt"), "await-captcha": str(self.folder / "captcha.txt")}
+            birthday = dt.date.fromisoformat(self.cfg.get("birthday", "1992-07-18"))
+            inp.update({"first": self.cfg.get("first", "James"), "last": self.cfg.get("last", "Carter"),
+                        "birth-month": f"{birthday.month:02d}", "birth-day": f"{birthday.day:02d}",
+                        "birth-year": str(birthday.year)})
             if self.cfg.get("otpgmail_order_file"): inp["otpgmail-order-file"] = self.cfg["otpgmail_order_file"]
             elif self.cfg.get("code_pool_config"): inp["code-pool-config"] = self.cfg["code_pool_config"]
             elif self.cfg.get("graph_token_file"): inp["graph-token-file"] = self.cfg["graph_token_file"]

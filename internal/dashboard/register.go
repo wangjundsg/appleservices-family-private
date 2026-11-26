@@ -372,17 +372,28 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	}
 	s.accountsMu.Unlock()
 	// A retry must use a new activation and a proven rejection, never an unknown write.
+	identity := registrationIdentity{}
 	if body.RetryOf != "" {
 		var receipt pipelineReceipt
 		var prior struct {
-			Email string `json:"email"`
-			SMS   struct {
+			Email    string `json:"email"`
+			First    string `json:"first"`
+			Last     string `json:"last"`
+			Birthday string `json:"birthday"`
+			SMS      struct {
 				Activation string `json:"activation"`
 			} `json:"sms"`
 		}
 		folder := s.registerFolder(body.RetryOf)
 		if readRegisterJSON(filepath.Join(folder, "result.json"), &receipt) != nil || !retryableReceipt(receipt) || readRegisterJSON(filepath.Join(folder, "input.json"), &prior) != nil || !strings.EqualFold(prior.Email, body.Email) || prior.SMS.Activation == body.Activation {
 			return "", errors.New("仅明确失败的同一账号可用新号码重试；未知结果需先核实")
+		}
+		identity = registrationIdentity{First: prior.First, Last: prior.Last, Birthday: prior.Birthday}
+	}
+	if !validRegistrationIdentity(identity, time.Now()) {
+		identity, err = newRegistrationIdentity(time.Now())
+		if err != nil {
+			return "", errors.New("无法生成独立身份资料")
 		}
 	}
 	// Also reject duplicate clicks before the child has created its reservation.
@@ -444,6 +455,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		}
 	}
 	manifest := map[string]any{"job_id": id, "email": body.Email, "password": body.Password, "accept_terms": true,
+		"first": identity.First, "last": identity.Last, "birthday": identity.Birthday,
 		"account_country":     "US",
 		"registration_method": method,
 		"registrationMethod":  method,
