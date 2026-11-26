@@ -35,6 +35,34 @@ import job_policy
 import protocol_adapter as adapter_registry
 
 
+def resolve_captcha(cfg: dict) -> tuple:
+    """Work out which image-text path to use and where the key comes from.
+
+    Order: explicit config, then YESCAPTCHA_KEY, then the local secrets file.
+    A missing key degrades to manual instead of stalling the job with a hard error,
+    so a fresh checkout still runs without any local configuration.
+    """
+    key = str(cfg.get("yescaptcha_key") or "").strip()
+    if not key:
+        key = str(os.environ.get("YESCAPTCHA_KEY", "")).strip()
+    if not key:
+        for candidate in (Path("state/secrets.json"), Path.home() / ".appleservices" / "secrets.json"):
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            key = str(data.get("yescaptcha_key") or "").strip()
+            if key:
+                break
+    solver = cfg.get("captcha_solver")
+    if solver is None:
+        solver = "yes" if key else "manual"
+    if solver == "yes" and not key:
+        solver = "manual"
+    return solver, key
+
+
+
 class PipelineError(Exception):
     def __init__(self, reason, state="unknown"):
         self.reason, self.state = reason, state
@@ -149,9 +177,10 @@ def validate(cfg):
         raise PipelineError("residential_socks5_required", "usage")
     if cfg.get("accept_terms") is not True:
         raise PipelineError("terms_consent_required", "usage")
+    solver_name, solver_key = resolve_captcha(cfg)
     if cfg.get("captcha_solver") not in (None, "manual", "yes"):
         raise PipelineError("unsupported_captcha_solver", "usage")
-    if cfg.get("captcha_solver") == "yes" and not cfg.get("yescaptcha_key"):
+    if cfg.get("captcha_solver") == "yes" and not solver_key:
         raise PipelineError("captcha_key_required", "usage")
     snake, camel = cfg.get("registration_method"), cfg.get("registrationMethod")
     if snake and camel and snake != camel:
@@ -250,7 +279,8 @@ class Job:
             env.pop(key, None)
         env.update(APPLESERVICES_APPLEID=self.cfg["email"], APPLESERVICES_PASSWORD=self.cfg["password"],
                    APPLESERVICES_CREATE_INPUT=str(self.folder / "create-input.json"))
-        if self.cfg.get("yescaptcha_key"): env["YESCAPTCHA_KEY"] = self.cfg["yescaptcha_key"]
+        _solver_name, _solver_key = resolve_captcha(self.cfg)
+        if _solver_key: env["YESCAPTCHA_KEY"] = _solver_key
         for key in list(env):
             if key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: env.pop(key)
         proxy = self.cfg["roxy"].get("proxyInfo", {})
@@ -531,7 +561,7 @@ class Job:
             if self.cfg.get("code_pool_config"): inp["code-pool-config"] = self.cfg["code_pool_config"]
             elif self.cfg.get("graph_token_file"): inp["graph-token-file"] = self.cfg["graph_token_file"]
             else: inp["await-email-code"] = self.cfg["email_code_file"]
-            if self.cfg.get("captcha_solver") == "yes":
+            if resolve_captcha(self.cfg)[0] == "yes":
                 inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
             atomic(self.folder / "create-input.json", inp)
             code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)
