@@ -693,7 +693,10 @@ class Job:
                 if code != 0: raise PipelineError("browser_preflight_failed", "failed")
             self.update(reason="form_running")
             self.update(registration_started=True)
-            code, _ = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
+            code, outcome = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
+            if self.cfg.get("browser_mode") == "local" and code != 0 and re.fullmatch(r"field_mismatch:[a-z_]+|email_field_mismatch", (outcome or {}).get("evidence", "")):
+                self.update(create_exit_code=code, creation_rejected=False)
+                raise PipelineError("registration_field_mismatch", "needs_review")
             self.update(create_exit_code=code, creation_rejected=code == 1)
             if code == 2:
                 self.update(registration_started=False)

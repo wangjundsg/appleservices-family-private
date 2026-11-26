@@ -147,21 +147,18 @@ async function selectField(locator, value, label, { choose, log = () => {} } = {
 
 // Use the native select's keyboard behavior; no DOM value assignment.
 async function selectByKeyboard(locator, value, {sleep = ms => new Promise(r => setTimeout(r, ms)), stepMs = 0, settleMs = 0} = {}) {
-  const {index, current, total} = await locator.evaluate((el, wanted) => {
-    const options = Array.from(el.options).filter(option => !option.disabled && !option.parentElement.disabled);
-    return {index: options.findIndex(option => option.value === wanted),
-      current: options.findIndex(option => option.selected), total: options.length};
+  const {index, total} = await locator.evaluate((el, wanted) => {
+    const options = Array.from(el.options).filter(option => !option.disabled && !option.parentElement.disabled &&
+      !option.hidden && !option.parentElement.hidden && getComputedStyle(option).display !== "none" &&
+      getComputedStyle(option.parentElement).display !== "none");
+    return {index: options.findIndex(option => option.value === wanted), total: options.length};
   }, String(value));
   if (index < 0) throw new Error("select_option_unavailable");
-  let start = current;
-  if (start < 0 || index + 1 < Math.abs(index - start)) {
-    await locator.press("Home", {timeout: 5000}); start = 0;
-    if (stepMs) await sleep(stepMs);
-  }
-  if (total - index < Math.abs(index - start)) {
-    await locator.press("End", {timeout: 5000}); start = total - 1;
-    if (stepMs) await sleep(stepMs);
-  }
+  // The open popup's highlight can differ from the committed DOM selection.
+  // Always anchor before counting keys; never infer its position from value.
+  const start = index <= total - 1 - index ? 0 : total - 1;
+  await locator.press(start === 0 ? "Home" : "End", {timeout:5000});
+  if (stepMs) await sleep(stepMs);
   for (let i = 0; i < Math.abs(index - start); i++) {
     await locator.press(index > start ? "ArrowDown" : "ArrowUp", {timeout: 5000});
     if (stepMs) await sleep(stepMs);

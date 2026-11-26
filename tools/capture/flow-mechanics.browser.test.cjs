@@ -6,6 +6,45 @@ const path = require("node:path");
 const mech = require("./flow-mechanics.cjs");
 const chrome = process.env.TEST_CHROME_EXE || "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
+for (const headless of [true, false]) test(`real Chrome long country list skips hidden options (headless=${headless})`, {skip: !fs.existsSync(chrome)}, async () => {
+  const {chromium} = require(path.resolve(__dirname, "../../.tools/js/node_modules/playwright-core"));
+  const browser = await chromium.launch({executablePath:chrome, headless});
+  try {
+    const page = await browser.newPage();
+    await page.route("**/*", route => route.abort());
+    await page.setContent(`<title>Local dropdown regression</title><input name="firstName" value="Fixed First"><input name="lastName" value="Fixed Last">
+      <select style="margin:100px;width:450px">${Array.from({length:220}, (_,i)=>`<option value="${i}" ${i===218?'selected':''} ${i%7===0?'hidden':''}>Country ${i}</option>`).join("")}</select>`);
+    const locator=page.locator("select");
+    await mech.selectField(locator,"197","country",{choose:async(l,v)=>{
+      await l.click();await page.waitForTimeout(300);
+      await mech.selectByKeyboard(l,v,{stepMs:100,settleMs:300});
+    }});
+    assert.equal(await locator.inputValue(),"197");
+    assert.equal(await page.locator('[name="firstName"]').inputValue(),"Fixed First");
+    assert.equal(await page.locator('[name="lastName"]').inputValue(),"Fixed Last");
+  } finally { await browser.close(); }
+});
+
+test("headed Chrome: long popup near viewport bottom starts from a known keyboard anchor", {skip:!fs.existsSync(chrome)}, async()=>{
+  const {chromium}=require(path.resolve(__dirname,"../../.tools/js/node_modules/playwright-core"));
+  const browser=await chromium.launch({executablePath:chrome,headless:false});
+  try {
+    const page=await browser.newPage({viewport:{width:1532,height:900}});
+    await page.route("**/*",route=>route.abort());
+    await page.setContent(`<title>Local country popup regression</title><input value="Unchanged name">
+      <select style="display:block;margin:300px 400px 0;width:720px;height:84px;font-size:24px">${Array.from({length:245},(_,i)=>`<option value="${i}" ${i===241?'selected':''}>Country ${i}</option>`).join("")}</select>`);
+    const locator=page.locator("select");
+    await locator.click();await page.waitForTimeout(400);
+    // Popup highlight can move while the committed DOM value is still 241.
+    await locator.press("End");
+    assert.equal(await locator.inputValue(),"241");
+    await mech.selectByKeyboard(locator,"134",{stepMs:100,settleMs:300});
+    await locator.press("Tab");
+    assert.equal(await locator.inputValue(),"134");
+    assert.equal(await page.locator("input").inputValue(),"Unchanged name");
+  }finally{await browser.close();}
+});
+
 test("real Chrome: readback, one repair, native selects and zero resend", {skip: !fs.existsSync(chrome)}, async () => {
   const {chromium} = require(path.resolve(__dirname, "../../.tools/js/node_modules/playwright-core"));
   const browser = await chromium.launch({executablePath: chrome, headless: true});

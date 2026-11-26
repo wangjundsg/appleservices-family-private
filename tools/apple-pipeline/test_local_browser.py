@@ -59,6 +59,14 @@ class LocalBrowserTests(unittest.TestCase):
         fallback=p.json.loads(p.read(self.root/"create-input.json")["captcha-fallback-cmd"])
         self.assertIn("--skip-local",fallback)
 
+    def test_local_field_mismatch_is_script_failure_not_registration_rejection(self):
+        self.job.cfg.update(browser_mode="local",egress_mode="local",local_browser_proxy="http://127.0.0.1:7897",captcha_solver="local-first")
+        with patch.object(self.job,"number"),patch.object(self.job,"process",return_value=(1,{"state":"failed","error":"field_readback_failed","evidence":"field_mismatch:country"})) as process:
+            with self.assertRaisesRegex(p.PipelineError,"registration_field_mismatch"):
+                self.job.create()
+        self.assertFalse(self.job.status["creation_rejected"])
+        self.assertEqual(process.call_count,1)
+
     def test_email_replacement_rebinds_identity_and_reader_but_keeps_sms_ledger(self):
         old=self.job.cfg["email"]
         self.job.cfg.update(browser_mode="local",otpgmail_order_file=str(self.root/"old-mail.json"))

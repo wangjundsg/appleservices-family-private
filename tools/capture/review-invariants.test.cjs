@@ -17,6 +17,18 @@ const { test } = require("node:test");
 const dir = __dirname;
 const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
 
+test("native country failure stops before writing either name", async () => {
+  const source=read("create-account.cjs");
+  const start=source.indexOf("  const fillForm = async (fr) => {");
+  const body=source.slice(start,source.indexOf("\n  };",start)+5);
+  const calls=[];
+  const fillForm=new Function("noAutofill","nativeMode","selectIfNeeded","arg","fillIfNeeded",body+";return fillForm;")(
+    async()=>{},true,async(_locator,_value,label)=>{calls.push(label);throw Error("country-not-ready");},
+    (_name,fallback)=>fallback,async()=>{throw Error("name must not be written");});
+  await assert.rejects(fillForm({locator:selector=>selector}),/country-not-ready/);
+  assert.deepEqual(calls,["country"]);
+});
+
 // ---- A1: no repository-visible default password ---------------------------
 
 test("A1: no capture script ships a default password", () => {

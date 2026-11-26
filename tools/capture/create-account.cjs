@@ -725,7 +725,7 @@ async function selectHuman(locator, value, label = "") {
   await sleep(300 + Math.floor(Math.random() * 500));
   await mech.selectByKeyboard(locator, value, nativeMode ? {sleep, stepMs: 100, settleMs: 300} : {});
   await sleep(250 + Math.floor(Math.random() * 450));
-  if (label) note("step", { at: "selected", field: label, value: String(value) });
+  if (label) note("step", { at: "selection-attempted", field: label, value: String(value) });
 }
 
 
@@ -1454,12 +1454,14 @@ async function clickContinue(page, frame, tag = "") {
   };
   const fillForm = async (fr) => {
     await noAutofill(fr);
+    // Country changes may rebuild other fields; settle it before typing names.
+    if (nativeMode) await selectIfNeeded(fr.locator('select[name="countrySelect"]'), String(arg("country", "USA")), "country");
     // A rejected captcha returns to this same form with everything still in it,
     // so every field is read before it is typed into. The first pass types;
     // every later pass finds the value already there and says so (`field-kept`).
     await fillIfNeeded(fr.locator('input[name="firstName"]'), firstName, "first_name");
     await fillIfNeeded(fr.locator('input[name="lastName"]'), lastName, "last_name");
-    await selectIfNeeded(fr.locator('select[name="countrySelect"]'), String(arg("country", "USA")), "country");
+    if (!nativeMode) await selectIfNeeded(fr.locator('select[name="countrySelect"]'), String(arg("country", "USA")), "country");
     // The birthday is three separate selects whose DOM order on the 2026-11-14
     // build is day, month, year. Index-based selection sent the day value to the
     // month select and stalled for 30s without submitting anything; the stable
@@ -1508,6 +1510,7 @@ async function clickContinue(page, frame, tag = "") {
     if (dial !== phoneCC || country !== String(arg("country", "USA"))) {
       const err = new Error("country selection changed before submission");
       err.state = submissionMayHaveLanded ? "unknown" : "failed";
+      err.evidence = `field_mismatch:${dial !== phoneCC ? "dial_code" : "country"}`;
       throw err;
     }
   };
@@ -1978,6 +1981,6 @@ async function clickContinue(page, frame, tag = "") {
   // A usage refusal prints its structured report (the same JSON the caller
   // branched on before); everything else prints the state and the complaint.
   if (e && e.report) console.error(JSON.stringify(e.report));
-  else console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200) }));
+  else console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200), evidence: clip((e && e.evidence) || "", 160) }));
   process.exit(flow.EXIT_CODES[state]);
 });

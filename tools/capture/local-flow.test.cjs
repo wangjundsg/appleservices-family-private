@@ -22,11 +22,11 @@ test("Chinese and English delivery headings beat a quoted email address on phone
     assert.equal(flow.classifyScreen({text}),"email_step");
   }
 });
-test("paced dropdown uses the shortest native-key path and settles before leaving",async()=>{
+test("paced dropdown anchors at the nearer end and settles before leaving",async()=>{
   const keys=[],waits=[];
   const locator={evaluate:async()=>({index:10,current:8,total:12}),press:async key=>keys.push(key)};
   await mech.selectByKeyboard(locator,"11",{sleep:async ms=>waits.push(ms),stepMs:100,settleMs:300});
-  assert.deepEqual(keys,["ArrowDown","ArrowDown","Enter"]);
+  assert.deepEqual(keys,["End","ArrowUp","Enter"]);
   assert.deepEqual(waits,[100,100,300]);
 });
 test("a user who advanced the page is never followed by a resend or replacement",async()=>{
