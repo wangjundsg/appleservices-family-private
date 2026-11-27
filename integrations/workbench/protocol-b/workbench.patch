@@ -1,0 +1,179 @@
+diff --git a/src/flow/http.rs b/src/flow/http.rs
+index d7ee6d1..516e6bf 100644
+--- a/src/flow/http.rs
++++ b/src/flow/http.rs
+@@ -587,7 +587,8 @@ impl Client {
+             if !raw.trim().is_empty() {
+                 let url = normalize_proxy_url(raw)?;
+                 let proxy = wreq::Proxy::all(url.as_str())
+-                    .with_context(|| format!("代理初始化失败: {url}"))?;
++                    .with_context(|| format!("代理初始化失败: {url}"))?
++                    .no_proxy(wreq::NoProxy::from_string("127.0.0.1,localhost,::1"));
+                 builder = builder.proxy(proxy);
+             }
+         }
+diff --git a/src/flow/mod.rs b/src/flow/mod.rs
+index 6eb648f..12b17f4 100644
+--- a/src/flow/mod.rs
++++ b/src/flow/mod.rs
+@@ -301,6 +301,34 @@ impl RegisterConfig {
+             .and_then(|fp| http::parse_emulation(&fp.emulation))
+     }
+
++    /// Export the profile already used by this run; no generation or missing-value defaults.
++    pub fn registration_device_snapshot(&self, device_id: &str) -> Option<serde_json::Value> {
++        let fp = self.fingerprint.as_ref()?;
++        Some(serde_json::json!({
++            "version": 1, "device_id": device_id, "fingerprint_ref": fp.fingerprint_id,
++            "source": "protocol_b_registration", "captured_at": store::now_ts(),
++            "impersonate": fp.impersonate,
++            "browser_profile": {
++                "browser_family": fp.browser_family,
++                "browser_os": fp.sec_ch_ua_platform.trim_matches('"'),
++                "user_agent": self.user_agent, "accept_language": self.accept_language,
++                "chrome_major": fp.chrome_major, "chrome_full_version": fp.browser_version,
++                "browser_full_version": fp.chrome_full_version,
++                "navigator_platform": fp.platform, "navigator_vendor": fp.vendor,
++                "navigator_language": fp.lang, "navigator_languages": fp.lang_list(),
++                "sec_ch_ua": fp.sec_ch_ua, "sec_ch_ua_mobile": fp.sec_ch_ua_mobile,
++                "sec_ch_ua_platform": fp.sec_ch_ua_platform,
++                "sec_ch_ua_full_version_list": fp.ua_full_version_list,
++                "sec_ch_ua_arch": fp.ua_arch, "sec_ch_ua_bitness": fp.ua_bitness,
++                "sec_ch_ua_model": fp.ua_model, "sec_ch_ua_platform_version": fp.ua_platform_version,
++                "hardware_concurrency": fp.hardware_concurrency, "device_memory": fp.device_memory,
++                "device_pixel_ratio": fp.device_pixel_ratio,
++                "screen_width": fp.screen_width, "screen_height": fp.screen_height,
++                "timezone_iana": fp.timezone
++            }
++        }))
++    }
++
+     /// 按配置造 auth 请求构造器（有指纹就把 client hints 一并对齐）。
+     fn auth_builder(&self, device_id: &str) -> auth::AuthRequestBuilder {
+         let builder = auth::AuthRequestBuilder::new(
+@@ -959,6 +987,12 @@ async fn live_register(
+         updated_at: store::now_ts(),
+     };
+     let account_id = store.save_account(&account)?;
++    if let Some(device) = cfg.registration_device_snapshot(&identity.device_id) {
++        // Optional metadata must not turn an already registered account into a failed signup.
++        if store.save_registration_device(&identity.email, &device).is_err() {
++            warn!("registration device archive failed");
++        }
++    }
+
+     Ok(RegistrationOutcome {
+         dry_run: false,
+diff --git a/src/flow/store.rs b/src/flow/store.rs
+index 588629b..a50a77a 100644
+--- a/src/flow/store.rs
++++ b/src/flow/store.rs
+@@ -95,6 +95,11 @@ impl Store {
+                 CREATE INDEX IF NOT EXISTS idx_accounts_status  ON accounts(status, id DESC);
+                 CREATE INDEX IF NOT EXISTS idx_accounts_created ON accounts(created_at DESC);
+
++                CREATE TABLE IF NOT EXISTS registration_devices (
++                    email TEXT PRIMARY KEY,
++                    device_json TEXT NOT NULL
++                );
++
+                 CREATE TABLE IF NOT EXISTS email_pool (
+                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                     email       TEXT NOT NULL UNIQUE,
+@@ -170,6 +175,16 @@ impl Store {
+             .context("读取刚写入账号的 id 失败")
+     }
+
++    /// Preserve the observed registration device separately from account credentials.
++    pub fn save_registration_device(&self, email: &str, device: &serde_json::Value) -> Result<()> {
++        self.conn.execute(
++            "INSERT INTO registration_devices(email,device_json) VALUES(?1,?2)
++             ON CONFLICT(email) DO NOTHING",
++            params![email, serde_json::to_string(device)?],
++        ).context("保存注册设备资料失败")?;
++        Ok(())
++    }
++
+     pub fn get_account(&self, email: &str) -> Result<Option<Account>> {
+         self.conn
+             .query_row(
+diff --git a/tests/protocol_b_loopback.rs b/tests/protocol_b_loopback.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/protocol_b_loopback.rs
+@@ -0,0 +1,33 @@
++use sentinel_rs::flow::http::{Client, RequestSpec, RetryPolicy};
++use std::io::{Read, Write};
++use std::net::TcpListener;
++
++fn serve(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
++    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++    let url = format!("http://{}", listener.local_addr().unwrap());
++    let thread = std::thread::spawn(move || {
++        let (mut stream, _) = listener.accept().unwrap();
++        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
++        let mut buffer = [0; 4096];
++        let count = stream.read(&mut buffer).unwrap();
++        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
++        String::from_utf8_lossy(&buffer[..count]).to_string()
++    });
++    (url, thread)
++}
++
++#[tokio::test]
++async fn mailbox_stays_local_while_external_requests_use_proxy() {
++    let (mail, local) = serve("local-code");
++    let (proxy, upstream) = serve("proxied");
++    let policy = RetryPolicy { max_attempts: 1, ..Default::default() };
++    let client = Client::build_with_timeout("fixture", Some(&proxy), policy, None, 5).unwrap();
++    let code = client.execute(&RequestSpec::get("mailbox", format!("{mail}/code?key=fixture"))).await.unwrap();
++    assert_eq!(code.body, "local-code");
++    let external = client.execute(&RequestSpec::get("external", "http://example.invalid/".to_string())).await.unwrap();
++    assert_eq!(external.body, "proxied");
++    assert!(local.join().unwrap().contains("/code?key=fixture"));
++    let request = upstream.join().unwrap();
++    assert!(request.contains("example.invalid"));
++    assert!(!request.contains("key=fixture"));
++}
+diff --git a/tests/protocol_b_device_archive.rs b/tests/protocol_b_device_archive.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/protocol_b_device_archive.rs
+@@ -0,0 +1,37 @@
++use sentinel_rs::flow::{store::Store, RegisterConfig};
++use sentinel_rs::fingerprint::DeviceFingerprint;
++
++#[test]
++fn snapshot_exports_the_existing_profile_without_generating_missing_fields() {
++    let mut cfg = RegisterConfig::default();
++    assert!(cfg.registration_device_snapshot("observed-device").is_none());
++    let fp = DeviceFingerprint::generate(Some("offline-archive-fixture"));
++    cfg.user_agent = fp.user_agent.clone();
++    cfg.accept_language = fp.lang_full.clone();
++    cfg.fingerprint = Some(fp.clone());
++    let snapshot = cfg.registration_device_snapshot("observed-device").unwrap();
++    assert_eq!(snapshot["device_id"], "observed-device");
++    assert_eq!(snapshot["fingerprint_ref"], fp.fingerprint_id);
++    let profile = &snapshot["browser_profile"];
++    assert_eq!(profile["chrome_full_version"], fp.browser_version);
++    assert_eq!(profile["browser_full_version"], fp.chrome_full_version);
++    assert_eq!(profile["hardware_concurrency"], fp.hardware_concurrency);
++    assert_eq!(profile["timezone_iana"], fp.timezone);
++    assert!(profile.get("js_heap_size_limit").is_none());
++    assert_eq!(cfg.fingerprint, Some(fp));
++
++    let path = std::env::temp_dir().join(format!("device-archive-{}.sqlite3", uuid::Uuid::new_v4()));
++    {
++        let store = Store::open(&path).unwrap();
++        store.init().unwrap();
++        store.init().unwrap();
++        store.save_registration_device("owner@example.test", &snapshot).unwrap();
++        store.save_registration_device("owner@example.test", &serde_json::json!({"device_id":"other"})).unwrap();
++    }
++    let con = rusqlite::Connection::open(&path).unwrap();
++    let saved: String = con.query_row("SELECT device_json FROM registration_devices WHERE email=?1",
++        ["owner@example.test"], |r| r.get(0)).unwrap();
++    assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap(), snapshot);
++    drop(con);
++    std::fs::remove_file(path).unwrap();
++}
