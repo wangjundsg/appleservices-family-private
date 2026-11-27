@@ -35,7 +35,7 @@ def load_manifest(path):
     rows = json.loads(path.read_text(encoding='utf-8'))
     hashes, groups, batches = set(), {}, {}
     for row in rows:
-        if row['split'] not in ('train', 'calibration', 'validation') or row['decision'] not in ('readable', 'refresh'):
+        if row['split'] not in ('train', 'calibration', 'validation', 'regression') or row['decision'] not in ('readable', 'refresh'):
             raise ValueError('invalid_split_or_decision')
         if row['sha256'] in hashes or sha256(row['image']) != row['sha256']:
             raise ValueError('duplicate_or_changed_image')
@@ -108,6 +108,14 @@ def metrics(labels, scores, threshold):
             'brier_score': float(np.mean((scores - labels) ** 2))}
 
 
+def metrics_by_field(rows, labels, scores, threshold, field):
+    result = {}
+    for value in sorted({r.get(field, 'legacy') for r in rows}):
+        indices = [i for i, r in enumerate(rows) if r.get(field, 'legacy') == value]
+        result[value] = metrics([labels[i] for i in indices], [scores[i] for i in indices], threshold)
+    return result
+
+
 @torch.inference_mode()
 def infer_logits(model, images):
     model.eval()
@@ -134,7 +142,7 @@ def benchmark(predictor, images, iterations=1000):
             'note': 'Warm loaded model; file reads may be OS-cached; concurrent machine load is uncontrolled.'}
 
 
-def run(manifest, out, threads=2):
+def run(manifest, out, threads=2, baseline_model=None):
     seed = 20261127
     if not 1 <= threads <= 8:
         raise ValueError('threads_must_be_1_to_8')
@@ -151,7 +159,8 @@ def run(manifest, out, threads=2):
     model = mobilenet_v3_small(weights=weights)
     model.classifier = nn.Sequential(nn.Dropout(.2), nn.Linear(576, 1))
     pretrained = Path(torch.hub.get_dir()) / 'checkpoints' / weights.url.rsplit('/', 1)[1]
-    groups = {split: [r for r in rows if r['split'] == split] for split in ('train', 'calibration', 'validation')}
+    groups = {split: [r for r in rows if r['split'] == split]
+              for split in ('train', 'calibration', 'validation', 'regression')}
     x_train, y_train = tensors(groups['train'])
     counts = torch.bincount(y_train.long(), minlength=2)
     class_weights = len(y_train) / (2 * counts.float())
@@ -213,10 +222,7 @@ def run(manifest, out, threads=2):
     validation_scores = [p['readable_probability'] for p in validation_predictions]
     validation_labels = [int(r['decision'] == 'readable') for r in groups['validation']]
     validation = metrics(validation_labels, validation_scores, threshold)
-    by_batch = {}
-    for batch in sorted({r['source_batch'] for r in groups['validation']}):
-        indices = [i for i, r in enumerate(groups['validation']) if r['source_batch'] == batch]
-        by_batch[batch] = metrics([validation_labels[i] for i in indices], [validation_scores[i] for i in indices], threshold)
+    by_batch = metrics_by_field(groups['validation'], validation_labels, validation_scores, threshold, 'source_batch')
     report = {'model': metadata, 'model_sha256': sha256(model_file), 'model_bytes': model_file.stat().st_size,
               'source_sha256': {name: sha256(Path(__file__).with_name(name))
                                 for name in ('train_readability.py', 'readability.py', 'audit_readability.py')},
@@ -230,18 +236,44 @@ def run(manifest, out, threads=2):
               'class_weights_refresh_readable': class_weights.tolist(),
               'split_counts': {split: dict(Counter(r['decision'] for r in items)) for split, items in groups.items()},
               'calibration': metrics(y_calibration.numpy(), calibrated, threshold),
+              'calibration_by_review_part': metrics_by_field(groups['calibration'], y_calibration.numpy(), calibrated, threshold, 'review_part'),
               'calibration_raw_brier': float(np.mean((expit(calibration_logits) - y_calibration.numpy()) ** 2)),
               'validation': validation, 'validation_by_source_batch': by_batch,
+              'validation_by_review_part': metrics_by_field(groups['validation'], validation_labels, validation_scores, threshold, 'review_part'),
+              'data_audit_sha256': sha256(Path(manifest).parent / 'audit.json'),
               'meets_experimental_targets': validation['false_readable_rate'] <= .05 and validation['readable_retention'] >= .5,
-              'limitations': ['Single day and captcha style', 'Only 15 calibration refresh images',
+              'limitations': ['Single day and captcha style',
+                             f"Calibration refresh images: {sum(r['decision'] == 'refresh' for r in groups['calibration'])}",
                              'Group correlation makes image-level binomial intervals optimistic', 'No automatic production integration']}
+    if groups['regression']:
+        regression_predictions = [predictor.predict(r['image']) for r in groups['regression']]
+        report['regression'] = metrics([int(r['decision'] == 'readable') for r in groups['regression']],
+                                       [p['readable_probability'] for p in regression_predictions], threshold)
+        report['limitations'].append('Regression set was evaluated previously; not fresh validation')
+        (out / 'regression-predictions.json').write_text(json.dumps([
+            {'sha256': r['sha256'], 'truth': r['decision'], 'review_part': r.get('review_part', 'legacy'), **p}
+            for r, p in zip(groups['regression'], regression_predictions)], indent=2) + '\n', encoding='utf-8')
+    if baseline_model:
+        baseline = ReadabilityModel(baseline_model)
+        baseline_predictions = [baseline.predict(r['image']) for r in groups['validation']]
+        baseline_scores = [p['readable_probability'] for p in baseline_predictions]
+        report['baseline'] = {
+            'model_version': baseline.metadata['model_version'], 'model_sha256': sha256(baseline_model),
+            'threshold': baseline.threshold,
+            'validation': metrics(validation_labels, baseline_scores, baseline.threshold),
+            'validation_by_review_part': metrics_by_field(groups['validation'], validation_labels, baseline_scores,
+                                                          baseline.threshold, 'review_part')}
+        (out / 'baseline-validation-predictions.json').write_text(json.dumps([
+            {'sha256': r['sha256'], 'truth': r['decision'], 'review_part': r.get('review_part', 'legacy'), **p}
+            for r, p in zip(groups['validation'], baseline_predictions)], indent=2) + '\n', encoding='utf-8')
     report['cpu_latency'] = benchmark(predictor, [r['image'] for r in groups['validation']])
     (out / 'report.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     (out / 'validation-predictions.json').write_text(json.dumps([
-        {'sha256': r['sha256'], 'truth': r['decision'], **p}
+        {'sha256': r['sha256'], 'truth': r['decision'], 'review_part': r.get('review_part', 'legacy'), **p}
         for r, p in zip(groups['validation'], validation_predictions)], indent=2) + '\n', encoding='utf-8')
     (out / 'calibration-predictions.json').write_text(json.dumps([
-        {'sha256': r['sha256'], 'truth': r['decision'], 'logit': float(logit), 'readable_probability': float(score)}
+        {'sha256': r['sha256'], 'truth': r['decision'], 'review_part': r.get('review_part', 'legacy'),
+         'logit': float(logit), 'readable_probability': float(score)}
         for r, logit, score in zip(groups['calibration'], calibration_logits, calibrated)], indent=2) + '\n', encoding='utf-8')
     print(json.dumps({'model_version': metadata['model_version'], 'validation': validation,
                       'model_bytes': report['model_bytes'], 'cpu_latency': report['cpu_latency'],
@@ -254,5 +286,6 @@ if __name__ == '__main__':
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--threads', type=int, default=2)
+    parser.add_argument('--baseline-model', help='Fixed previous model; evaluated only after the new model is frozen')
     args = parser.parse_args()
-    run(args.manifest, args.out, args.threads)
+    run(args.manifest, args.out, args.threads, args.baseline_model)

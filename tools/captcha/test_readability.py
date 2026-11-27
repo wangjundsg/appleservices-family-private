@@ -83,7 +83,7 @@ class ReadabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             rows = []
-            for i, split in enumerate(('train', 'train', 'calibration', 'calibration', 'validation', 'validation')):
+            for i, split in enumerate(('train', 'train', 'calibration', 'calibration', 'validation', 'validation', 'regression', 'regression')):
                 image = root / f'{i}.png'
                 Image.new('RGB', (10, 10), (i * 30, 0, 0)).save(image)
                 rows.append(dict(image=str(image), sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
@@ -95,7 +95,12 @@ class ReadabilityTests(unittest.TestCase):
                 (root / 'audit.json').write_text(json.dumps({'frozen_manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}), encoding='utf-8')
 
             save()
-            self.assertEqual(len(load_manifest(manifest)), 6)
+            self.assertEqual(len(load_manifest(manifest)), 8)
+            rows[-1]['group'] = 'train'
+            save()
+            with self.assertRaisesRegex(ValueError, 'group_overlap'):
+                load_manifest(manifest)
+            rows[-1]['group'] = 'regression'
             rows[2]['group'] = 'train'
             save()
             with self.assertRaisesRegex(ValueError, 'group_overlap'):
