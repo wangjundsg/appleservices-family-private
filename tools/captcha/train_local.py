@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-def confirmed_samples(dataset):
+def confirmed_samples(dataset, pseudo_labels=None):
     dataset = Path(dataset).resolve()
     samples = {}
     with (dataset / 'labels.csv').open(encoding='utf-8-sig', newline='') as handle:
@@ -27,17 +27,53 @@ def confirmed_samples(dataset):
             digest = hashlib.sha256(image.read_bytes()).hexdigest()
             if digest != row.get('sha256'):
                 raise ValueError('image_digest_mismatch')
+            label = label.upper()
             if digest in samples and samples[digest]['label'] != label:
                 raise ValueError('conflicting_labels')
             from PIL import Image
             with Image.open(image) as picture:
                 picture.verify()
             samples[digest] = {'image': image.as_posix(), 'label': label, 'sha256': digest}
-    if len(samples) < 4:
+    if len(samples) < (1 if pseudo_labels else 4):
         raise ValueError('at_least_four_confirmed_unique_images_required')
     ordered = sorted(samples.values(), key=lambda row: row['sha256'])
     count = max(1, len(ordered) // 5)
-    return ordered[count:], ordered[:count]
+    train, validation = ordered[count:], ordered[:count]
+    if pseudo_labels:
+        candidates, conflicts = {}, set()
+        with Path(pseudo_labels).open(encoding='utf-8-sig', newline='') as handle:
+            for row in csv.DictReader(handle):
+                if row.get('status') != 'accepted': continue
+                label = row.get('label', '')
+                if not re.fullmatch(r'[A-Za-z0-9]{4,6}', label): raise ValueError('pseudo_label_invalid')
+                image = (dataset / row['file']).resolve()
+                if not image.is_relative_to(dataset): raise ValueError('image_outside_dataset')
+                digest = hashlib.sha256(image.read_bytes()).hexdigest()
+                if digest != row.get('sha256'): raise ValueError('image_digest_mismatch')
+                if digest in samples: continue  # Confirmed labels and validation membership win.
+                from PIL import Image
+                with Image.open(image) as picture: picture.verify()
+                item = {'image':image.as_posix(), 'label':label.upper(), 'sha256':digest}
+                if digest in conflicts: continue
+                if digest in candidates and candidates[digest]['label'] != item['label']:
+                    candidates.pop(digest); conflicts.add(digest)
+                else: candidates[digest] = item
+        train.extend(candidates.values())
+    if not train: raise ValueError('training_images_required')
+    return train, validation
+
+
+def case_metric_fix(source):
+    file = Path(source) / 'ppocr/metrics/rec_metric.py'
+    text = file.read_text(encoding='utf-8')
+    if 'self.ignore_case = ' not in text:
+        constructor = '        self.ignore_space = ignore_space'
+        comparison = '            norm_edit_dis += Levenshtein.normalized_distance(pred, target)'
+        if constructor not in text or comparison not in text: raise ValueError('unsupported_upstream_rec_metric')
+        text = text.replace(constructor, constructor + '\n        self.ignore_case = kwargs.get("ignore_case", False)', 1)
+        text = text.replace(comparison, '            if self.ignore_case:\n                pred, target = pred.casefold(), target.casefold()\n' + comparison, 1)
+        file.write_text(text, encoding='utf-8')
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def windows_loader_fix(source):
@@ -60,9 +96,9 @@ def evaluation_metrics(log):
     return {key: float(value) for key, value in values.items()}
 
 
-def prepare(dataset, source, pretrained, out, epochs):
+def prepare(dataset, source, pretrained, out, epochs, pseudo_labels=None):
     import yaml
-    train, validation = confirmed_samples(dataset)
+    train, validation = confirmed_samples(dataset, pseudo_labels)
     if not 1 <= epochs <= 100:
         raise ValueError('epochs_must_be_1_to_100')
     source, pretrained, out = [Path(value).resolve() for value in (source, pretrained, out)]
@@ -78,7 +114,7 @@ def prepare(dataset, source, pretrained, out, epochs):
         eval_batch_step=[0, 1], print_batch_step=1, log_smooth_window=1,
         character_dict_path=(source / config['Global']['character_dict_path']).as_posix())
     config['Optimizer']['lr'].update(learning_rate=0.00001, warmup_epoch=0)
-    config['Metric'].update(is_filter=False, ignore_space=False)
+    config['Metric'].update(is_filter=False, ignore_space=False, ignore_case=True)
     # Keep the pretrained dictionary and head shapes, including upper/lower case.
     template = copy.deepcopy(config['Eval']['dataset'])
     for mode, name in [('Train', 'train'), ('Eval', 'validation')]:
@@ -89,10 +125,11 @@ def prepare(dataset, source, pretrained, out, epochs):
     config_file = out / 'config.yml'
     config_file.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding='utf-8')
     report = {'train_images': len(train), 'validation_images': len(validation), 'epochs': epochs,
-        'experimental_only': True, 'case_sensitive': True,
+        'experimental_only': True, 'case_sensitive': False, 'training_target_case': 'upper',
         'pretrained_sha256': hashlib.sha256(pretrained.read_bytes()).hexdigest(),
         'source_commit': subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()}
     report['training_program_sha256'] = windows_loader_fix(source)
+    report['training_metric_sha256'] = case_metric_fix(source)
     (out / 'summary.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     return config_file, report
 
@@ -102,8 +139,9 @@ def main():
     for name in ['dataset', 'source', 'pretrained', 'out']:
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--pseudo-labels', help='optional API candidate CSV; never used as validation truth')
     args = parser.parse_args()
-    config, report = prepare(args.dataset, args.source, args.pretrained, args.out, args.epochs)
+    config, report = prepare(args.dataset, args.source, args.pretrained, args.out, args.epochs, args.pseudo_labels)
     out, source = Path(args.out).resolve(), Path(args.source).resolve()
     env = dict(os.environ, OMP_NUM_THREADS='2', MKL_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2',
                CUDA_VISIBLE_DEVICES='', FLAGS_paddle_num_threads='2', PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK='True',

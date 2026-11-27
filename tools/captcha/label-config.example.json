@@ -1,0 +1,25 @@
+{
+  "accounts": [
+    {
+      "id": "yes-account-1",
+      "base_url": "https://api.yescaptcha.com",
+      "key_envs": ["YESCAPTCHA_DATASET_KEY_1"],
+      "budget_points": 800,
+      "role": "primary",
+      "concurrency": 1
+    },
+    {
+      "id": "yes-account-2",
+      "base_url": "https://api.yescaptcha.com",
+      "key_envs": ["YESCAPTCHA_DATASET_KEY_2"],
+      "budget_points": 200,
+      "role": "review",
+      "concurrency": 1
+    }
+  ],
+  "pilot": {
+    "review_count": 50,
+    "validation_count": 30,
+    "test_count": 20
+  }
+}
