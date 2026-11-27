@@ -4,10 +4,28 @@ from pathlib import Path
 import tempfile
 import unittest
 from PIL import Image
-from train_local import confirmed_samples, evaluation_metrics, windows_loader_fix, case_metric_fix
+from train_local import (confirmed_samples, explicit_splits, evaluation_metrics,
+                         windows_loader_fix, case_metric_fix)
 
 
 class DatasetTests(unittest.TestCase):
+    def test_explicit_splits_preserve_groups_and_reject_overlap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); rows = []
+            for i in range(3):
+                image = root / f'{i}.png'; Image.new('RGB', (160, 70), (i * 40, 0, 0)).save(image)
+                rows.append({'file': image.name, 'label': 'aB3D', 'label_verified': 'true',
+                    'sha256': hashlib.sha256(image.read_bytes()).hexdigest(), 'status': 'accepted'})
+            for name, row in zip(('train.csv', 'validation.csv', 'test.csv'), rows):
+                with (root / name).open('w', newline='', encoding='utf-8') as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(row)); writer.writeheader(); writer.writerow(row)
+            groups = explicit_splits(root, 'train.csv', 'validation.csv', 'test.csv')
+            self.assertEqual([group[0]['label'] for group in groups], ['AB3D'] * 3)
+            with (root / 'test.csv').open('w', newline='', encoding='utf-8') as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0])); writer.writeheader(); writer.writerow(rows[0])
+            with self.assertRaisesRegex(ValueError, 'split_hash_overlap'):
+                explicit_splits(root, 'train.csv', 'validation.csv', 'test.csv')
+
     def test_empty_evaluation_is_not_a_valid_baseline(self):
         with self.assertRaisesRegex(ValueError, 'processed_no_images'):
             evaluation_metrics('INFO: acc:0.0\nINFO: fps:0')
