@@ -34,6 +34,7 @@ type registerRequest struct {
 	Platform           string             `json:"platform"`
 	RegistrationMethod string             `json:"registrationMethod,omitempty"`
 	BrowserMode        string             `json:"browserMode,omitempty"`
+	PageLocale         string             `json:"pageLocale,omitempty"`
 	Activation         string             `json:"activation"`
 	ExpiresAt          time.Time          `json:"expiresAt"`
 	AcceptTerms        bool               `json:"acceptTerms"`
@@ -484,6 +485,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		"registration_method": method,
 		"registrationMethod":  method,
 		"browser_mode":        body.BrowserMode,
+		"page_locale":         body.PageLocale,
 		"family":              body.Family,
 		"handoff":             "dashboard", "panel_bridge": map[string]string{"url": s.URL() + "/api/register/" + id + "/handoff", "token": s.token},
 		"email_code_file": filepath.Join(folder, "email-code.txt"), "captcha_solver": body.CaptchaProvider,

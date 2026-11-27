@@ -110,7 +110,7 @@ class LocalBrowserTests(unittest.TestCase):
                 self.job.replace_email()
         buy.assert_not_called()
     def test_local_browser_uses_existing_executor_without_forge(self):
-        self.job.cfg.update(browser_mode="local", egress_mode="local", local_browser_proxy="http://127.0.0.1:7897", captcha_solver="manual")
+        self.job.cfg.update(browser_mode="local", egress_mode="local", local_browser_proxy="http://127.0.0.1:7897", captcha_solver="manual", page_locale="en-US")
         self.job.cfg["roxy"] = {}
         p.validate(self.job.cfg)
         with patch.object(self.job, "forge", side_effect=AssertionError("local called Forge")), patch.object(self.job, "process", return_value=(0, {})) as process:
@@ -118,6 +118,7 @@ class LocalBrowserTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in process.call_args_list], [["node", "tools/capture/create-account.cjs"]])
         inp = p.read(self.root / "create-input.json")
         self.assertTrue(inp["native-browser"])
+        self.assertEqual(inp["page-locale"],"en-US")
         self.assertTrue(inp["headed"])
         self.assertNotIn("cdp-port", inp)
         self.assertNotIn("captcha-cmd", inp)

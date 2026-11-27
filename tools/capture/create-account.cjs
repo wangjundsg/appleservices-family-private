@@ -174,6 +174,7 @@ const egressIP = String(arg("egress-ip", ""));
 const cdpPort = String(arg("cdp-port", ""));
 const attachMode = Boolean(cdpPort);
 const nativeMode = flagOn("native-browser");
+const pageLocale = String(arg("page-locale", ""));
 const browserCheck = flagOn("browser-check");
 
 const log = [];
@@ -1116,6 +1117,7 @@ async function clickContinue(page, frame, tag = "") {
   // already froze is validated here, so a stale or edited file fails fast
   // instead of driving one account under two different identities.
   if ((nativeMode && attachMode) || (browserCheck && !nativeMode)) throw new Error("native_browser_mode_invalid");
+  if (pageLocale && (!nativeMode || !["en-US", "zh-CN"].includes(pageLocale))) throw new Error("native_page_locale_invalid");
   if (!browserCheck) await captureSMSBaseline();
   const frozen = attachMode || nativeMode ? null : loadProfile();
   const profile = frozen ? frozen.profile : null;
@@ -1250,7 +1252,7 @@ async function clickContinue(page, frame, tag = "") {
       screen: observed ? observed.screen : "",
     });
   } else if (nativeMode) {
-    context = await browser.newContext({viewport: null});
+    context = await browser.newContext({viewport: null, ...(pageLocale ? {locale: pageLocale} : {})});
     page = await context.newPage();
     note("step", {at: "browser-started", mode: "local"});
   } else {
@@ -1465,7 +1467,8 @@ async function clickContinue(page, frame, tag = "") {
     finally {if (styleHandle) await styleHandle.evaluate((el) => el.remove()).catch(() => {});}
   };
 
-  await page.goto("https://account.apple.com/account", { waitUntil: "domcontentloaded", timeout: 90000 });
+  const signupURL = "https://account.apple.com/account" + (pageLocale ? "?localang=" + pageLocale.replace("-", "_") : "");
+  await page.goto(signupURL, { waitUntil: "domcontentloaded", timeout: 90000 });
   // A residential exit can take 20-40s to hand over the widget iframe.
   await page.waitForSelector('iframe[src*="widget/account"]', { timeout: 90000 }).catch(() => {});
   let frame = null;
@@ -1474,6 +1477,11 @@ async function clickContinue(page, frame, tag = "") {
     if (!frame) await sleep(2000);
   }
   if (!frame) throw new Error("widget frame missing");
+  if (pageLocale) {
+    const language = await frame.locator("html").getAttribute("lang");
+    note("step", {at: "page-locale", requested: pageLocale, observed: language});
+    if (!String(language || "").toLowerCase().startsWith(pageLocale.slice(0, 2))) throw new Error("page_locale_mismatch");
+  }
   note("step", { at: "form" });
 
   // A rejected submission returns to the same form, so every retry fills it

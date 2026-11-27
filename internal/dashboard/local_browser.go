@@ -19,6 +19,9 @@ func validLocalBrowserProxy(value string) bool {
 }
 
 func validateBrowserSelection(body registerRequest) error {
+	if body.PageLocale != "" && (body.BrowserMode != "local" || (body.PageLocale != "en-US" && body.PageLocale != "zh-CN")) {
+		return errors.New("本机页面语言仅支持 en-US 或 zh-CN")
+	}
 	if body.BrowserMode != "" && body.BrowserMode != "forge" && body.BrowserMode != "local" {
 		return errors.New("请选择本机 Chrome 或 Forge 指纹浏览器")
 	}

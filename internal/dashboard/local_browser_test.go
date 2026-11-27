@@ -48,6 +48,20 @@ func TestLocalBrowserSelectionIndependentOfForge(t *testing.T) {
 	}
 }
 
+func TestPageLocaleIsExplicitAndLocalOnly(t *testing.T) {
+	for _, locale := range []string{"", "en-US", "zh-CN", "invalid"} {
+		body := registerRequest{BrowserMode: "local", PageLocale: locale, CaptchaProvider: "manual"}
+		body.Egress.Mode = "local"
+		if (validateBrowserSelection(body) == nil) != (locale != "invalid") {
+			t.Fatalf("unexpected locale validation: %s", locale)
+		}
+		body.BrowserMode, body.Egress.Mode = "forge", "roxy"
+		if locale != "" && validateBrowserSelection(body) == nil {
+			t.Fatal("local page language changed Forge configuration")
+		}
+	}
+}
+
 func TestLocalBrowserProxyRejectsCredentialsAndExternalHosts(t *testing.T) {
 	for _, value := range []string{"http://127.0.0.1:7897", "socks5://[::1]:1080", "https://localhost:443"} {
 		if !validLocalBrowserProxy(value) {
@@ -104,10 +118,10 @@ func TestLocalTaskLaunchUsesExistingPipelineAndFreezesMode(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(script, []byte("import sys,pathlib,json\np=pathlib.Path(sys.argv[3])\nc=json.loads(p.read_text())\nassert c['browser_mode']=='local' and c['roxy']=={} and c['handoff']=='dashboard' and c['captcha_solver']=='"+expected+"'\n(p.parent/'result.json').write_text(json.dumps({'stage':'create','status':'failed'}))\n"), 0600); err != nil {
+			if err := os.WriteFile(script, []byte("import sys,pathlib,json\np=pathlib.Path(sys.argv[3])\nc=json.loads(p.read_text())\nassert c['browser_mode']=='local' and c['roxy']=={} and c['handoff']=='dashboard' and c['page_locale']=='en-US' and c['captcha_solver']=='"+expected+"'\n(p.parent/'result.json').write_text(json.dumps({'stage':'create','status':'failed'}))\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			body := registerRequest{BrowserMode: "local", Email: "owner@example.test", Password: "Fixture-only123!", Phone: "7700900123", PhoneCC: "GB", Platform: "grizzly", Activation: "fixture-number", ExpiresAt: time.Now().Add(time.Minute * 10), AcceptTerms: true, CaptchaProvider: "manual"}
+			body := registerRequest{BrowserMode: "local", PageLocale: "en-US", Email: "owner@example.test", Password: "Fixture-only123!", Phone: "7700900123", PhoneCC: "GB", Platform: "grizzly", Activation: "fixture-number", ExpiresAt: time.Now().Add(time.Minute * 10), AcceptTerms: true, CaptchaProvider: "manual"}
 			body.Egress.Mode = "local"
 			body.CaptchaProvider = provider
 			data, _ := json.Marshal(body)

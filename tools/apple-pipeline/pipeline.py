@@ -661,6 +661,8 @@ class Job:
             atomic(self.folder / "browser.json", {"dirId": resource["dirId"]})
         try:
             browser_input = {"native-browser": True, "headed": True, "proxy": local_proxy}
+            if local_proxy is not None and self.cfg.get("page_locale"):
+                browser_input["page-locale"] = self.cfg["page_locale"]
             if local_proxy is None:
                 opened = self.forge("open", dirId=resource["dirId"], args=[
                     "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
