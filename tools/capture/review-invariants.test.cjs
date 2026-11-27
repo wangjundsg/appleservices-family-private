@@ -17,6 +17,25 @@ const { test } = require("node:test");
 const dir = __dirname;
 const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
 
+test("native retry verifies unchanged fields without repeating the initial hydration sleeps",async()=>{
+  const source=read('create-account.cjs'),start=source.indexOf('  const fillForm = async (');
+  const block=source.slice(start,source.indexOf('\n  };',start)+5),waits=[],checked=[];
+  let changed=false;
+  const deps={noAutofill:async()=>{},nativeMode:true,selectIfNeeded:async()=>({selected:changed}),
+    fillIfNeeded:async()=>({typed:changed}),arg:(_name,fallback)=>fallback,note:()=>{},
+    sleep:async ms=>waits.push(ms),ensureField:async(_frame,_selector,_value,label)=>checked.push(label),
+    firstName:'Fixture',lastName:'Example',birthYear:'1992',birthMonth:'04',birthDay:'19',
+    email:'fixture@example.invalid',password:'fixture',phone:'912345678',phoneCC:'PT',submissionMayHaveLanded:false};
+  const fill=new Function(...Object.keys(deps),block+';return fillForm;')(...Object.values(deps));
+  const frame={locator:()=>({inputValue:async()=>'USA'}),$eval:async()=>'PT'};
+  await fill(frame,true);
+  assert.deepEqual(waits,[]);assert.equal(checked.length,9);
+  checked.length=0;await fill(frame,false);
+  assert.deepEqual(waits,[7000,1200]);assert.equal(checked.length,9);
+  waits.length=0;changed=true;await fill(frame,true);
+  assert.deepEqual(waits,[7000,1200],'a changed dialing code or phone still needs stabilization');
+});
+
 test("evidence capture masks inputs with a neutral color, including exception captures",async()=>{
   const source=read('create-account.cjs');
   const start=source.indexOf('async function captureEvidence('),end=source.indexOf('\n}',start)+2;
@@ -42,7 +61,7 @@ test("native field helpers use blur without tabbing to an adjacent control", asy
 });
 
 test("native birthday completes year before month and day, without touching email",async()=>{
-  const source=read("create-account.cjs"),start=source.indexOf("  const fillForm = async (fr) => {");
+  const source=read("create-account.cjs"),start=source.indexOf("  const fillForm = async (");
   const body=source.slice(start,source.indexOf("\n  };",start)+5),calls=[];
   const fillForm=new Function("noAutofill","nativeMode","selectIfNeeded","arg","fillIfNeeded","firstName","lastName","birthYear","birthMonth","birthDay",body+";return fillForm;")(
     async()=>{},true,async(_l,_v,label)=>{calls.push(label);if(label==="birth_day")throw Error("birthday-complete");},
@@ -53,7 +72,7 @@ test("native birthday completes year before month and day, without touching emai
 
 test("native country failure stops before writing either name", async () => {
   const source=read("create-account.cjs");
-  const start=source.indexOf("  const fillForm = async (fr) => {");
+  const start=source.indexOf("  const fillForm = async (");
   const body=source.slice(start,source.indexOf("\n  };",start)+5);
   const calls=[];
   const fillForm=new Function("noAutofill","nativeMode","selectIfNeeded","arg","fillIfNeeded",body+";return fillForm;")(

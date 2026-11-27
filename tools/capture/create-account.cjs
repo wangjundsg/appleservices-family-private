@@ -1331,16 +1331,26 @@ async function clickContinue(page, frame, tag = "") {
   // identifier and the captcha verdict. Only status, path and an Apple error
   // code are kept now.
   let creationFailure = null;
+  // A corrected validation supersedes that endpoint's old error, never a final creation failure.
+  let validationFailure = null;
+  let validationVersion = 0;
+  let requestVersion = 0;
+  const creationRequests = new WeakMap();
   const creationResponses = [];
   async function checkCreationFailure() {
     await Promise.all(creationResponses);
-    if (!creationFailure) return;
-    const err = new Error(`creation_rejected:${creationFailure.path}:${creationFailure.status}:${creationFailure.error_code}`);
+    const failure=creationFailure || validationFailure;
+    if (!failure) return;
+    const err = new Error(`creation_rejected:${failure.path}:${failure.status}:${failure.error_code}`);
     err.state = "unknown";
     err.closeReason = "creation-rejected";
     throw err;
   }
-  page.on("request",req=>{if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);});
+  page.on("request",req=>{
+    if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);
+    if(req.method()==="POST" && ["/account","/account/validate"].includes(new URL(req.url()).pathname))
+      creationRequests.set(req,++requestVersion);
+  });
   page.on("requestfinished",req=>pendingCaptchaRequests.delete(req));
   page.on("requestfailed",req=>{if(pendingCaptchaRequests.delete(req))captchaResponseStatus=599;});
   page.on("response", (res) => {
@@ -1354,7 +1364,17 @@ async function clickContinue(page, frame, tag = "") {
       let body = "";
       try { body = await res.text(); } catch {}
       const summary = flow.summarizeHTTP({ url: u, status: res.status(), body });
-      if (flow.creationRejected({ method, ...summary })) creationFailure = summary;
+      const rejected=flow.creationRejected({ method, ...summary });
+      if(creation && path==="/account" && rejected)creationFailure=summary;
+      if(creation && path==="/account/validate") {
+        // Response bodies can finish out of order; use the initiating request's version.
+        const version=creationRequests.get(res.request()) || 0;
+        if(version>=validationVersion) {
+          validationVersion=version;
+          if(rejected)validationFailure=summary;
+          else if(summary.status>=200 && summary.status<300)validationFailure=null;
+        }
+      }
       note("http", summary);
     })();
     if (creation) creationResponses.push(response);
@@ -1449,7 +1469,7 @@ async function clickContinue(page, frame, tag = "") {
       }
     }).catch(() => {});
   };
-  const fillForm = async (fr) => {
+  const fillForm = async (fr, recheck = false) => {
     await noAutofill(fr);
     // Country changes may rebuild other fields; settle it before typing names.
     if (nativeMode) await selectIfNeeded(fr.locator('select[name="countrySelect"]'), String(arg("country", "USA")), "country");
@@ -1476,18 +1496,18 @@ async function clickContinue(page, frame, tag = "") {
     await fillIfNeeded(fr.locator('input[name="appleId"]'), email, "apple_id");
     await fillIfNeeded(fr.locator('input[name="password"]'), password, "password");
     await fillIfNeeded(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
-    await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
+    const dialChange=await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
     // The widget hydrates ~4-6s later and silently resets the dial code to US;
     // the number then validates as +1 and the form never submits. Wait it out and
     // re-assert our choice (run-20261113d 2.1). The re-assert is a read-first
     // select too, so a widget that kept the value is simply left alone.
-    await sleep(7000);
+    if(!nativeMode || !recheck || dialChange?.selected)await sleep(7000);
     await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
-    await fillIfNeeded(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
+    const phoneChange=await fillIfNeeded(fr.locator('input[name="phoneNumber"]'), phone, "phone_number");
     // The same hydration pass is what let autofill rewrite the address, so the
     // four value-bearing fields are asserted again after it, right before the
     // captcha is solved and the button is pressed.
-    await sleep(1200);
+    if(!nativeMode || !recheck || phoneChange?.typed)await sleep(1200);
     await ensureField(fr, 'input[name="appleId"]', email, "apple_id");
     await ensureField(fr, 'input[name="password"]', password, "password", { secret: true });
     await ensureField(fr, 'input[name="confirmPassword"]', password, "confirm_password", { secret: true });
@@ -1528,7 +1548,7 @@ async function clickContinue(page, frame, tag = "") {
   for (let attempt = 1; attempt <= 4 && !submitted; attempt += 1) {
     const fr = await widgetFrame(page);
     if (!fr) break;
-    await fillForm(fr);
+    await fillForm(fr, nativeMode && attempt>1);
     let answer = "";
     if (nativeMode) {
       const result = await nativeCaptchaAnswer(page,fr,`create-${attempt}`);
