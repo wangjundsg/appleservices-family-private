@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from label_dataset import Queue, DatasetLock
+from label_dataset import Queue, DatasetLock, load_config
 
 
 class QueueTests(unittest.TestCase):
@@ -35,6 +35,16 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(all(row['label']=='aB3D' and row['label_verified']=='false' for row in rows))
         self.queue.worker(self.account,'TEST_KEY','secret',api,lambda _:None)
         self.assertEqual(len(creates),3)
+
+    def test_config_allows_five_workers_but_not_six(self):
+        config = self.root / 'label-config.json'
+        account = {'id':'first','base_url':'https://api.yescaptcha.com','key_envs':['TEST_KEY'],
+                   'budget_points':4,'role':'primary','concurrency':5}
+        config.write_text(json.dumps({'accounts':[account]}))
+        self.assertEqual(load_config(config)[0]['concurrency'],5)
+        account['concurrency']=6
+        config.write_text(json.dumps({'accounts':[account]}))
+        with self.assertRaisesRegex(ValueError,'concurrency_invalid'): load_config(config)
 
     def test_poll_resume_never_creates_again(self):
         job=self.queue.claim(self.account,'TEST_KEY','secret')

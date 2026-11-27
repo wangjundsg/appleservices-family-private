@@ -27,7 +27,7 @@ def load_config(path):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name) or name in ids: raise ValueError('account_id_invalid')
         if account['base_url'] not in HOSTS: raise ValueError('unsupported_api_endpoint')
         if type(account['budget_points']) is not int or account['budget_points'] < 0: raise ValueError('budget_invalid')
-        if type(account['concurrency']) is not int or not 1 <= account['concurrency'] <= 3: raise ValueError('concurrency_invalid')
+        if type(account['concurrency']) is not int or not 1 <= account['concurrency'] <= 5: raise ValueError('concurrency_invalid')
         if not keys or any(not re.fullmatch(r'[A-Z][A-Z0-9_]*', key) or key in envs for key in keys): raise ValueError('key_env_invalid_or_reused')
         if len(set(keys)) != len(keys): raise ValueError('duplicate_key_env')
         if len(keys) > account['concurrency']: raise ValueError('key_count_exceeds_account_concurrency')
