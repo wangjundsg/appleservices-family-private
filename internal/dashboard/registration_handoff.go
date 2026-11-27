@@ -161,10 +161,11 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		if prior, exists := receipts[body.Action]; exists {
 			if prior.State == "succeeded" && prior.Digest == intent.Digest {
 				json.NewEncoder(w).Encode(prior.Result)
-			} else {
+				return
+			} else if body.Action != "start" || prior.State != "not_started" || prior.Digest != intent.Digest {
 				json.NewEncoder(w).Encode(map[string]any{"ok": false, "state": "unknown"})
+				return
 			}
-			return
 		}
 		receipts[body.Action] = intent
 		if writeRegisterJSON(receiptFile, receipts) != nil {
@@ -223,16 +224,36 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		}
 		if !result.OK {
 			value["state"] = "unknown"
+			// Only pre-login failures prove that retrying start cannot repeat a login.
+			if body.Action == "start" && startPreflightStage(result.Stage) {
+				value["state"] = "not_started"
+				value["reason"] = "panel_start_preflight_failed"
+				value["stage"] = result.Stage
+			}
 		}
 	}
-	if mutating && value["ok"] == true {
+	if mutating && (value["ok"] == true || value["state"] == "not_started") {
 		intent.State, intent.Result = "succeeded", value
+		if value["state"] == "not_started" {
+			intent.State = "not_started"
+		}
 		receipts[body.Action] = intent
 		if writeRegisterJSON(receiptFile, receipts) != nil {
 			value = map[string]any{"ok": false, "state": "unknown"}
 		}
 	}
 	json.NewEncoder(w).Encode(value)
+}
+
+func startPreflightStage(stage string) bool {
+	for _, prefix := range []string{"native-route-", "gsa-route-", "verification-route-", "nac-worker-route-", "nac-session-route-", "aps-route-", "mac-aps-direct-"} {
+		for _, phase := range []string{"connect", "tls", "http", "config"} {
+			if stage == prefix+phase {
+				return true
+			}
+		}
+	}
+	return stage == "native-proxy" || stage == "native-library" || stage == "native-runtime"
 }
 
 func workerRateLimited(dir string) bool {

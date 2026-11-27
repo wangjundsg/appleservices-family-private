@@ -275,6 +275,28 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(p.PipelineError):self.job.panel_once("activate",terms="v2")
             self.assertEqual(call.call_count,1)
 
+    def test_handoff_preflight_failure_records_safe_retry(self):
+        failure = {"ok":False,"state":"not_started","stage":"native-route-tls"}
+        with patch.object(self.job,"panel_call",return_value=failure):
+            with self.assertRaisesRegex(p.PipelineError,"panel_start_preflight_failed"):
+                self.job.panel_once("start")
+        self.assertEqual(self.job.status["operations"]["start"]["state"],"not_started")
+        self.assertEqual(self.job.status["start_failure_stage"],"native-route-tls")
+        with patch.object(self.job,"panel_call",return_value={"ok":True}) as call:
+            self.job.panel_once("start")
+            self.job.panel_once("start")
+        call.assert_called_once()
+
+    def test_handoff_preflight_resume_never_registers_again(self):
+        self.job.cfg["handoff"]="dashboard"
+        self.job.update(stage="login",status="needs_review",account_created=True,
+                        reason="panel_start_preflight_failed",operations={"start":{"state":"not_started"}})
+        def complete(): self.job.update(status="ready")
+        with patch.object(self.job,"dashboard_handoff",side_effect=complete) as handoff, patch.object(self.job,"create") as create:
+            self.job.run(resume=True)
+        handoff.assert_called_once()
+        create.assert_not_called()
+
     def test_dashboard_unknown_registration_does_not_start_another_login(self):
         self.job.cfg["handoff"]="dashboard"
         with patch.object(self.job,"create",side_effect=p.PipelineError("transport_result_unknown")), \

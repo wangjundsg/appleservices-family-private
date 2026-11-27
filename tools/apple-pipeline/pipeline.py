@@ -798,6 +798,10 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("stage") == "login"
+                    and self.status.get("account_created") and self.status.get("reason") == "panel_start_preflight_failed"
+                    and self.status.get("operations", {}).get("start", {}).get("state") == "not_started"):
+                self.update(status="queued", reason="panel_start_retry_requested")
             if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("stage") == "subscription"
                     and self.status.get("reason") == "subscription_payment_required" and self.status.get("account_created")):
                 self.check_cancel()
@@ -946,10 +950,16 @@ class Job:
         digest=hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest()
         if key in operations:
             if operations[key].get("state") == "succeeded" and operations[key].get("intent_hash")==digest: return operations[key]["result"]
-            raise PipelineError("panel_handoff_requires_readback", "needs_review")
+            if not (action == "start" and operations[key].get("state") == "not_started"
+                    and operations[key].get("intent_hash") == digest):
+                raise PipelineError("panel_handoff_requires_readback", "needs_review")
         operations[key] = {"state":"intent", "started_at":iso(), "intent_hash":digest}
         self.update(operations=operations)
         reply = self.panel_call(action, **body)
+        if action == "start" and reply.get("state") == "not_started" and reply.get("ok") is False:
+            operations[key].update(state="not_started", result=reply)
+            self.update(operations=operations, start_failure_stage=reply.get("stage"))
+            raise PipelineError("panel_start_preflight_failed", "needs_review")
         if reply.get("ok") is not True: raise PipelineError("panel_handoff_requires_readback", "needs_review")
         operations[key].update(state="succeeded", result=reply)
         self.update(operations=operations)
