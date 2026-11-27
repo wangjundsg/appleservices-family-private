@@ -8,7 +8,7 @@ from ocr import read_local, valid_text
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("manifest")
-    parser.add_argument("--engine",choices=["ddddocr","consensus","paddle"],default="consensus")
+    parser.add_argument("--engine",choices=["ddddocr","consensus","paddle","paddle-v6"],default="paddle-v6")
     args=parser.parse_args()
     entries=json.loads(Path(args.manifest).read_text(encoding="utf-8-sig"))
     if not isinstance(entries,list) or not entries or any(not valid_text(item.get("expected")) for item in entries):

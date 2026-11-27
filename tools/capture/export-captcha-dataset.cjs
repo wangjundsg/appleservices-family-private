@@ -2,6 +2,7 @@
 // into one folder with a label file, so they can be used for model work.
 //
 // What it pairs:
+//   captcha-sample-*.png <-> captcha-sample-*.json (source digest checked)
 //   captcha-attempt-N.png  <->  captcha-attempt-N.txt   (JSON: {attempt, answer, error, at})
 //   captcha-answer.txt     <->  the newest captcha*.png in the same folder
 //
@@ -10,10 +11,10 @@
 //
 // Output:
 //   <out>/images/<sha12>.png
-//   <out>/labels.csv     columns: file,label,verdict,attempt,source_dir
+//   <out>/labels.csv     includes label_verified=false and pairing provenance
 //
-// "verdict" is accepted / rejected / unknown, inferred from the saved page text:
-// a rejection keeps the challenge on screen, an acceptance moves past it.
+// Legacy answers are candidates, not ground truth. Neither a post-submit
+// screenshot nor the newest adjacent image proves an answer/image pairing.
 
 "use strict";
 
@@ -48,13 +49,9 @@ function sha12(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex").slice(0, 12);
 }
 
-// A rejection leaves the challenge (and its error text) on the page; an
-// acceptance is followed by a screen that no longer mentions the characters.
-const REJECT_HINT = /characters in the image|type the characters|captcha|verify/i;
-
 function verdictFrom(errorText) {
-  if (!errorText) return "unknown";
-  return REJECT_HINT.test(errorText) ? "rejected" : "accepted";
+  // Absence of an English error keyword is not proof of acceptance.
+  return "unknown";
 }
 
 function labelOf(raw) {
@@ -73,17 +70,28 @@ function main() {
   const rows = [];
   const seen = new Set();
 
-  const add = (image, answer, verdict, attempt, dir) => {
-    const label = String(answer || "").replace(/[^0-9A-Za-z]/g, "");
-    if (label.length < 3 || label.length > 8) return;
+  const add = (image, answer, verdict, attempt, pairing="unverified") => {
+    const label = String(answer || "");
+    if (!/^[A-Za-z0-9]{4,6}$/.test(label)) return;
     if (!fs.existsSync(image)) return;
     const digest = sha12(image);
     if (seen.has(digest)) return;
     seen.add(digest);
     fs.mkdirSync(path.join(OUT, "images"), { recursive: true });
     fs.copyFileSync(image, path.join(OUT, "images", `${digest}.png`));
-    rows.push({ file: `images/${digest}.png`, label, verdict, attempt, source_dir: path.dirname(image) });
+    rows.push({ file: `images/${digest}.png`, label, verdict, attempt, source_dir: path.dirname(image), pairing });
   };
+
+  // New native samples retain the exact source bytes before any submission.
+  for(const file of files) {
+    if(!/^captcha-sample-[a-f0-9-]+\.json$/i.test(path.basename(file)))continue;
+    try {
+      const data=JSON.parse(fs.readFileSync(file,'utf8')),image=file.replace(/\.json$/i,'.png');
+      if(data.pairing!=='source_before_submit' || data.label_verified!==false)continue;
+      if(crypto.createHash('sha256').update(fs.readFileSync(image)).digest('hex')!==data.image_sha256)continue;
+      add(image,data.answer,'unknown','',data.pairing);
+    } catch {}
+  }
 
   // 1) attempt files: image and answer share a basename
   for (const file of files) {
@@ -91,7 +99,7 @@ function main() {
     if (!/^captcha-attempt-\d+\.txt$/i.test(base)) continue;
     const image = path.join(path.dirname(file), base.replace(/\.txt$/i, ".png"));
     const { answer, error, attempt } = labelOf(fs.readFileSync(file, "utf8"));
-    add(image, answer, verdictFrom(error), attempt, path.dirname(file));
+    add(image, answer, verdictFrom(error), attempt);
   }
 
   // 2) a bare captcha-answer.txt pairs with the newest challenge image beside it
@@ -102,7 +110,7 @@ function main() {
     if (!local.length) continue;
     local.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
     const { answer } = labelOf(fs.readFileSync(file, "utf8"));
-    add(local[0], answer, "unknown", "", dir);
+    add(local[0], answer, "unknown", "");
   }
 
   if (!rows.length) {
@@ -110,9 +118,9 @@ function main() {
     return 1;
   }
 
-  const header = "file,label,verdict,attempt,source_dir\n";
+  const header = "file,label,verdict,attempt,source_dir,label_verified,pairing\n";
   const body = rows
-    .map((r) => [r.file, r.label, r.verdict, r.attempt, `"${r.source_dir}"`].join(","))
+    .map((r) => [r.file, r.label, r.verdict, r.attempt, `"${r.source_dir}"`, "false", r.pairing].join(","))
     .join("\n");
   fs.writeFileSync(path.join(OUT, "labels.csv"), header + body + "\n", "utf8");
 
@@ -124,4 +132,5 @@ function main() {
   return 0;
 }
 
-process.exit(main());
+if(require.main===module)process.exit(main());
+module.exports={verdictFrom};

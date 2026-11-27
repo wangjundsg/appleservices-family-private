@@ -18,6 +18,21 @@ const { test } = require("node:test");
 
 const mech = require("./flow-mechanics.cjs");
 
+test("screen readiness returns promptly and tolerates transient missing frames",async()=>{
+  let now=0;const states=[null,{stage:'email'},null,{stage:'email'},{stage:'email'}];
+  const result=await mech.waitForScreen({observe:async()=>states.shift(),ready:s=>s?.stage,
+    now:()=>now,sleep:async ms=>{now+=ms;},timeoutMs:45000});
+  assert.equal(result.stage,'email');assert.equal(now,800);
+});
+test("screen readiness waits for a slow transition and respects the resource deadline",async()=>{
+  let now=0;
+  const options={observe:async()=>now>=12000?{stage:'phone'}:null,ready:s=>s?.stage,now:()=>now,sleep:async ms=>{now+=ms;}};
+  assert.equal((await mech.waitForScreen(options)).stage,'phone');assert.equal(now,12200);
+  now=0;
+  await assert.rejects(mech.waitForScreen({...options,deadline:550}),error=>error.evidence==='page_transition_timeout' && error.state==='unknown');
+  assert.equal(now,550);
+});
+
 // ---- fakes ----------------------------------------------------------------
 
 // fakeControl is a Playwright locator as far as these helpers are concerned:
@@ -277,6 +292,13 @@ test("B: a button that never becomes enabled is recorded, not re-clicked", async
   assert.ok(record, "no submit-disabled record");
   assert.equal(record.kind, "error");
   assert.equal(record.waited_ms, 10000, "the enabled wait was not the full 10s");
+});
+
+test("B: an unreadable enabled state is not permission to click",async()=>{
+  const button=fakeControl({text:'Continue',type:'submit'}),clock=fakeClock();
+  button.isEnabled=async()=>{throw Error('element detached');};
+  const result=await mech.clickSubmit(fakeFrame([button]),{sleep:clock.sleep,now:clock.now,waitEnabledMs:1000});
+  assert.equal(result.clicked,false);assert.equal(button.state.clicks,0);
 });
 
 test("B: no submit control at all is recorded as submit-not-found", async () => {

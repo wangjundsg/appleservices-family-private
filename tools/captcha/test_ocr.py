@@ -28,9 +28,31 @@ class OCRTests(unittest.TestCase):
             return Mock(classification=Mock(return_value={'text':text,'confidence':confidence}))
         for second in [model('AB3D',.99),model('Ab3D',.5)]:
             with patch.object(ocr,'reader',side_effect=[model('Ab3D',.99),second]):
-                self.assertEqual(ocr.read_local(self.image),'')
+                self.assertEqual(ocr.read_local(self.image,'consensus'),'')
         with patch.object(ocr,'reader',side_effect=[model('Ab3D',.99),model('Ab3D',.98)]):
-            self.assertEqual(ocr.read_local(self.image),'Ab3D')
+            self.assertEqual(ocr.read_local(self.image,'consensus'),'Ab3D')
+
+    def test_v6_preserves_case_and_rejects_uncertain_or_malformed_output(self):
+        for text,score,expected in [('aB3D',.99,'aB3D'),('aB3D',.97,''),('a B3D',.99,''),('aB3D',float('nan'),''),('aB3D',1.1,'')]:
+            result=Mock(json={'res':{'rec_text':text,'rec_score':score}})
+            with patch.object(ocr.importlib.util,'find_spec',return_value=True),patch.object(ocr,'paddle_reader',return_value=Mock(predict=Mock(return_value=[result]))):
+                self.assertEqual(ocr.read_local(self.image),expected)
+
+    def test_isolated_worker_keeps_stdout_strict_and_times_out(self):
+        for output,code,expected in [('aB3D',0,'aB3D'),('loading\naB3D',0,''),('aB3D',1,'')]:
+            def worker(command,**kwargs):
+                Path(command[-1]).write_text(output,encoding='utf-8')
+                return Mock(stdout='native diagnostic noise',returncode=code)
+            with patch.object(Path,'is_file',return_value=True),patch.object(ocr.subprocess,'run',side_effect=worker) as run:
+                self.assertEqual(ocr.paddle_worker(self.image,'paddle-v6',.98),expected)
+                self.assertEqual(run.call_args.kwargs['timeout'],17)
+        with patch.object(Path,'is_file',return_value=True),patch.object(ocr.subprocess,'run',side_effect=ocr.subprocess.TimeoutExpired('fixture',17)):
+            self.assertEqual(ocr.paddle_worker(self.image,'paddle-v6',.98),'')
+
+    def test_missing_model_never_starts_download(self):
+        ocr.paddle_reader.cache_clear()
+        with patch.object(Path,'is_file',return_value=False):
+            with self.assertRaises(FileNotFoundError):ocr.paddle_reader('paddle-v6')
 
     def test_empty_or_broken_images_do_not_reach_model(self):
         Image.new('RGB',(126,56),'white').save(self.image)

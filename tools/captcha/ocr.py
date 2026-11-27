@@ -5,6 +5,11 @@ from functools import lru_cache
 import io
 import re
 import sys
+import os
+import subprocess
+import tempfile
+import importlib.util
+from pathlib import Path
 from contextlib import redirect_stdout
 
 def valid_text(text):
@@ -36,22 +41,48 @@ def reader(beta):
     import ddddocr
     return ddddocr.DdddOcr(show_ad=False, beta=beta)
 
-@lru_cache(maxsize=1)
-def paddle_reader():
+@lru_cache(maxsize=2)
+def paddle_reader(engine):
+    name = "PP-OCRv6_small_rec" if engine == "paddle-v6" else "en_PP-OCRv5_mobile_rec"
+    model_dir = Path.home() / ".paddlex" / "official_models" / name
+    # Live runs must never install or download a model while holding a mailbox.
+    if not all((model_dir / file).is_file() for file in ("inference.json", "inference.pdiparams", "inference.yml")):
+        raise FileNotFoundError("local_model_missing")
+    os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
     from paddleocr import TextRecognition
-    return TextRecognition(model_name="en_PP-OCRv5_mobile_rec", device="cpu")
+    return TextRecognition(model_name=name, model_dir=str(model_dir), device="cpu")
 
-def read_local(path, engine="consensus", min_confidence=0.85):
+def paddle_worker(path, engine, min_confidence):
+    root = Path(__file__).resolve().parents[2]
+    executable = Path(sys.executable) if importlib.util.find_spec("paddleocr") is not None else root / ".tools" / "ocr-paddle" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not executable.is_file(): return ""
+    try:
+        # Native inference libraries also write to stdout, bypassing redirect_stdout.
+        with tempfile.TemporaryDirectory(prefix="local-ocr-") as directory:
+            output = Path(directory) / "answer.txt"
+            result = subprocess.run([str(executable), str(Path(__file__).resolve()), str(Path(path).resolve()),
+                                     "--engine", engine, "--min-confidence", str(min_confidence), "--result-file", str(output)],
+                                    capture_output=True, text=True, timeout=17,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            answer = output.read_text(encoding="utf-8").strip() if result.returncode == 0 else ""
+            return answer if valid_text(answer) else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+def read_local(path, engine="paddle-v6", min_confidence=None):
+    if min_confidence is None: min_confidence = 0.98 if engine == "paddle-v6" else 0.85
     # Model startup/download messages are diagnostics, never an OCR answer.
     with redirect_stdout(sys.stderr):
+        if engine in ("paddle", "paddle-v6") and importlib.util.find_spec("paddleocr") is None:
+            return paddle_worker(path, engine, min_confidence)
         return _read_local(path, engine, min_confidence)
 
-def _read_local(path, engine="consensus", min_confidence=0.85):
+def _read_local(path, engine, min_confidence):
     try:
         with open(path, "rb") as handle: raw = handle.read()
         if not image_usable(raw): return ""
-        if engine == "paddle":
-            model = paddle_reader()
+        if engine in ("paddle", "paddle-v6"):
+            model = paddle_reader(engine)
             results = list(model.predict(input=path, batch_size=1))
             if len(results) != 1: return ""
             item = results[0].json
@@ -60,7 +91,8 @@ def _read_local(path, engine="consensus", min_confidence=0.85):
                 item = json.loads(item)
             item = item.get("res", item)
             text, score = item.get("rec_text", ""), item.get("rec_score", 0)
-            return text if valid_text(text) and float(score) >= min_confidence else ""
+            return text if valid_text(text) and min_confidence <= float(score) <= 1 else ""
+        if engine not in ("consensus", "ddddocr"): return ""
         first, score = result_value(reader(True).classification(raw, probability=True))
         if not first or score < min_confidence: return ""
         if engine == "consensus":
@@ -73,10 +105,18 @@ def _read_local(path, engine="consensus", min_confidence=0.85):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("image")
-    parser.add_argument("--engine", choices=["consensus", "ddddocr", "paddle"], default="consensus")
+    parser.add_argument("--engine", choices=["consensus", "ddddocr", "paddle", "paddle-v6"], default="paddle-v6")
+    parser.add_argument("--min-confidence", type=float)
+    parser.add_argument("--result-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    answer = read_local(args.image, args.engine)
-    print(answer, end="")
+    confidence = args.min_confidence if args.min_confidence is not None else (0.98 if args.engine == "paddle-v6" else 0.85)
+    if args.result_file:
+        # Worker never launches another worker if its environment is incomplete.
+        with redirect_stdout(sys.stderr): answer = _read_local(args.image, args.engine, confidence)
+        Path(args.result_file).write_text(answer, encoding="utf-8")
+    else:
+        answer = paddle_worker(args.image, args.engine, confidence) if args.engine in ("paddle", "paddle-v6") else read_local(args.image, args.engine, confidence)
+        print(answer, end="")
     return 0 if answer else 1
 
 if __name__ == "__main__": raise SystemExit(main())

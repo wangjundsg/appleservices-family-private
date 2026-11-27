@@ -236,13 +236,13 @@ async function clickSubmit(
     return { clicked: false, reason: "submit-not-found" };
   }
   const button = found.locator;
-  let enabled = await button.isEnabled({ timeout: 2000 }).catch(() => true);
+  let enabled = await button.isEnabled({ timeout: 2000 }).catch(() => false);
   let waited = 0;
   const deadline = now() + waitEnabledMs;
   while (!enabled && now() < deadline) {
     await sleep(500);
     waited += 500;
-    enabled = await button.isEnabled({ timeout: 2000 }).catch(() => true);
+    enabled = await button.isEnabled({ timeout: 2000 }).catch(() => false);
   }
   if (!enabled) {
     log("error", { at: "submit-disabled", tag, text: clip(found.text, 60), waited_ms: waited, via: found.via });
@@ -483,6 +483,21 @@ async function settleInView(locator,{sleep=ms=>new Promise(r=>setTimeout(r,ms)),
   throw Object.assign(new Error("scroll_not_settled"),{state:"unknown",evidence:"scroll_not_settled"});
 }
 
+async function waitForScreen({observe,ready,timeoutMs=45000,deadline=Infinity,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
+  const end=Math.min(now()+timeoutMs,deadline);
+  let previous="",stable=0;
+  while(now()<end) {
+    const observation=await observe(),key=ready(observation)||"";
+    if(now()>=end)break;
+    stable=key && key===previous ? stable+1 : key?1:0;
+    if(stable>=2)return observation;
+    previous=key;
+    const remaining=end-now();
+    if(remaining>0)await sleep(Math.min(200,remaining));
+  }
+  throw Object.assign(new Error("page_transition_timeout"),{state:"unknown",evidence:"page_transition_timeout"});
+}
+
 module.exports = {
   CLOSE_REASONS,
   NOT_SUBMIT,
@@ -511,4 +526,5 @@ module.exports = {
   selectField,
   settleInView,
   selectByKeyboard,
+  waitForScreen,
 };

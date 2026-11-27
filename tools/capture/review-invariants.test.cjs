@@ -17,6 +17,32 @@ const { test } = require("node:test");
 const dir = __dirname;
 const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
 
+test("inline native challenge snapshots the final image after recognition and before submitting",async()=>{
+  const source=read('create-account.cjs'),start=source.indexOf('async function solveCaptcha(');
+  const block=source.slice(start,source.indexOf('\n}',start)+2),events=[];
+  const solve=new Function('nativeMode','nativeCaptchaAnswer','fillIfNeeded','clickContinue',block+';return solveCaptcha;')(
+    true,async()=>{events.push('recognize');return {answer:'Ab3D'};},async()=>events.push('fill'),async()=>events.push('submit'));
+  await solve({}, {locator:()=>({})},'fixture',async submit=>{events.push('snapshot');await submit();events.push('wait');});
+  assert.deepEqual(events,['recognize','fill','snapshot','submit','wait']);
+});
+
+test("native routine diagnostics never screenshot, restyle or write files",async()=>{
+  const source=read('create-account.cjs'),start=source.indexOf('  const shot = async (');
+  const block=source.slice(start,source.indexOf('\n  };',start)+5);
+  const forbidden=()=>{throw Error('routine diagnostic touched the page');};
+  const shot=new Function('nativeMode','widgetFrame','page','captureEvidence','fs','path','outdir','note','widgetText',block+';return shot;')(
+    true,forbidden,{},forbidden,{writeFileSync:forbidden},path,'fixture',forbidden,forbidden);
+  await assert.doesNotReject(shot('normal-step'));
+});
+
+test("optional diagnostic text write failures never abort the flow",async()=>{
+  const source=read('create-account.cjs'),start=source.indexOf('  const shot = async (');
+  const block=source.slice(start,source.indexOf('\n  };',start)+5),events=[];
+  const shot=new Function('nativeMode','widgetFrame','page','captureEvidence','fs','path','outdir','note','widgetText',block+';return shot;')(
+    false,async()=>null,{},async()=>{},{writeFileSync:()=>{throw Error('disk unavailable');}},path,'fixture',(_kind,event)=>events.push(event),async()=>'fixture');
+  await assert.doesNotReject(shot('normal-step'));assert.equal(events[0].at,'diagnostic-unavailable');
+});
+
 test("native retry verifies unchanged fields without repeating the initial hydration sleeps",async()=>{
   const source=read('create-account.cjs'),start=source.indexOf('  const fillForm = async (');
   const block=source.slice(start,source.indexOf('\n  };',start)+5),waits=[],checked=[];
@@ -43,6 +69,7 @@ test("evidence capture masks inputs with a neutral color, including exception ca
   let options;
   await capture({frames:()=>[{locator:selector=>({selector})}],screenshot:async value=>{options=value;}},'fixture.png');
   assert.equal(options.maskColor,'#e5e7eb');
+  assert.equal(options.timeout,2500);
   assert.equal(options.mask.length,1);assert.match(options.mask[0].selector,/input/);
 });
 

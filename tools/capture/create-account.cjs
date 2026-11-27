@@ -231,7 +231,7 @@ let livePage = null;
 async function captureEvidence(page, file, options = {}) {
   // Every evidence path, including exceptions, masks credentials and OTP inputs.
   const mask = page.frames().map(frame => frame.locator("input"));
-  await page.screenshot({ ...options, path: file, mask, maskColor: "#e5e7eb" });
+  await page.screenshot({ ...options, timeout: 2500, path: file, mask, maskColor: "#e5e7eb" });
 }
 async function failShot(reason) {
   const tag = `fail-${String(reason || "unknown").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 60)}-${new Date()
@@ -833,7 +833,8 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     if (answer === ":refresh") return {refresh:true};
     return /^[A-Za-z0-9]{3,6}$/.test(answer) ? {answer} : "";
   }, Math.max(0,until-Date.now()), "captcha");
-  return captchaSession.readChallenge({
+  let capturedImage=null;
+  const result=await captchaSession.readChallenge({
     refreshIntervalMs:3000,sleep,
     remoteDigests: nativeRemoteCaptchas,
     progress,
@@ -864,7 +865,8 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
       if (data) fs.writeFileSync(png,Buffer.from(data[1],"base64"));
       else await found.locator.screenshot({path:png,scale:"css"});
       const digest=lib.sha256Hex(fs.readFileSync(png));
-      return {png,digest};
+      capturedImage={png,digest};
+      return capturedImage;
     },
     recognize: captchaCmdFlag ? async ({png}) => {
       if (Date.now() >= deadline) return "";
@@ -890,17 +892,20 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
       }
     },
   });
+  if(result.answer)require('./captcha-samples.cjs').record(outdir,capturedImage,result.answer);
+  return result;
 }
 
 // Apple can show the image captcha on any step, including the phone step
 // ("Security Code Error"). Solve it the same way as on the first form.
-async function solveCaptcha(page, fr, tag) {
+async function solveCaptcha(page, fr, tag, submitAndWait) {
   if (nativeMode) {
     const result = await nativeCaptchaAnswer(page, fr, tag, 180000);
     if (result.advanced) return "advanced";
     await fillIfNeeded(fr.locator('input[name="captcha"]'),result.answer,"captcha");
-    await clickContinue(page,fr,tag);
-    await sleep(1000);
+    const submit=()=>clickContinue(page,fr,tag);
+    if(submitAndWait)await submitAndWait(submit);
+    else await submit();
     return result.answer;
   }
   const answerFile = path.resolve(arg("await-captcha", ".cache/captcha-answer.txt"));
@@ -1336,6 +1341,14 @@ async function clickContinue(page, frame, tag = "") {
   let validationVersion = 0;
   let requestVersion = 0;
   const creationRequests = new WeakMap();
+  let nativePostVersion = 0, nativeCompletedPostVersion = 0;
+  const nativePosts = new Map();
+  const finishNativePost = req => {
+    if(nativePosts.has(req)) {
+      nativeCompletedPostVersion=Math.max(nativeCompletedPostVersion,nativePosts.get(req));
+      nativePosts.delete(req);
+    }
+  };
   const creationResponses = [];
   async function checkCreationFailure() {
     await Promise.all(creationResponses);
@@ -1350,9 +1363,11 @@ async function clickContinue(page, frame, tag = "") {
     if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);
     if(req.method()==="POST" && ["/account","/account/validate"].includes(new URL(req.url()).pathname))
       creationRequests.set(req,++requestVersion);
+    if(nativeMode && req.method()==="POST" && /^\/account(?:\/|$)/.test(new URL(req.url()).pathname))
+      nativePosts.set(req,++nativePostVersion);
   });
-  page.on("requestfinished",req=>pendingCaptchaRequests.delete(req));
-  page.on("requestfailed",req=>{if(pendingCaptchaRequests.delete(req))captchaResponseStatus=599;});
+  page.on("requestfinished",req=>{pendingCaptchaRequests.delete(req);finishNativePost(req);});
+  page.on("requestfailed",req=>{if(pendingCaptchaRequests.delete(req))captchaResponseStatus=599;finishNativePost(req);});
   page.on("response", (res) => {
     const u = res.url();
     if(nativeMode && /\/captcha(?:\?|$)/.test(u))captchaResponseStatus=res.status();
@@ -1381,6 +1396,35 @@ async function clickContinue(page, frame, tag = "") {
     else void response.catch(() => {});
   });
 
+  async function observeNativeScreen() {
+    const frame=await widgetFrame(page);
+    const dom=frame ? await frame.evaluate(()=>{
+      const visible=el=>Boolean(el && el.getClientRects().length);
+      const inputs=[...document.querySelectorAll('input')].filter(visible);
+      const captcha=document.querySelector('input[name="captcha"]');
+      const image=captcha?.closest('.captcha')?.querySelector('.captcha-container img');
+      return {text:document.body?.innerText||'',captchaPresent:visible(captcha),
+        creationFormPresent:inputs.some(el=>el.name==='appleId'),codeInputs:inputs.filter(el=>el.type==='tel').length,
+        captchaSource:image?.currentSrc||image?.src||'',captchaReady:Boolean(image?.complete && image.naturalWidth>=80 && image.naturalHeight>=30),
+        invalid:inputs.some(el=>el.getAttribute('aria-invalid')==='true')};
+    }).catch(()=>null) : {text:'',captchaPresent:false,creationFormPresent:false,codeInputs:0};
+    if(!dom)return null;
+    return {frame,...dom,state:flow.classifyScreen({text:dom.text,url:page.url(),email,phone}),
+      refusal:(await hardRefusal(frame,dom.text)).hit};
+  }
+  const screenReady = screen => !screen ? '' : screen.refusal ? 'refused' :
+    screen.captchaPresent && screen.captchaReady ? 'captcha' : flow.captchaAdvanced(screen) ? screen.state : '';
+  const waitNativeScreen = () => mech.waitForScreen({observe:observeNativeScreen,ready:screenReady,deadline:leaseDeadline,sleep});
+  const waitNativeTransition = (before,afterVersion) => mech.waitForScreen({observe:observeNativeScreen,deadline:leaseDeadline,sleep,
+    ready:screen=>{
+      if(!screen || nativePosts.size || pendingCaptchaRequests.size)return '';
+      const state=screenReady(screen),prior=screenReady(before);
+      if(state && state!==prior)return state;
+      if(state==='captcha' && screen.captchaSource!==before?.captchaSource)return 'changed-captcha';
+      if(nativeCompletedPostVersion>afterVersion && (screen.invalid || screen.refusal))return 'validation-error';
+      return '';
+    }});
+
   // Screenshot helper. `maskAuth` paints a black block over the authentication
   // inputs before the capture (review A2: the code-filled screenshot used to
   // show the six digits). The AuthKit form lives in a cross-origin iframe, so
@@ -1394,7 +1438,10 @@ async function clickContinue(page, frame, tag = "") {
       text-shadow: none !important;
     }`;
   const shot = async (name, { maskAuth = true } = {}) => {
+    // Routine diagnostics must not paint or resize the user's local Chrome page.
+    if(nativeMode)return;
     let styleHandle = null;
+    try {
     if (maskAuth) {
       const current = await widgetFrame(page);
       if (current) styleHandle = await current.addStyleTag({ content: AUTH_MASK_CSS }).catch(() => null);
@@ -1402,8 +1449,9 @@ async function clickContinue(page, frame, tag = "") {
     }
     const file = path.join(outdir, `${name}.png`);
     await captureEvidence(page, file).catch(() => {});
-    if (styleHandle) await styleHandle.evaluate((el) => el.remove()).catch(() => {});
     fs.writeFileSync(path.join(outdir, `${name}.txt`), await widgetText(page), "utf8");
+    } catch { note("evidence",{at:"diagnostic-unavailable"}); }
+    finally {if (styleHandle) await styleHandle.evaluate((el) => el.remove()).catch(() => {});}
   };
 
   await page.goto("https://account.apple.com/account", { waitUntil: "domcontentloaded", timeout: 90000 });
@@ -1667,8 +1715,11 @@ async function clickContinue(page, frame, tag = "") {
     submitAttempted = true;
     submissionMayHaveLanded = true;
     emailRequestedAt = Date.now();
+    const beforeSubmit=nativeMode ? await observeNativeScreen() : null;
+    const beforePostVersion=nativePostVersion;
     await clickContinue(page, fr, `create-submit-${attempt}`);
-    await sleep(9000);
+    if(nativeMode)await waitNativeTransition(beforeSubmit,beforePostVersion);
+    else await sleep(9000);
     await shot(`01-submit-${attempt}`);
     const stillForm = await (await widgetFrame(page))
       ?.locator('input[name="captcha"]')
@@ -1679,7 +1730,7 @@ async function clickContinue(page, frame, tag = "") {
       // Evidence first: a rejected captcha is the most expensive failure we hit,
       // and without the image, the answer we typed and the page's own complaint
       // there is nothing to learn from afterwards.
-      try {
+      if(!nativeMode)try {
         const errText = (await fr.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
         fs.writeFileSync(
           path.join(outdir, `captcha-attempt-${attempt}.txt`),
@@ -1710,7 +1761,7 @@ async function clickContinue(page, frame, tag = "") {
       }
       // Apple replaces the image by itself after a rejection; never click
       // "New code" for it. Wait for the replacement, then read again.
-      await sleep(1800 + Math.floor(Math.random() * 900));
+      if(!nativeMode)await sleep(1800 + Math.floor(Math.random() * 900));
       // One answer belongs to one image. Without this the manual channel replays
       // the rejected digits on the next round, because the answer file outlives
       // the attempt that consumed it.
@@ -1805,9 +1856,11 @@ async function clickContinue(page, frame, tag = "") {
   // C: what the email step waited and whether it asked for a resend.
   let emailWindow = null;
   for (let step = 1; step <= 8; step += 1) {
-    const current = await widgetFrame(page);
-    const text = (await widgetText(page)).replace(/\s+/g, " ");
+    const observed=nativeMode ? await waitNativeScreen() : null;
+    const current = nativeMode ? observed.frame : await widgetFrame(page);
+    const text = (nativeMode ? observed.text : await widgetText(page)).replace(/\s+/g, " ");
     await checkCreationFailure();
+    if(observed?.refusal)throw Object.assign(new Error("apple_creation_refused"),{state:"failed",evidence:"hard-reject",closeReason:"hard-reject"});
     if (!current) {
       // The widget can disappear because the flow finished (Apple lands on the
       // account page) or because the session died. Only the explicit terminal
@@ -1827,7 +1880,11 @@ async function clickContinue(page, frame, tag = "") {
     }
 
     if (await current.locator('input[name="captcha"]').count().catch(() => 0)) {
-      const answer = await solveCaptcha(page, current, `captcha-step${step}`);
+      const answer = await solveCaptcha(page, current, `captcha-step${step}`,async submit=>{
+        const before=await observeNativeScreen(),version=nativePostVersion;
+        await submit();
+        await waitNativeTransition(before,version);
+      });
       note("step", { at: "inline-captcha", step, answered: Boolean(answer) });
       continue;
     }
@@ -1932,6 +1989,8 @@ async function clickContinue(page, frame, tag = "") {
     phoneSubmitted = verdict === "phone_step";
     if (phoneSubmitted) excludedSMS.add(code);
     await checkCreationFailure();
+    const beforeCode=nativeMode ? await observeNativeScreen() : null;
+    const beforeCodeVersion=nativePostVersion;
     if (phoneSubmitted) {
       const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
       await oncePhoneAction(`code-${digest}`, async () => {
@@ -1944,7 +2003,8 @@ async function clickContinue(page, frame, tag = "") {
       await shot(`0${step + 1}-code-filled`, { maskAuth: true });
       await clickContinue(page, current, verdict);
     }
-    await sleep(9000);
+    if(nativeMode)await waitNativeTransition(beforeCode,beforeCodeVersion);
+    else await sleep(9000);
     await shot(`0${step + 1}-after`, { maskAuth: true });
   }
   await checkCreationFailure();
