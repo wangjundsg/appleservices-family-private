@@ -162,3 +162,11 @@ No registration, password login, new SMS or repeated account activation was used
 for validation. Package tests and launcher tests passed; one unrelated registration
 fixture exceeded its ten-second exit wait once, then the full dashboard package
 passed on rerun without changing that fixture.
+
+Deployment replaced only the panel and the binaries selected for subsequent
+activation work. The five existing workers kept their PIDs and start times.
+Panel readback confirmed the recent English and Chinese accounts remained
+activated and online. The other three workers had already entered paused
+`saved_session_check` renewal failures on earlier dates: their accepted
+checkpoints and push connections remained present, but authenticated=false.
+Those pre-existing renewal states were not restarted or modified by this task.
