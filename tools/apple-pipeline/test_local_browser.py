@@ -49,15 +49,23 @@ class LocalBrowserTests(unittest.TestCase):
         settle.assert_not_called()
         self.assertEqual(self.job.status["reason"],"registration_input_invalid")
 
-    def test_local_first_ocr_does_not_require_key_or_skip_local(self):
+    def test_local_remote_ocr_and_legacy_setting_never_invoke_local_model(self):
+        for setting in ["yes","local-first"]:
+            with self.subTest(setting=setting):
+                self.job.cfg.update(browser_mode="local",egress_mode="direct",captcha_solver=setting,yescaptcha_key="fixture-key")
+                with patch.object(self.job,"number"),patch.object(self.job,"process",return_value=(0,{})):
+                    self.job.create()
+                actual=p.read(self.root/"create-input.json")
+                command=p.json.loads(actual["captcha-cmd"])
+                self.assertEqual(command,["python","tools/captcha/solver.py","--provider","yes","--skip-local"])
+                self.assertTrue(actual["captcha-remote-only"])
+                self.assertNotIn("captcha-fallback-cmd",actual)
+
+    def test_remote_ocr_missing_key_fails_preflight_even_for_legacy_setting(self):
         self.job.cfg.update(browser_mode="local",egress_mode="direct",captcha_solver="local-first")
-        with patch.object(self.job,"number"),patch.object(self.job,"process",return_value=(0,{})):
-            self.job.create()
-        command=p.json.loads(p.read(self.root/"create-input.json")["captcha-cmd"])
-        self.assertIn("tools/captcha/ocr.py",command)
-        self.assertNotIn("--skip-local",command)
-        fallback=p.json.loads(p.read(self.root/"create-input.json")["captcha-fallback-cmd"])
-        self.assertIn("--skip-local",fallback)
+        with patch.dict(p.os.environ,{},clear=True),patch.object(p,"_secret_candidates",return_value=[]):
+            with self.assertRaisesRegex(p.PipelineError,"captcha_key_required"):
+                p.validate(self.job.cfg)
 
     def test_local_field_mismatch_is_script_failure_not_registration_rejection(self):
         self.job.cfg.update(browser_mode="local",egress_mode="local",local_browser_proxy="http://127.0.0.1:7897",captcha_solver="local-first")

@@ -63,6 +63,9 @@ def resolve_captcha(cfg: dict) -> tuple:
             if key:
                 break
     solver = cfg.get("captcha_solver") or "yes"
+    # Retain old manifests as a remote-only alias; local OCR is no longer in the creation path.
+    if solver == "local-first":
+        solver = "yes"
     if solver == "yes" and not key:
         solver = "manual"
     return solver, key
@@ -214,7 +217,7 @@ def validate(cfg):
     if cfg.get("captcha_solver") not in (None, "manual", "yes", "local-first"):
         raise PipelineError("unsupported_captcha_solver", "usage")
     solver_name, solver_key = resolve_captcha(cfg)
-    if solver_name != "yes" and cfg.get("captcha_solver") not in ("manual", "local-first"):
+    if solver_name != "yes" and cfg.get("captcha_solver") != "manual":
         # No key anywhere: fail loudly rather than parking the job on a human.
         raise PipelineError("captcha_key_required", "usage")
     snake, camel = cfg.get("registration_method"), cfg.get("registrationMethod")
@@ -686,9 +689,8 @@ class Job:
             else: inp["await-email-code"] = self.cfg["email_code_file"]
             if resolve_captcha(self.cfg)[0] == "yes":
                 inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
-            elif self.cfg.get("captcha_solver") == "local-first":
-                inp["captcha-cmd"] = json.dumps(["python", "tools/captcha/ocr.py"])
-                inp["captcha-fallback-cmd"] = json.dumps(["python", "tools/captcha/solver.py", "--provider", "yes", "--skip-local"])
+                if local_proxy is not None:
+                    inp["captcha-remote-only"] = True
             atomic(self.folder / "create-input.json", inp)
             if local_proxy is None:
                 code, _ = self.process(["node", "tools/capture/pipeline-browser.cjs"], 45)

@@ -153,6 +153,7 @@ const password = passwordResolution.password;
 // run body, before the first network call.
 const captchaCmdFlag = String(arg("captcha-cmd", "") || "");
 const captchaFallbackFlag = String(arg("captcha-fallback-cmd", "") || "");
+const captchaRemoteOnly = flagOn("captcha-remote-only");
 // Senders a verification mail may come from; Apple's own domains by default.
 // --mail-from keeps the check configurable without weakening it (review B5).
 const mailFrom = String(arg("mail-from", "") || "")
@@ -838,6 +839,19 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
     return /^[A-Za-z0-9]{3,6}$/.test(answer) ? {answer} : "";
   }, Math.max(0,until-Date.now()), "captcha");
   let capturedImage=null;
+  const remoteCommand=captchaRemoteOnly ? captchaCmdFlag : captchaFallbackFlag;
+  const recognizeRemote=remoteCommand ? async ({png,digest}) => {
+    if(Date.now() >= deadline)return "";
+    if(captchaRemoteOnly) {
+      if(nativeRemoteCaptchas.has(digest))throw Object.assign(new Error("captcha_image_stuck"),{state:"unknown",evidence:"captcha_image_stuck",closeReason:"captcha-exhausted"});
+      nativeRemoteCaptchas.add(digest);
+    }
+    const result=await lib.runCaptchaCommandAsync(remoteCommand,png,{timeoutMs:Math.min(75000,deadline-Date.now())});
+    note("step",{at:"ocr-remote-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms,error:result.error});
+    if(/^(?:http_[45][0-9]{2}|missing_key|network_error|solver_timeout)$/.test(result.error))
+      throw Object.assign(new Error("captcha_remote_unavailable"),{state:"unknown",evidence:"captcha_remote_unavailable",closeReason:"captcha-exhausted"});
+    return result.ok ? result.text : "";
+  } : null;
   const result=await captchaSession.readChallenge({
     refreshIntervalMs:3000,sleep,
     remoteDigests: nativeRemoteCaptchas,
@@ -872,20 +886,13 @@ async function nativeCaptchaAnswer(page, fr, tag, timeoutMs = 240000) {
       capturedImage={png,digest};
       return capturedImage;
     },
-    recognize: captchaCmdFlag ? async ({png}) => {
+    recognize: captchaRemoteOnly ? recognizeRemote : captchaCmdFlag ? async ({png}) => {
       if (Date.now() >= deadline) return "";
       const result = await lib.runCaptchaCommandAsync(captchaCmdFlag,png,{timeoutMs:Math.min(20000,deadline-Date.now())});
       note("step",{at:"ocr-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms});
       return result.ok ? result.text : "";
     } : null,
-    fallback: captchaFallbackFlag ? async ({png}) => {
-      if(Date.now() >= deadline)return "";
-      const result=await lib.runCaptchaCommandAsync(captchaFallbackFlag,png,{timeoutMs:Math.min(75000,deadline-Date.now())});
-      note("step",{at:"ocr-remote-answer",accepted:result.ok && /^[A-Za-z0-9]{4,6}$/.test(result.text),ms:result.ms,error:result.error});
-      if(/^(?:http_[45][0-9]{2}|missing_key|network_error|solver_timeout)$/.test(result.error))
-        throw Object.assign(new Error("captcha_remote_unavailable"),{state:"unknown",evidence:"captcha_remote_unavailable",closeReason:"captcha-exhausted"});
-      return result.ok ? result.text : "";
-    } : null,
+    fallback: captchaRemoteOnly ? null : recognizeRemote,
     manual: () => manual(deadline),
     refresh: async () => {
       if (Date.now() >= deadline) throw Object.assign(new Error("captcha_attempt_deadline"),{state:"unknown",closeReason:"captcha-exhausted"});

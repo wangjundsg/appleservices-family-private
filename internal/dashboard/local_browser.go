@@ -26,8 +26,8 @@ func validateBrowserSelection(body registerRequest) error {
 		if body.RegistrationMethod == methodProtocol || (body.Egress.Mode != "local" && body.Egress.Mode != "direct") {
 			return errors.New("本机 Chrome 只使用本机代理或直连")
 		}
-		if body.CaptchaProvider != "manual" && body.CaptchaProvider != "local-first" {
-			return errors.New("本机 Chrome 使用本机 OCR 优先或人工图形校验")
+		if body.CaptchaProvider != "manual" && body.CaptchaProvider != "yes" {
+			return errors.New("本机 Chrome 使用已配置的远程识别或人工图形校验；本机 OCR 已停用")
 		}
 	} else if body.Egress.Mode != "direct" && body.Egress.Mode != "roxy" {
 		return errors.New("Forge 只使用已保存的固定代理或直连")

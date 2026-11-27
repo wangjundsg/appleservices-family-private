@@ -307,6 +307,10 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	if body.BrowserMode == "" {
 		body.BrowserMode = "forge"
 	}
+	// Existing clients still send the retired local-first policy.
+	if body.BrowserMode == "local" && body.CaptchaProvider == "local-first" {
+		body.CaptchaProvider = "yes"
+	}
 	if err := validateRegistration(body); err != nil {
 		return "", err
 	}
