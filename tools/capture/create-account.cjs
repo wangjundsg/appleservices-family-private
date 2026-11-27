@@ -65,6 +65,10 @@ const { createHash } = require("node:crypto");
 
 // This file is an executable; import flow-mechanics.cjs for reusable helpers.
 if (require.main !== module) throw new Error("create_account_is_cli_use_flow_mechanics");
+if(process.argv.some(value=>value==='--harvest-captcha'||value.startsWith('--harvest-captcha='))) {
+  console.error('Collection moved to: node tools/capture/harvest-captcha-ui.cjs --count 5');
+  process.exit(2);
+}
 function executorVersion() {
   const files = ["create-account.cjs", "flow-mechanics.cjs", "account-flow.cjs", "capture-lib.cjs",
     "registration-lifecycle.cjs", "mail-reader.cjs", "otpgmail.cjs", "captcha-session.cjs"];

@@ -202,3 +202,33 @@ Forge 的等待策略、创建方式和指纹配置保持原有配置；上表�
 验证：完整 Node 套件串行 214 项全部通过，无跳过；Python OCR/兜底 10 项通过；创建脚本语法检查和 `git diff --check` 通过。源图配对测试验证后续图片被替换不会改变已保存样本，错误哈希不入库，写盘失败不抛出。此次没有后端变更，未重复运行 Go 与完整 Python 编排测试。
 
 本轮未启动、重开或恢复实网创建任务；面板和三个既有激活 worker 的 PID、启动时间保持一致。脚本由新任务加载，不需要重启面板。完整创建至激活的实网结果仍待下一次授权验收。
+
+### 独立网页采集与隔离训练
+
+用户要求独立采集训练图片后，将原未提交的采集实现收敛为 `tools/capture/harvest-captcha-ui.cjs`。`harvest-captcha.cjs` 仅转到同一网页入口，不再直接请求图片接口。原注册器中的采集分支已移除；误用旧 `--harvest-captcha` 参数（包括等号写法）会在读取账号状态、启动浏览器前退出并提示新入口，正常创建参数不变。
+
+```powershell
+node tools/capture/harvest-captcha-ui.cjs --count 5 --out .cache/my-captcha-collection
+```
+
+使用独立 Chrome 上下文，打开真实网页、等待图形码、保存原始图像字节、点击页面刷新、确认新图加载及去重，达到数量后正常退出。默认换图间隔至少 5 秒，最后一张不额外刷新；服务错误、未变图或重复图明确停止。输出目录必须是新目录，不覆盖历史数据。不填写注册表单，不加载已有浏览器账户，不调用邮箱、短信、退款或 OCR 服务；额外阻断注册路径的写请求。没有使用 Computer Use。
+
+本次实网验证成功保存 5 张不同 SHA-256 的 160×70 原始 JPEG，终态 `harvested`，注册写请求拦截计数为 0。数据位于本机 `.cache/captcha-harvest-independent-20261127`，`manifest.json` 保存原图哈希/尺寸，`labels.csv` 是唯一标签来源。用户确认了 4 张，第 4 张看不清，保留原图但不用于训练。图片、标签、日志及权重均不提交 Git。
+
+训练入口为 `tools/captcha/train_local.py`：只读取 `label_verified=true` 的标签，核对图像哈希，拒绝冲突标签，按原图哈希去重并划分互斥的训练/验证集，严格区分大小写。当前 3 张训练、1 张验证，只用于检查实验链路，不能估计实际准确率或证明大小写泛化能力。保留 PP-OCRv6 small 预训练字典及头部结构，以低学习率进行 3 轮微调；不自动导出、发布或替换当前 OCR。
+
+使用独立 `.tools/ocr-training` Python 环境，读取既有推理依赖并在自身环境安装训练依赖，没有升级推理环境。官方 PaddleOCR 训练源码固定为 `dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf`，预训练权重来自官方文字识别文档的 training model 链接。源码下载按 Git blob 哈希核对；本机 CPU 训练限制为 2 个计算线程、数据加载 worker 为 0。
+
+初次试跑发现上游 Windows 分支无条件丢弃最后一批，导致单张验证集实际评估零张；这轮结果标记无效。训练准备现只在零 worker 模式保留最后一批，记录补丁后源码哈希，并拒绝处理图片数为零的评估。Windows 进度条的非 UTF-8 字节也不能再让指标解析中断训练。相关修复仅作用于隔离的训练源码及入口。
+
+```powershell
+.tools/ocr-training/Scripts/python.exe tools/captcha/train_local.py `
+  --dataset .cache/captcha-harvest-independent-20261127 `
+  --source .tools/PaddleOCR-training `
+  --pretrained .cache/ocr-training-20261127/pretrained.pdparams `
+  --out .cache/ocr-training-20261127/new-experiment --epochs 3
+```
+
+验证：Node 完整串行套件 216 项通过；Python OCR/训练数据检查 13 项通过。采集夹具验证五张原图、仅四次刷新、零字段填写、零提交，注册请求阻断及旧入口提前退出；训练检查覆盖人工确认、标签大小写、哈希冲突、去重拆分、空验证结果和 Windows 单 worker 修复。已核对三个激活 worker 和面板的 PID、启动时间与此前一致。
+
+有效实验位于 `.cache/ocr-training-20261127/run-03`，已完成基线评估、3 轮共 9 个训练步和最终验证，训练权重保存为 `weights/latest.pdparams`。独立保留的 1 张图在训练前后均未整串正确（均为 0/1）；归一化编辑相似度约从 0.40 降至 0.20。没有证据表明该微调改善真实识别能力，不部署这份权重。`run-01` 的零样本评估已标记无效，`run-02` 在基线之后遇到日志编码问题、未训练，均不作为有效结果。当前实网 OCR、注册配置及已激活账号运行状态未改动。
