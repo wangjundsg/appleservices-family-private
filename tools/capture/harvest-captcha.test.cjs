@@ -1,8 +1,15 @@
 "use strict";
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');
-const {browserWorker,collect,guard,openPage,recoverableWindowError}=require('./harvest-captcha-ui.cjs');
+const {browserWorker,browserLaunchOptions,collect,guard,openPage,recoverableWindowError}=require('./harvest-captcha-ui.cjs');
 const {chromium}=require(path.resolve(__dirname,'../../.tools/js/node_modules/playwright-core'));
+
+test('collector can bind one browser to an explicit credential-free proxy',()=>{
+  assert.deepEqual(browserLaunchOptions(true),{channel:'chrome',headless:true});
+  assert.deepEqual(browserLaunchOptions(true,'socks5://127.0.0.1:17907'),{channel:'chrome',headless:true,proxy:{server:'socks5://127.0.0.1:17907'}});
+  assert.throws(()=>browserLaunchOptions(true,'ftp://127.0.0.1:21'),/proxy_url_invalid/);
+  assert.throws(()=>browserLaunchOptions(true,'socks5://user:pass@127.0.0.1:17907'),/proxy_url_invalid/);
+});
 
 test('webpage collection saves five source images, refreshes four times and never fills or submits',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'harvest-test-')),browser=await chromium.launch({channel:'chrome',headless:true});

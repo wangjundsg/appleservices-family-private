@@ -88,8 +88,17 @@ async function collect(page,options) {
   return runWorkers([pageWorker(page,options.network)],options);
 }
 
+function browserLaunchOptions(headless,proxy) {
+  const options={channel:'chrome',headless};
+  if(!proxy)return options;
+  const target=new URL(proxy);
+  if(!['http:','https:','socks5:'].includes(target.protocol)||target.username||target.password)throw Error('proxy_url_invalid');
+  options.proxy={server:proxy};
+  return options;
+}
+
 async function main(argv=process.argv.slice(2)) {
-  const {values}=parseArgs({args:argv,options:{count:{type:'string',default:'5'},out:{type:'string'},windows:{type:'string',default:'3'},resume:{type:'boolean',default:false},headless:{type:'boolean',default:false}}});
+  const {values}=parseArgs({args:argv,options:{count:{type:'string',default:'5'},out:{type:'string'},windows:{type:'string',default:'3'},resume:{type:'boolean',default:false},headless:{type:'boolean',default:false},proxy:{type:'string'}}});
   const count=Number(values.count);
   const windows=Number(values.windows);
   if(!Number.isInteger(count)||count<1||count>10000)throw Error('count_must_be_1_to_10000');
@@ -97,7 +106,7 @@ async function main(argv=process.argv.slice(2)) {
   const out=path.resolve(values.out||`.cache/captcha-harvest-${Date.now()}`);
   if(fs.existsSync(out)&&!values.resume)throw Error('output_directory_already_exists');
   const {chromium}=require(path.resolve(__dirname,'../../.tools/js/node_modules/playwright-core'));
-  const browser=await chromium.launch({channel:'chrome',headless:values.headless});
+  const browser=await chromium.launch(browserLaunchOptions(values.headless,values.proxy));
   try {
     const controller=control(),workers=[];
     for(let i=0;i<Math.min(windows,count);i++) {
@@ -108,4 +117,4 @@ async function main(argv=process.argv.slice(2)) {
   } finally {await browser.close();}
 }
 if(require.main===module)main().catch(error=>{console.error(JSON.stringify({state:'failed',error:error.message}));process.exitCode=1;});
-module.exports={main,collect,guard,imageOnPage,pageWorker,browserWorker,openPage,recoverableWindowError};
+module.exports={main,collect,guard,imageOnPage,pageWorker,browserWorker,openPage,recoverableWindowError,browserLaunchOptions};
