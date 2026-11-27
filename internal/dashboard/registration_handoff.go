@@ -236,6 +236,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 				value["state"] = "not_started"
 				value["reason"] = "panel_start_preflight_failed"
 				value["stage"] = result.Stage
+				value["message"] = result.Message
 			}
 		}
 	}

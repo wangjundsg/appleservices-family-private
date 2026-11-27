@@ -86,3 +86,19 @@ accepted the request. It now retains the input on rejection or transport error,
 and clears it after success, account creation/selection, or dialog closure.
 The UI regression covers both rejected and failed requests plus successful
 submission; passwords remain only in the open form and are not persisted.
+
+## Transient connection failure during English acceptance
+
+The next successful English registration stopped at `native-route-connect`.
+A credential-free direct request reproduced a TCP connection timeout before
+TLS. The configured local proxy separately failed its TLS handshake and was
+not enabled. The unchanged direct route subsequently passed every preflight.
+This establishes a transient connection failure, not its upstream network cause.
+
+HTTP preflight now retries once only when no connection has been acquired and
+the error is a connection/DNS timeout or transport interruption. Certificate
+failures and failures after acquiring a connection are not retried. Diagnostics
+retain an allowlisted failure category and attempt count in the pre-login
+receipt. Login, SMS and activation requests are not replayed by this retry.
+Dashboard tests cover recovery, bounded failure, certificate rejection and
+response failures; the full dashboard package passed.

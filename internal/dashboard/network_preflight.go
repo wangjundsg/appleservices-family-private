@@ -3,7 +3,10 @@ package dashboard
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -25,15 +28,32 @@ type NetworkCheck struct {
 	OK         bool   `json:"ok"`
 	Stage      string `json:"stage"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	Attempts   int    `json:"attempts,omitempty"`
+	Failure    string `json:"failure,omitempty"`
+	retryable  bool
 }
 
 func probeHTTP(ctx context.Context, stage, endpoint string, transport *http.Transport) NetworkCheck {
 	defer transport.CloseIdleConnections()
+	var check NetworkCheck
+	for attempt := 1; attempt <= 2; attempt++ {
+		check = probeHTTPOnce(ctx, stage, endpoint, transport)
+		check.Attempts = attempt
+		if !check.retryable || ctx.Err() != nil {
+			break
+		}
+	}
+	return check
+}
+
+func probeHTTPOnce(ctx context.Context, stage, endpoint string, transport *http.Transport) NetworkCheck {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	var phase atomic.Value
 	phase.Store("connect")
+	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{
+		GotConn:           func(httptrace.GotConnInfo) { connected.Store(true) },
 		TLSHandshakeStart: func() { phase.Store("tls") },
 		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
 			if err == nil {
@@ -48,12 +68,35 @@ func probeHTTP(ctx context.Context, stage, endpoint string, transport *http.Tran
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
-		return NetworkCheck{Stage: stage + "-" + phase.Load().(string)}
+		failure, retryable := preflightFailure(err)
+		return NetworkCheck{Stage: stage + "-" + phase.Load().(string), Failure: failure, retryable: !connected.Load() && retryable}
 	}
 	response.Body.Close()
 	// A 403/404/405 proves transport reachability only, never login permission.
 	ok := response.StatusCode < 500 && response.StatusCode != http.StatusProxyAuthRequired && response.StatusCode != http.StatusTooManyRequests
 	return NetworkCheck{OK: ok, Stage: stage + "-http", HTTPStatus: response.StatusCode}
+}
+
+func preflightFailure(err error) (string, bool) {
+	var certificate *tls.CertificateVerificationError
+	if errors.As(err, &certificate) {
+		return "certificate", false
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return "dns", true
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return "timeout", true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "connection_closed", true
+	}
+	if errors.As(err, &network) {
+		return "connect", true
+	}
+	return "transport", false
 }
 
 func nativeRouteTransport() (*http.Transport, error) {
@@ -121,7 +164,14 @@ func CheckActivationNetwork(ctx context.Context, library, python string) []Netwo
 func (s *Server) activationNetworkPreflight(ctx context.Context, dir string) control.Result {
 	for _, check := range CheckActivationNetwork(ctx, s.config.Library, s.config.Python) {
 		if !check.OK {
-			return control.Result{Stage: check.Stage, Message: fmt.Sprintf("连接预检失败（%s）；尚未启动登录或发送验证码。请检查该阶段的网络路由或原生运行环境。", check.Stage)}
+			detail := check.Stage
+			if check.Failure != "" {
+				detail += "/" + check.Failure
+			}
+			if check.Attempts > 1 {
+				detail += fmt.Sprintf("，已检查 %d 次", check.Attempts)
+			}
+			return control.Result{Stage: check.Stage, Message: fmt.Sprintf("连接预检失败（%s）；尚未启动登录或发送验证码。请检查该阶段的网络路由或原生运行环境。", detail)}
 		}
 	}
 	if !macPushStateReady(dir) {
