@@ -56,6 +56,32 @@ def manifest_hashes(root):
     return hashes, file_sha(manifest)
 
 
+def load_truth(path, roots):
+    root_by_name = {Path(root).resolve().name: Path(root).resolve() for root in roots}
+    rows, seen = [], set()
+    with Path(path).open(encoding='utf-8-sig', newline='') as handle:
+        for row in csv.DictReader(handle):
+            root = root_by_name.get(row.get('dataset', ''))
+            if root is None:
+                raise ValueError('truth_dataset_unknown')
+            image = (root / row.get('file', '')).resolve()
+            if not image.is_relative_to(root) or not image.is_file():
+                raise ValueError('truth_image_missing_or_outside_dataset')
+            digest, status, label = file_sha(image), row.get('status'), row.get('label', '')
+            if digest != row.get('sha256') or digest in seen:
+                raise ValueError('truth_digest_invalid_or_duplicate')
+            if status == 'clear':
+                if not VALID_LABEL.fullmatch(label): raise ValueError('truth_clear_label_invalid')
+            elif status == 'unreadable':
+                if label: raise ValueError('truth_unreadable_has_label')
+            else: raise ValueError('truth_status_invalid')
+            seen.add(digest); rows.append({**row, 'image': str(image)})
+    expected = set().union(*(manifest_hashes(root)[0] for root in roots))
+    if seen != expected:
+        raise ValueError('truth_does_not_cover_independent_manifests')
+    return rows
+
+
 def audit(primary, independent):
     names = [('train', 'human-train.csv', True), ('validation', 'human-validation.csv', True),
              ('test', 'human-test.csv', True), ('unreadable', 'manual-unreadable.csv', False)]
@@ -145,7 +171,16 @@ def metrics(clear_rows, clear_predictions, unreadable_predictions, threshold, se
         'milliseconds_per_image': seconds * 1000 / total}
 
 
-def evaluate_model(model_dir, groups, independent_roots, batch_size):
+def truth_metrics(rows, predictions, threshold, seconds):
+    clear = [(row, prediction) for row, prediction in zip(rows, predictions) if row['status'] == 'clear']
+    unreadable = [prediction for row, prediction in zip(rows, predictions) if row['status'] == 'unreadable']
+    result = metrics([row for row, _ in clear], [prediction for _, prediction in clear],
+                     unreadable, threshold, seconds)
+    result['truth_counts'] = {'clear': len(clear), 'unreadable': len(unreadable)}
+    return result
+
+
+def evaluate_model(model_dir, groups, independent_roots, batch_size, truth_rows=None):
     unreadable = sorted(groups['unreadable'], key=lambda row: row['sha256'])
     calibration_bad, test_bad = unreadable[:-25], unreadable[-25:]
     work = groups['validation'] + groups['test'] + calibration_bad + test_bad
@@ -174,7 +209,13 @@ def evaluate_model(model_dir, groups, independent_roots, batch_size):
         preds, independent_seconds = predict(model_dir, rows, batch_size)
         result['independent'].append({'root': str(Path(root).resolve()), 'images': len(rows),
             'accepted': sum(accepted(item, threshold) for item in preds),
-            'seconds': independent_seconds, 'accuracy': None, 'truth_status': 'not_human_confirmed'})
+            'seconds': independent_seconds, 'accuracy': None,
+            'truth_status': 'human_truth_available' if truth_rows else 'not_human_confirmed'})
+    if truth_rows:
+        predictions, truth_seconds = predict(model_dir, truth_rows, batch_size)
+        result['independent_truth'] = {
+            'balanced': truth_metrics(truth_rows, predictions, threshold, truth_seconds),
+            'low_false_refresh': truth_metrics(truth_rows, predictions, low_false_refresh_threshold, truth_seconds)}
     return result
 
 
@@ -184,19 +225,23 @@ def main():
     parser.add_argument('--independent', action='append', default=[])
     parser.add_argument('--current-model', required=True)
     parser.add_argument('--candidate-model', required=True)
+    parser.add_argument('--human-truth', help='confirmed independent truth CSV; must cover every independent image')
     parser.add_argument('--out', required=True)
     parser.add_argument('--batch-size', type=int, default=32)
     args = parser.parse_args()
     groups, inventory = audit(args.dataset, args.independent)
-    current = evaluate_model(args.current_model, groups, args.independent, args.batch_size)
-    candidate = evaluate_model(args.candidate_model, groups, args.independent, args.batch_size)
+    truth = load_truth(args.human_truth, args.independent) if args.human_truth else None
+    if truth: inventory['human_truth_sha256'] = file_sha(args.human_truth)
+    current = evaluate_model(args.current_model, groups, args.independent, args.batch_size, truth)
+    candidate = evaluate_model(args.candidate_model, groups, args.independent, args.batch_size, truth)
     improved = (candidate['test']['ocr_full_string_accuracy'] > current['test']['ocr_full_string_accuracy']
                 and candidate['test']['handleable_proportion'] > current['test']['handleable_proportion'])
     report = {'inventory': inventory, 'refresh_split': {'calibration': 124, 'test': 25},
         'current': current, 'candidate': candidate, 'candidate_internal_improvement': improved,
         'production_model_replaced': False,
-        'recommendation': ('manual_label_independent_sets_before_considering_replacement' if improved
-                           else 'retain_current_model_no_reliable_internal_improvement')}
+        'recommendation': ('retain_current_model_independent_tradeoff_not_qualified' if truth
+                           else ('manual_label_independent_sets_before_considering_replacement' if improved
+                                 else 'retain_current_model_no_reliable_internal_improvement'))}
     output = Path(args.out).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False))

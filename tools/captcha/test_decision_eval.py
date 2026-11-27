@@ -4,10 +4,28 @@ from pathlib import Path
 import tempfile
 import unittest
 from PIL import Image
-from decision_eval import accepted, audit, metrics, threshold_for
+from decision_eval import accepted, audit, load_truth, metrics, threshold_for, truth_metrics
 
 
 class DecisionEvaluationTests(unittest.TestCase):
+    def test_human_truth_must_cover_manifests_and_scores_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'independent'; root.mkdir(); rows = []
+            for i, status in enumerate(('clear', 'unreadable')):
+                image = root / f'{i}.jpg'; Image.new('RGB', (160, 70), (i * 40, 0, 0)).save(image)
+                rows.append({'dataset': root.name, 'file': image.name,
+                    'sha256': hashlib.sha256(image.read_bytes()).hexdigest(), 'status': status,
+                    'label': 'Ab3D' if status == 'clear' else ''})
+            (root / 'manifest.json').write_text(__import__('json').dumps({'samples': rows}))
+            truth = Path(folder) / 'truth.csv'
+            with truth.open('w', newline='', encoding='utf-8') as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+            loaded = load_truth(truth, [root])
+            result = truth_metrics(loaded, [{'text': 'AB3D', 'score': .9}, {'text': 'XXXX', 'score': .2}], .5, 1)
+            self.assertEqual(result['ocr_full_string_accuracy'], 1)
+            self.assertEqual(result['refresh_recall'], 1)
+            self.assertEqual(result['handleable_proportion'], 1)
+
     def test_threshold_and_case_insensitive_metrics(self):
         clear = [{'text': 'aB3D', 'score': .9}, {'text': 'wrong', 'score': .8}]
         bad = [{'text': 'AB3D', 'score': .2}, {'text': 'ZZZZ', 'score': .3}]
