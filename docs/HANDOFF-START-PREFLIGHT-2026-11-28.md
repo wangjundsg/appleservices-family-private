@@ -93,7 +93,12 @@ The next successful English registration stopped at `native-route-connect`.
 A credential-free direct request reproduced a TCP connection timeout before
 TLS. The configured local proxy separately failed its TLS handshake and was
 not enabled. The unchanged direct route subsequently passed every preflight.
-This establishes a transient connection failure, not its upstream network cause.
+Subsequent DNS/dial tracing showed two different addresses for the same public
+hostname: one consistently timed out before TLS, while the other passed the
+repository's certificate checks and returned HTTP 404. System DNS later returned
+the reachable address. No static IP override, proxy change or certificate bypass
+was applied; the reason the upstream DNS/routing supplied the unreachable address
+remains unconfirmed.
 
 HTTP preflight now retries once only when no connection has been acquired and
 the error is a connection/DNS timeout or transport interruption. Certificate
@@ -102,3 +107,16 @@ retain an allowlisted failure category and attempt count in the pre-login
 receipt. Login, SMS and activation requests are not replayed by this retry.
 Dashboard tests cover recovery, bounded failure, certificate rejection and
 response failures; the full dashboard package passed.
+
+The first live retry still timed out twice. Both failures remained `not_started`,
+and the account directory contained only its initial identity/origin files.
+After the DNS result recovered and every preflight passed, one unused login/SMS
+reservation was released with private audit evidence. The original task then
+started its worker and reached SMS verification without registering again.
+
+The original English task then completed automatic SMS verification and the
+worker-owned activation. Independent panel readback confirmed activated,
+authenticated and online; the pipeline recorded `ready` with
+`handoff_complete=true`. All four previously activated workers retained their
+original process IDs and start times. The bounded retry does not repair an
+upstream route that remains unavailable across both attempts.
