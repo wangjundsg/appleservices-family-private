@@ -307,6 +307,17 @@ class PipelineTests(unittest.TestCase):
             self.job.panel_once("start")
         call.assert_called_once()
 
+    def test_saved_activation_failure_retains_stage_without_replay(self):
+        self.job.cfg["panel_bridge"]={"url":"http://127.0.0.1:1/handoff","token":"fixture"}
+        reply={"ok":False,"state":"unknown","stage":"activation-delegate_refused"}
+        with patch.object(p,"request",return_value=json.dumps(reply)) as call:
+            with self.assertRaisesRegex(p.PipelineError,"panel_activation_unconfirmed"):
+                self.job.panel_once("activate-saved")
+            with self.assertRaisesRegex(p.PipelineError,"panel_handoff_requires_readback"):
+                self.job.panel_once("activate-saved")
+        call.assert_called_once()
+        self.assertEqual(self.job.status["activation_failure_stage"],"activation-delegate_refused")
+
     def test_handoff_preflight_resume_never_registers_again(self):
         self.job.cfg["handoff"]="dashboard"
         self.job.update(stage="login",status="needs_review",account_created=True,

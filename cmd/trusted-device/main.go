@@ -221,7 +221,10 @@ func run() (runErr error) {
 		if err := status.save(*dir); err != nil {
 			return err
 		}
-		return activateSavedSession(context.Background(), *dir, appleID, *python, autoActivate)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		go watchStop(ctx, cancel, *dir, status.PID)
+		return activateSavedSession(ctx, *dir, appleID, *python, autoActivate)
 	}
 	if *resumeSession {
 		status.RenewalMode = "saved_session_check"

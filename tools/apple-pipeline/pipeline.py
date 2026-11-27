@@ -943,6 +943,13 @@ class Job:
                                   {"Content-Type":"application/json", "X-App-Token":bridge["token"]}, timeout=240))
         if reply.get("state") == "rate_limited": raise PipelineError("code_rate_limited", "rate_limited")
         if reply.get("state") == "unknown":
+            if action == "activate-saved":
+                stage=reply.get("stage")
+                if stage in {"activation-nac_failed", "activation-runtime_unavailable", "activation-delegate_refused",
+                             "activation-terms_unavailable", "activation-terms_unconfirmed", "activation-checkpoint_missing",
+                             "activation-checkpoint_binding_failed", "activation-saved", "activation-session", "activation-busy"}:
+                    self.update(activation_failure_stage=stage)
+                    raise PipelineError("panel_activation_unconfirmed", "needs_review")
             reason=reply.get("reason")
             known={"family_binding_invalid","family_role_mismatch","family_action_invalid","family_readback_required","family_full","family_organizer_not_ready","subscription_disabled","subscription_auth_required","subscription_readback_required","subscription_offer_unsupported","subscription_renewal_unconfirmed"}
             raise PipelineError(reason if reason in known else "panel_handoff_requires_readback", "needs_review")

@@ -47,5 +47,17 @@ failed NAC component output retained only in the private runtime directory.
 Validation: trusted-device and dashboard Go tests passed; 186 pipeline tests
 passed outside the restricted sandbox. Coverage includes waiting through GSA
 without stop/plan calls, saved activation with expired SMS, and rejection of
-missing or mismatched GSA credentials. Live activation completion remains to
-be confirmed during this recovery.
+missing or mismatched GSA credentials.
+
+Live recovery completed NAC generation, then Apple's delegate exchange returned
+`ErrorID=UNAUTHORIZED` with the description that the account credentials were
+unauthorized. No accepted iCloud checkpoint was created. This is distinct from
+the resolved TLS preflight failure and interrupted NAC generation. The response
+does not establish whether the saved credential expired or was rejected for
+another reason. No endpoint switching, repeated delegate submission, new
+registration, or changes to existing activated workers were performed.
+
+The failed activation keeps its intent receipt to prevent replay. Subsequent
+failures retain the allowlisted activation stage in the pipeline result, and
+the saved-session activation process honors the account's stop request. A new
+regression verifies that failure details survive without permitting replay.
