@@ -1,8 +1,8 @@
 # 验证码可读性模型：v1 数据与训练方案
 
-2026-11-27。当前阶段按用户最新要求先确定开源模型、训练方案与数据集。
-已完成数据审计与冻结；**尚未训练模型，没有模型准确率、推理耗时或可部署模型文件**。
-下述训练参数为首轮预注册方案，不是实验结果。OCR 训练目标与正在运行的采集进程不在本次改动范围内。
+2026-11-27。首轮方案确定后，用户确认歧义图片为 refresh 并要求建立训练目标。
+下述参数为首轮预注册方案；实验结果单独报告。OCR 训练目标与正在运行的采集进程不在本次改动范围内。
+首轮已完成，见 [真实实验结果](READABILITY-RESULTS.md)：误放率 1.67%，但可读保留率仅 10.39%，暂不建议生产集成。
 
 ## 模型选择
 
@@ -38,9 +38,10 @@ MobileNetV3-Small 替换分类头后预计约 927,585 参数、FP32 参数净载
 - CSV 为 832 条 accepted 和 149 条 quarantine，与交接数量相同。
 - 5 条快照 `unreadable=false` 与明确的“无法核对／识别不出／分不清”备注不一致。
   依原始人类备注归为 refresh，与最终 quarantine CSV 一致；不修改原始快照。
-- 另有 1 条 accepted 同时包含字符纠正和“刷新不必死磕”备注，不能断定是可靠可读或明确不可读。
-  暂时排除，等待后续重新人工判断。排除清单及哈希只写本地审计文件。
-- **最终冻结 980 张：831 readable、149 refresh。** 相比交接，可读训练候选减少 1 张。
+- 另有 1 条 accepted 同时包含字符纠正和“刷新不必死磕”备注，初次审计暂时排除。
+  用户随后明确其意思是“太模糊分不清”，现以独立的 `user-confirmed` 判定记录归为 refresh。
+  该记录仅用于可读性数据，不修改原始 OCR CSV；记录及输入哈希保存在本地审计文件中。
+- **最终冻结 981 张：831 readable、150 refresh。** 相比交接，1 张可读候选改为刷新。
 - 人工输入的 `MH/mh` 是本批模糊备注的缩写；严格匹配这一约定，不把任意备注自动当成 refresh。
 - API 字符猜测、OCR 置信度、识别成功与否均不参与可读性标签判断。
 
@@ -61,13 +62,13 @@ MobileNetV3-Small 替换分类头后预计约 927,585 参数、FP32 参数净载
 
 | 来源组 | manifest 中 1-based 序号 | 可读 | 刷新 | 拆分 |
 | --- | --- | ---: | ---: | --- |
-| legacy-unknown | 1–468 | 394 | 67 | train |
+| legacy-unknown | 1–468 | 394 | 68 | train |
 | harvest-20261127-153325 | 469–471 | 2 | 1 | train |
 | harvest-headless-20261127-154037 | 472–603 | 116 | 15 | calibration |
 | harvest-headless-20261127-161329 | 604–952 | 279 | 60 | validation |
 | harvest-headless-20261127-170033 | 953–962 | 10 | 0 | train |
 | harvest-headless-20261127-172737 | 963–1000 | 30 | 6 | train |
-| **合计** | 已排除未复核与歧义样本 | **831** | **149** | |
+| **合计** | 已排除未复核样本 | **831** | **150** | |
 
 同一次运行的多窗口、连续刷新和窗口重建一律留在同组；早期缺失日志的样本整体作为一个组。
 没有使用文件时间、人工复核表批次、字符内容或随机逐图抽样划分来源。
@@ -81,7 +82,7 @@ MobileNetV3-Small 替换分类头后预计约 927,585 参数、FP32 参数净载
 
 | 集合 | readable | refresh | 总量 | 用途 |
 | --- | ---: | ---: | ---: | --- |
-| train | 436 | 74 | 510 | 训练参数，类别权重仅由此集计算 |
+| train | 436 | 75 | 511 | 训练参数，类别权重仅由此集计算 |
 | calibration | 116 | 15 | 131 | 概率与判定阈值校准 |
 | validation | 279 | 60 | 339 | 独立真实验证；训练、模型选择和阈值选择均不可使用 |
 
@@ -99,7 +100,7 @@ MobileNetV3-Small 替换分类头后预计约 927,585 参数、FP32 参数净载
    再解冻最后 3 个 feature block 与分类头训练 10 epoch，lr=1e-4，固定其余骨干。
    小样本阶段固定 BatchNorm 运行统计。冻结所有 epoch 数，不通过最终 validation 选择 checkpoint。
 5. readable 为 1、refresh 为 0。逐样本加权 BCE：
-   `w_readable=510/(2*436)≈0.585`，`w_refresh=510/(2*74)≈3.446`。
+   `w_readable=511/(2*436)≈0.586`，`w_refresh=511/(2*75)≈3.407`。
    不再同时过采样，避免重复放大类别权重。
 6. 在 calibration 上拟合受约束的单调 Platt 校准（正斜率、正则化），记录原始与校准后的 Brier score。
    这是小样本经验概率估计，`readable_probability` 不能解释为经过保证的识别成功率。
@@ -143,15 +144,47 @@ python -m unittest discover -s tools/captcha -p test_audit_readability.py -v
 python tools/captcha/audit_readability.py `
   --dataset .cache/captcha-pool-20261127-validation `
   --reviews .cache/captcha-review-workbook `
-  --out .cache/readability-v1/dataset `
+  --out .cache/readability-v1/dataset-confirmed `
+  --adjudications .cache/readability-v1/adjudications.json `
   --calibration-batch harvest-headless-20261127-154037 `
   --validation-batch harvest-headless-20261127-161329
 ```
 
 输出目录必须不存在，重复审计请换新目录，不覆盖已冻结清单。
-本次冻结 manifest SHA-256：`7d2288317187d5999a27c94ddad6b05de66923f50c4250c009890e12e2e18b68`。
+本次人工确认后的冻结 manifest SHA-256：`710b761fb74a1bb52658aeb4637ffafbb1add8a7cabc68d07d1c5614e69dd343`。
+初次排除歧义图的旧清单保留用于追溯，不再作为本轮训练输入。
+可选 `--adjudications` 为本地 JSON 数组，每条含 `sha256`、`decision`、`source="user-confirmed"`、
+非空 `reason`；仅允许覆盖原来 ambiguous 的图片。没有明确人工确认时不要生成此记录。
 `audit.json` 包含输入哈希、来源组、排除项和计数；`manifest.json` 仅包含图像路径、哈希、可读性标签与拆分，
 不包含字符标签、API 预测或账号状态。后续训练仍须逐图重验哈希，拒绝文件变化。
-训练命令与实际模型文件将在实现训练器并完成首轮实验后提供，本阶段不列出尚不存在的命令。
+训练环境独立于 OCR。安装已锁定依赖后，执行固定配方（输出目录须为新目录）：
+
+```powershell
+python -m venv .tools/readability
+.tools/readability/Scripts/python.exe -m pip install -r tools/captcha/requirements-readability.txt
+.tools/readability/Scripts/python.exe -m unittest discover -s tools/captcha -p '*readability*.py' -v
+.tools/readability/Scripts/python.exe tools/captcha/train_readability.py `
+  --manifest .cache/readability-v1/dataset-confirmed/manifest.json `
+  --out .cache/readability-v1/run-01 --threads 2
+.tools/readability/Scripts/python.exe tools/captcha/readability.py `
+  --model .cache/readability-v1/run-01/model.pt --image <本地图片路径>
+```
+
+Python 集成（将 `tools/captcha` 加入模块搜索路径）：
+
+```python
+import torch
+from readability import ReadabilityModel
+
+torch.set_num_threads(1)
+predictor = ReadabilityModel('.cache/readability-v1/run-01/model.pt')
+result = predictor.predict(image_bytes)  # 也接受 pathlib.Path、路径字符串、PIL.Image
+# {'decision': 'readable' 或 'refresh', 'readable_probability': float, 'model_version': str}
+```
+
+复用一个已加载实例；每次推理不联网。`model.pt` 使用 CPU `weights_only=True` 加载，
+内含模型权重、固定预处理标识、校准参数与阈值，未知版本、非有限参数、损坏图片明确报错。
+`report.json` 记录独立验证指标、原始矩阵、校准指标、权重、代码哈希、软件版本及 CPU 基准。
+逐图预测文件仅写本地缓存，不能提交。补充数据留给下一轮，不加入本轮已冻结的验证集。
 
 仅提交审计源码、单元测试及本方案。数据、冻结清单、日志、模型二进制全部留在 git 忽略的 `.cache` 内。

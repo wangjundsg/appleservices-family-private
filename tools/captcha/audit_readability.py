@@ -46,6 +46,21 @@ def human_decision(row, review):
     return 'readable'
 
 
+def read_adjudications(path, known_hashes):
+    decisions = {}
+    if path is None:
+        return decisions
+    for entry in json.loads(Path(path).read_text(encoding='utf-8')):
+        sha = entry.get('sha256')
+        if (sha not in known_hashes or sha in decisions
+                or entry.get('decision') not in ('readable', 'refresh')
+                or entry.get('source') != 'user-confirmed'
+                or not isinstance(entry.get('reason'), str) or not entry['reason'].strip()):
+            raise ValueError('invalid_human_adjudication')
+        decisions[sha] = entry
+    return decisions
+
+
 def recover_batches(samples, logs):
     """Collector saved=N refers to samples[N-1]; unknown history stays one group."""
     if len({row['sha256'] for row in samples}) != len(samples):
@@ -130,7 +145,7 @@ def assign_splits(rows, calibration_batch, validation_batch):
             raise ValueError('both_classes_required_per_split')
 
 
-def audit(dataset, reviews, out, calibration_batch, validation_batch):
+def audit(dataset, reviews, out, calibration_batch, validation_batch, adjudications=None):
     dataset, reviews, out = map(lambda p: Path(p).resolve(), (dataset, reviews, out))
     if out.exists():
         raise ValueError('output_must_be_new_to_preserve_frozen_snapshot')
@@ -140,6 +155,8 @@ def audit(dataset, reviews, out, calibration_batch, validation_batch):
     review_files = sorted(reviews.glob('review-snapshot*.json'))
     logs = sorted(dataset.glob('harvest*.out.log'))
     inputs += review_files + logs
+    if adjudications:
+        inputs.append(Path(adjudications).resolve())
     before = {str(p): digest(p) for p in inputs}
     reviews_by_hash = {}
     for path in review_files:
@@ -151,10 +168,11 @@ def audit(dataset, reviews, out, calibration_batch, validation_batch):
     batches = recover_batches(samples, logs)
     manifest = {row['sha256']: row for row in samples}
     source_rows = read_csv(audit_file)
+    confirmed = read_adjudications(adjudications, {r['sha256'] for r in source_rows})
     if {r['sha256'] for r in source_rows} != set(reviews_by_hash):
         raise ValueError('review_coverage_mismatch')
     rows, features, seen, excluded = [], [], set(), []
-    flag_disagreements = 0
+    flag_disagreements, original_refresh = 0, set()
     for row in source_rows:
         sha = row['sha256']
         if sha in seen:
@@ -166,15 +184,22 @@ def audit(dataset, reviews, out, calibration_batch, validation_batch):
         if not image.is_relative_to(dataset) or digest(image) != sha:
             raise ValueError('image_path_or_digest_invalid')
         decision = human_decision(row, reviews_by_hash[sha])
+        if decision == 'refresh':
+            original_refresh.add(sha)
+        if decision != 'ambiguous':
+            flag_disagreements += (decision == 'refresh') != bool(reviews_by_hash[sha].get('unreadable'))
+        if sha in confirmed:
+            if decision != 'ambiguous':
+                raise ValueError('adjudication_requires_ambiguous_original')
+            decision = confirmed[sha]['decision']
         feature = image_features(image)
         if decision == 'ambiguous':
             excluded.append({'sha256': sha, 'reason': 'accepted_character_correction_with_nonempty_readability_note'})
             continue
-        flag_disagreements += (decision == 'refresh') != bool(reviews_by_hash[sha].get('unreadable'))
         rows.append({'sha256': sha, 'image': image.as_posix(), 'decision': decision,
                      'source_batch': batches[sha]})
         features.append(feature)
-    if {r['sha256'] for r in read_csv(inputs[2])} != {r['sha256'] for r in rows if r['decision'] == 'refresh'}:
+    if {r['sha256'] for r in read_csv(inputs[2])} != original_refresh:
         raise ValueError('refresh_csv_mismatch')
     pairs, candidates = group_near_duplicates(rows, features)
     assign_splits(rows, calibration_batch, validation_batch)
@@ -186,6 +211,7 @@ def audit(dataset, reviews, out, calibration_batch, validation_batch):
     report = {
         'schema_version': 1, 'reviewed': len(source_rows), 'eligible': len(rows),
         'manifest_images': len(samples), 'excluded_ambiguous': excluded,
+        'human_adjudications': list(confirmed.values()),
         'unreviewed_excluded': len(samples) - len(source_rows),
         'source_csv_status_counts': dict(Counter(r['status'] for r in source_rows)),
         'classes': dict(Counter(r['decision'] for r in rows)),
@@ -216,6 +242,7 @@ if __name__ == '__main__':
     parser.add_argument('--out', required=True)
     parser.add_argument('--calibration-batch', required=True)
     parser.add_argument('--validation-batch', required=True)
+    parser.add_argument('--adjudications', help='Local JSON array of explicit human decisions for ambiguous rows')
     args = parser.parse_args()
-    report = audit(args.dataset, args.reviews, args.out, args.calibration_batch, args.validation_batch)
+    report = audit(args.dataset, args.reviews, args.out, args.calibration_batch, args.validation_batch, args.adjudications)
     print(json.dumps({k: report[k] for k in ('reviewed', 'classes', 'split_counts', 'frozen_manifest_sha256')}))

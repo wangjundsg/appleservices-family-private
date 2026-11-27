@@ -5,10 +5,23 @@ import unittest
 
 import numpy as np
 
-from audit_readability import assign_splits, group_near_duplicates, human_decision, recover_batches
+from audit_readability import assign_splits, group_near_duplicates, human_decision, read_adjudications, recover_batches
 
 
 class ReadabilityAuditTests(unittest.TestCase):
+    def test_explicit_adjudication_requires_known_unique_hash_and_human_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'decisions.json'
+            entry = dict(sha256='known', decision='refresh', source='user-confirmed', reason='too blurry')
+            path.write_text(json.dumps([entry]), encoding='utf-8')
+            self.assertEqual(read_adjudications(path, {'known'}), {'known': entry})
+            with self.assertRaisesRegex(ValueError, 'invalid_human'):
+                read_adjudications(path, {'other'})
+            for entries in ([entry, entry], [dict(entry, source='ocr')], [dict(entry, reason='')]):
+                path.write_text(json.dumps(entries), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'invalid_human'):
+                    read_adjudications(path, {'known'})
+
     def test_human_note_overrides_stale_snapshot_flag(self):
         row = dict(status='quarantine', label_source='unreadable', label='', label_verified='false')
         for note in ('模糊', 'MH', 'mh', 'PMN4，分不清', 'F识别不出我'):
