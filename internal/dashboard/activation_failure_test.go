@@ -34,13 +34,17 @@ func TestAddAccountReturnsIdentityAfterStartupFailure(t *testing.T) {
 	}
 }
 
-func TestInvalidNativeProxyStopsBeforeProvisioningOrLogin(t *testing.T) {
+func TestLocalStartIgnoresInheritedProxyAndChecksLocalRuntime(t *testing.T) {
 	t.Setenv("APPLESERVICES_NATIVE_HTTP_PROXY", "socks5h://private-marker@localhost:1080")
 	s := registerTestServer(t)
-	s.provisionMacPush = func(context.Context, string) error { t.Fatal("provisioning started with invalid proxy"); return nil }
+	s.config.Worker = filepath.Join(t.TempDir(), "unused.exe")
+	if err := os.WriteFile(s.config.Worker, []byte("unused"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.provisionMacPush = func(context.Context, string) error { t.Fatal("provisioned without local runtime"); return nil }
 	result := s.startIn(context.Background(), t.TempDir(), credentials{AppleID: "owner@example.test", Password: "private-password"}, nil)
-	if result.OK || result.Stage != "native-proxy" || strings.Contains(result.Message, "private-marker") {
-		t.Fatal("proxy validation did not stop launch safely")
+	if result.Stage != "native-library" || strings.Contains(result.Message, "private-") {
+		t.Fatal("local prerequisites were replaced by a proxy/network gate")
 	}
 }
 

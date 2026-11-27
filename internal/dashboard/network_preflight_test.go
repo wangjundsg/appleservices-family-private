@@ -100,20 +100,15 @@ func TestNativePreflightUsesExplicitRouteDespiteNoProxy(t *testing.T) {
 	listener.Close()
 	t.Setenv("APPLESERVICES_NATIVE_HTTP_PROXY", "http://private-marker:private-password@"+address)
 	t.Setenv("NO_PROXY", "*")
-	s := registerTestServer(t)
-	s.config.Worker = filepath.Join(t.TempDir(), "unused.exe")
-	if err := os.WriteFile(s.config.Worker, []byte("unused"), 0600); err != nil {
+	transport, err := nativeRouteTransport()
+	if err != nil {
 		t.Fatal(err)
 	}
-	s.provisionMacPush = func(context.Context, string) error { t.Fatal("provisioning ran after network failure"); return nil }
-	dir := t.TempDir()
-	result := s.startIn(context.Background(), dir, credentials{AppleID: "owner@example.test", Password: "private-password"}, nil)
-	if result.OK || result.Stage != "native-route-connect" || strings.Contains(result.Message, "private-") {
-		t.Fatalf("unsafe or missing preflight: %+v", result)
+	result := probeHTTP(context.Background(), "native-route", "https://gsa.apple.com/", transport)
+	if result.OK || result.Stage != "native-route-connect" {
+		t.Fatal("explicit diagnostic did not use its selected route")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "daemon.out.log")); !os.IsNotExist(err) {
-		t.Fatal("worker launch reached")
-	}
+
 }
 
 func TestVerificationPreflightDiagnosticKeepsStageWithoutPrivateError(t *testing.T) {

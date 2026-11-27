@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestHandoffPreflightFailureIsDurableAndCanRetry(t *testing.T) {
+func TestHandoffMissingRuntimeIsDurableAndCanRetry(t *testing.T) {
 	s := registerTestServer(t)
 	folder := registerFixture(t, s, pipelineReceipt{Stage: "login", Status: "running"})
 	_ = writeRegisterJSON(filepath.Join(folder, "input.json"), handoffInput{Email: "owner@example.test", Password: "Fixture-only123!", Handoff: "dashboard"})
@@ -18,12 +18,12 @@ func TestHandoffPreflightFailureIsDurableAndCanRetry(t *testing.T) {
 	registerTestCall(s, "POST", endpoint, `{"action":"attach"}`)
 	for i := 0; i < 2; i++ {
 		response := registerTestCall(s, "POST", endpoint, `{"action":"start"}`)
-		if !strings.Contains(response.Body.String(), `"state":"not_started"`) || !strings.Contains(response.Body.String(), `"stage":"native-proxy"`) {
+		if !strings.Contains(response.Body.String(), `"state":"not_started"`) || !strings.Contains(response.Body.String(), `"stage":"native-library"`) {
 			t.Fatal(response.Body.String())
 		}
 		var receipts map[string]handoffReceipt
 		_ = readRegisterJSON(filepath.Join(folder, "handoff-actions.json"), &receipts)
-		if receipts["start"].State != "not_started" || receipts["start"].Result["stage"] != "native-proxy" {
+		if receipts["start"].State != "not_started" || receipts["start"].Result["stage"] != "native-library" {
 			t.Fatal("pre-login failure was lost")
 		}
 	}

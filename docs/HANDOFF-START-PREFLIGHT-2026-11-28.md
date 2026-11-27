@@ -120,3 +120,45 @@ authenticated and online; the pipeline recorded `ready` with
 `handoff_complete=true`. All four previously activated workers retained their
 original process IDs and start times. The bounded retry does not repair an
 upstream route that remains unavailable across both attempts.
+
+## Actual transport correction and fixed direct activation
+
+The owner requested investigation beyond public preflight responses. The audit
+found three application defects distinct from the observed unreachable DNS
+address: automatic activation inherited proxy overrides while other activation
+paths removed them; the GSA connection timeout could consume the entire
+30-second request deadline before recovery; and recovery depended exclusively
+on Google DoH, which was unreachable on this direct connection.
+
+Local activation now uses one shared direct child environment at worker launch,
+saved/manual activation, worker-owned NAC/delegate execution and Mac APS
+bootstrap. It removes all HTTP/HTTPS/ALL/native/SOCKS proxy overrides, including
+mixed-case names and inherited NO_PROXY values. The local launcher accepts only
+the existing all-empty proxy configuration with NO_PROXY=*. Provider acquisition
+and browser creation remain outside this child-environment transformation.
+
+Public HEAD checks no longer gate worker startup or second-factor delivery.
+Startup still validates local libraries/runtime; actual native initialization,
+authentication and activation determine success. The optional diagnostic CLI
+is retained but cannot authorize or block those operations. Delivery requests
+are not replayed after an ambiguous transport failure.
+
+GSA connection setup is bounded to eight seconds within the original request
+deadline. Recovery first refreshes system DNS; the existing external resolver
+is used only if system resolution yields no usable public IPv4 address. It
+retains the original route, Host/SNI and certificate verification, and never
+replays a request after HTTP has acquired its connection. No IP is hardcoded,
+no system DNS/proxy settings are changed, and trust checks are not disabled.
+
+Validation used the actual GSA transport, native ADI helper, NAC exchange and
+accepted-session iCloud quota query. Before the fix, injected TLS EOF recovery
+failed after six seconds; afterward normal, injected EOF and injected connection
+timeout cases succeeded with verified TLS (the timeout case recovered in about
+nine seconds). Native ADI, NACSign and authenticated read-only quota retrieval
+succeeded with deliberately poisoned inherited proxy variables removed by the
+shared direct policy. These checks used private isolated native/NAC copies;
+original account identity, session and acceptance checkpoint hashes were unchanged.
+No registration, password login, new SMS or repeated account activation was used
+for validation. Package tests and launcher tests passed; one unrelated registration
+fixture exceeded its ten-second exit wait once, then the full dashboard package
+passed on rerun without changing that fixture.

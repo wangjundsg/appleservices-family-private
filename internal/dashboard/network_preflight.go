@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -161,41 +160,23 @@ func CheckActivationNetwork(ctx context.Context, library, python string) []Netwo
 	return checks
 }
 
-func (s *Server) activationNetworkPreflight(ctx context.Context, dir string) control.Result {
-	for _, check := range CheckActivationNetwork(ctx, s.config.Library, s.config.Python) {
-		if !check.OK {
-			detail := check.Stage
-			if check.Failure != "" {
-				detail += "/" + check.Failure
-			}
-			if check.Attempts > 1 {
-				detail += fmt.Sprintf("，已检查 %d 次", check.Attempts)
-			}
-			return control.Result{Stage: check.Stage, Message: fmt.Sprintf("连接预检失败（%s）；尚未启动登录或发送验证码。请检查该阶段的网络路由或原生运行环境。", detail)}
-		}
+// Public HEAD responses cannot decide whether native provisioning or an
+// authenticated activation succeeds. Start checks local prerequisites only.
+func (s *Server) activationRuntimeCheck() control.Result {
+	if err := nativeadi.ValidateLibrary(s.config.Library); err != nil {
+		return control.Result{Stage: "native-library", Message: "原生组件文件不可用或校验失败；尚未启动登录。"}
 	}
-	if !macPushStateReady(dir) {
-		phase, err := aps.Preflight(ctx, true)
-		if err != nil {
-			return control.Result{Stage: "mac-aps-direct-" + phase, Message: "Mac APS 初始化直连预检失败；尚未创建推送身份、登录或发送验证码。"}
-		}
+	if err := nativeadi.CheckRuntime(s.config.Python); err != nil {
+		return control.Result{Stage: "native-runtime", Message: "本机 Python 或编译环境不可用；尚未启动登录。"}
 	}
 	return control.Result{OK: true}
 }
 
 func networkConfiguration() map[string]string {
-	native := "inherited HTTP(S)_PROXY / NO_PROXY"
-	if strings.TrimSpace(os.Getenv("APPLESERVICES_NATIVE_HTTP_PROXY")) != "" {
-		native = "APPLESERVICES_NATIVE_HTTP_PROXY (helper only; NO_PROXY removed)"
-	}
-	gsaRoute := "HTTP(S)_PROXY / NO_PROXY"
-	if strings.TrimSpace(os.Getenv("APPLESERVICES_SOCKS_PROXY")) != "" {
-		gsaRoute = "APPLESERVICES_SOCKS_PROXY"
-	}
 	return map[string]string{
 		"source": os.Getenv("APPLESERVICES_NETWORK_CONFIG_SOURCE"),
 		"sha256": os.Getenv("APPLESERVICES_NETWORK_CONFIG_SHA256"),
-		"native": native, "gsa": gsaRoute, "aps": "HTTP(S)_PROXY / NO_PROXY",
-		"nac_worker": gsaRoute, "nac_dashboard": "direct (filteredActivationEnv)", "mac_aps_bootstrap": "direct (runMacPushProvisioner)",
+		"native": "direct", "gsa": "direct", "aps": "direct",
+		"nac_worker": "direct", "nac_dashboard": "direct", "mac_aps_bootstrap": "direct",
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	appleservices "github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/internal/accountguard"
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -67,18 +68,17 @@ func activationTuple(info *control.ActivationInfo) string {
 
 func filteredActivationEnv(appleID string) []string {
 	result := make([]string, 0, len(os.Environ())+3)
-	for _, entry := range os.Environ() {
+	for _, entry := range activationenv.Direct(os.Environ()) {
 		key, _, _ := strings.Cut(entry, "=")
 		switch {
 		case strings.EqualFold(key, "APPLESERVICES_APPLEID"), strings.EqualFold(key, "APPLESERVICES_PASSWORD"),
-			strings.EqualFold(key, "HTTP_PROXY"), strings.EqualFold(key, "HTTPS_PROXY"), strings.EqualFold(key, "ALL_PROXY"),
-			strings.EqualFold(key, "APPLESERVICES_SOCKS_PROXY"), strings.EqualFold(key, "APPLESERVICES_DELEGATE_DUMP"),
+			strings.EqualFold(key, "APPLESERVICES_DELEGATE_DUMP"),
 			strings.EqualFold(key, "APPLESERVICES_DELEGATE_PATH"):
 			continue
 		}
 		result = append(result, entry)
 	}
-	return append(result, "APPLESERVICES_APPLEID="+appleID, "APPLESERVICES_DELEGATE_PATH=v2", "NO_PROXY=*")
+	return append(result, "APPLESERVICES_APPLEID="+appleID, "APPLESERVICES_DELEGATE_PATH=v2")
 }
 
 func runActivationCommand(ctx context.Context, root, appleID, executable string, args ...string) ([]byte, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"time"
@@ -13,6 +14,29 @@ import (
 // Only the public GSA hostname goes to the recovery resolver. Account data stays
 // on the original Apple request, whose Host, SNI and certificate checks survive.
 func resolveGSAFallback(ctx context.Context, transport http.RoundTripper) ([]netip.Addr, error) {
+	return resolveGSAFallbackWithResolver(ctx, transport, net.DefaultResolver.LookupNetIP)
+}
+
+func resolveGSAFallbackWithResolver(ctx context.Context, transport http.RoundTripper, lookup func(context.Context, string, string) ([]netip.Addr, error)) ([]netip.Addr, error) {
+	// Refresh the configured system DNS first; external DoH may be unreachable
+	// on the same direct route on which Apple itself is available.
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, 3*time.Second)
+	resolved, lookupErr := lookup(lookupCtx, "ip4", "gsa.apple.com")
+	cancelLookup()
+	if lookupErr == nil {
+		var addresses []netip.Addr
+		for _, address := range resolved {
+			if validGSAAddress(address) {
+				addresses = append(addresses, address)
+			}
+			if len(addresses) == 2 {
+				break
+			}
+		}
+		if len(addresses) > 0 {
+			return addresses, nil
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://dns.google/resolve?name=gsa.apple.com&type=A", nil)
@@ -52,7 +76,7 @@ func parseGSAFallbackDNS(body io.Reader) ([]netip.Addr, error) {
 			continue
 		}
 		address, err := netip.ParseAddr(answer.Data)
-		if err != nil || !address.Is4() || !address.IsGlobalUnicast() || address.IsPrivate() || netip.MustParsePrefix("198.18.0.0/15").Contains(address) {
+		if err != nil || !validGSAAddress(address) {
 			continue
 		}
 		duplicate := false
@@ -73,4 +97,8 @@ func parseGSAFallbackDNS(body io.Reader) ([]netip.Addr, error) {
 		return nil, errors.New("GSA recovery DNS has no public address")
 	}
 	return addresses, nil
+}
+
+func validGSAAddress(address netip.Addr) bool {
+	return address.Is4() && address.IsGlobalUnicast() && !address.IsPrivate() && !netip.MustParsePrefix("198.18.0.0/15").Contains(address)
 }

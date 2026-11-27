@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"sync/atomic"
+	"time"
 )
 
 // The GSA service can reject the second request on a reused connection with 429.
@@ -25,6 +26,13 @@ type authenticationTransport struct {
 func newAuthenticationTransport() *authenticationTransport {
 	shared := AppleRootTransport().(*http.Transport)
 	unpooled := shared.Clone()
+	dial := unpooled.DialContext
+	unpooled.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		// Leave room inside the 30-second login request for connection recovery.
+		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		return dial(ctx, network, address)
+	}
 	unpooled.DisableKeepAlives = true
 	// An HTTP/2 connection can carry multiple authentication requests. Pin GSA
 	// to HTTP/1 so Connection: close also closes the TLS/proxy tunnel each time.

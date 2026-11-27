@@ -22,12 +22,7 @@ if ($taskConfig.Count -ne $taskKeys.Count) { throw 'Network configuration must s
 foreach ($taskKey in $taskKeys) {
     if (!$taskConfig.ContainsKey($taskKey) -or $taskConfig[$taskKey] -isnot [string] -or $taskConfig[$taskKey] -match '[\r\n\x00]') { throw "Invalid network configuration field: $taskKey" }
     $taskConfig[$taskKey] = $taskConfig[$taskKey].Trim()
-    if ($taskKey -in @('native_http_proxy', 'http_proxy', 'https_proxy', 'all_proxy') -and $taskConfig[$taskKey]) {
-        $taskURI = $null
-        if (![Uri]::TryCreate($taskConfig[$taskKey], [UriKind]::Absolute, [ref]$taskURI) -or !$taskURI.Host -or $taskURI.UserInfo -or $taskURI.Query -or $taskURI.Fragment -or $taskURI.AbsolutePath -ne '/' -or $taskURI.Scheme -notin @('http','https','socks5','socks5h')) { throw "Invalid or credential-bearing proxy in field: $taskKey" }
-        if ($taskKey -eq 'native_http_proxy' -and ($taskURI.Scheme -notin @('http','https') -or $taskConfig[$taskKey] -notmatch ':\d+$')) { throw 'Native proxy requires an explicit HTTP/HTTPS port.' }
-    }
-    if ($taskKey -eq 'socks_proxy' -and $taskConfig[$taskKey] -and $taskConfig[$taskKey] -notmatch '^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+):\d+$') { throw 'SOCKS proxy must be a host:port without credentials.' }
+    if (($taskKey -eq 'no_proxy' -and $taskConfig[$taskKey] -ne '*') -or ($taskKey -ne 'no_proxy' -and $taskConfig[$taskKey] -ne '')) { throw 'Local activation is fixed to direct routing: all proxy fields must be empty and no_proxy must be *.' }
 }
 $taskDashboard = (Resolve-Path -LiteralPath $DashboardBinary).Path
 $taskWorker = (Resolve-Path -LiteralPath $WorkerBinary).Path
@@ -36,10 +31,10 @@ $taskRepo = (Resolve-Path -LiteralPath $RepoRoot).Path
 $taskState = (Resolve-Path -LiteralPath $StateDir).Path
 $taskEnvironment = @{
     APPLESERVICES_APPLEID = ''; APPLESERVICES_PASSWORD = ''
-    APPLESERVICES_NATIVE_HTTP_PROXY = $taskConfig.native_http_proxy
-    HTTP_PROXY = $taskConfig.http_proxy; HTTPS_PROXY = $taskConfig.https_proxy
-    ALL_PROXY = $taskConfig.all_proxy; NO_PROXY = $taskConfig.no_proxy
-    APPLESERVICES_SOCKS_PROXY = $taskConfig.socks_proxy
+    APPLESERVICES_NATIVE_HTTP_PROXY = ''
+    HTTP_PROXY = ''; HTTPS_PROXY = ''
+    ALL_PROXY = ''; NO_PROXY = '*'
+    APPLESERVICES_SOCKS_PROXY = ''
     APPLESERVICES_REMOTE_ANISETTE = ''
     APPLESERVICES_NETWORK_CONFIG_SOURCE = $taskConfigPath
     APPLESERVICES_NETWORK_CONFIG_SHA256 = (Get-FileHash -LiteralPath $taskConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -58,7 +53,7 @@ $taskReceipt = [ordered]@{
     worker_sha256 = (Get-FileHash -LiteralPath $taskWorker -Algorithm SHA256).Hash.ToLowerInvariant()
     library_sha256 = (Get-FileHash -LiteralPath $taskLibrary -Algorithm SHA256).Hash.ToLowerInvariant()
     config_source = $taskConfigPath; config_sha256 = $taskEnvironment.APPLESERVICES_NETWORK_CONFIG_SHA256
-    manual_start = $true; port = $Port
+    manual_start = $true; port = $Port; activation_route = 'direct'
     registration_configured = [bool]$RegisterConfig; purchase_enabled = [bool]$AllowPurchase
 }
 if ($ValidateOnly) { $taskReceipt | ConvertTo-Json; return }

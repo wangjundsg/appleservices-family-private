@@ -14,7 +14,42 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestGSAConnectDeadlineLeavesTimeForRecovery(t *testing.T) {
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+	fixture := original.(*http.Transport).Clone()
+	fixture.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 8*time.Second {
+			t.Error("connect can consume entire login deadline")
+		}
+		return nil, io.EOF
+	}
+	http.DefaultTransport = fixture
+	transport := newAuthenticationTransport()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = transport.gsa.DialContext(ctx, "tcp", "gsa.apple.com:443")
+	if ctx.Err() != nil {
+		t.Fatal("connection attempt cancelled original login")
+	}
+}
+
+func TestGSARecoveryUsesSystemDNSBeforeExternalResolver(t *testing.T) {
+	lookup := func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+		if network != "ip4" || host != "gsa.apple.com" {
+			t.Fatal("unexpected lookup")
+		}
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("17.1.2.3")}, nil
+	}
+	addresses, err := resolveGSAFallbackWithResolver(context.Background(), nil, lookup)
+	if err != nil || len(addresses) != 1 || addresses[0].String() != "17.1.2.3" {
+		t.Fatal("system DNS recovery failed")
+	}
+}
 
 func TestGSAFallbackOnlyBeforeRequest(t *testing.T) {
 	for _, mode := range []string{"tls-eof", "connect-eof", "response-eof", "http-503", "bad-certificate", "fallback-bad-certificate"} {

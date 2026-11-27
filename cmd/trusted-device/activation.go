@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Laky-64/appleservices/internal/activationenv"
 )
 
 type activationCommand func(context.Context, string, ...string) ([]byte, error)
@@ -143,7 +145,7 @@ func autoActivate(ctx context.Context, dir, account, python string) error {
 		command := exec.CommandContext(ctx, name, args...)
 		hideActivationProcess(command)
 		command.Dir = root
-		for _, value := range os.Environ() {
+		for _, value := range activationenv.Direct(os.Environ()) {
 			key, _, _ := strings.Cut(value, "=")
 			if strings.EqualFold(key, "APPLESERVICES_PASSWORD") || strings.EqualFold(key, "APPLESERVICES_APPLEID") || strings.EqualFold(key, "APPLESERVICES_DELEGATE_PATH") || strings.EqualFold(key, "APPLESERVICES_DELEGATE_DUMP") {
 				continue

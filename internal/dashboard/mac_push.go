@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"github.com/Laky-64/appleservices/nativeadi"
 )
 
@@ -72,22 +73,16 @@ func (s *Server) runMacPushProvisioner(ctx context.Context, dir string) error {
 	// The bootstrap has no reason to receive credentials or proxy overrides.
 	// This also keeps a direct Apple APS path when the desktop environment has
 	// unrelated proxy variables configured.
-	for _, entry := range os.Environ() {
+	for _, entry := range activationenv.Direct(os.Environ()) {
 		key, _, _ := strings.Cut(entry, "=")
 		switch {
 		case strings.EqualFold(key, "APPLESERVICES_APPLEID"),
 			strings.EqualFold(key, "APPLESERVICES_PASSWORD"),
-			strings.EqualFold(key, "APPLESERVICES_STORE_CODE"),
-			strings.EqualFold(key, "HTTP_PROXY"),
-			strings.EqualFold(key, "HTTPS_PROXY"),
-			strings.EqualFold(key, "ALL_PROXY"),
-			strings.EqualFold(key, "APPLESERVICES_NATIVE_HTTP_PROXY"),
-			strings.EqualFold(key, "APPLESERVICES_SOCKS_PROXY"):
+			strings.EqualFold(key, "APPLESERVICES_STORE_CODE"):
 			continue
 		}
 		command.Env = append(command.Env, entry)
 	}
-	command.Env = append(command.Env, "NO_PROXY=*")
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output

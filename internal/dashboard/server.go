@@ -23,9 +23,9 @@ import (
 
 	"github.com/Laky-64/appleservices/icloud"
 	"github.com/Laky-64/appleservices/internal/accountguard"
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"github.com/Laky-64/appleservices/internal/control"
 	"github.com/Laky-64/appleservices/internal/privatefs"
-	"github.com/Laky-64/appleservices/nativeadi"
 )
 
 //go:embed web/*
@@ -968,15 +968,12 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	if creds.TwoFactor != "sms" && creds.TwoFactor != "sms-existing" && creds.TwoFactor != "circle" && creds.TwoFactor != "trusted-device" {
 		return control.Result{Message: "不支持的验证方式"}
 	}
-	if _, err := nativeadi.Environment(); err != nil {
-		return control.Result{Stage: "native-proxy", Message: "ADI 代理配置无效：请为 APPLESERVICES_NATIVE_HTTP_PROXY 配置带端口的 HTTP/HTTPS 代理，不能直接填入 SOCKS 地址。"}
-	}
 	if _, err := os.Stat(s.config.Worker); err != nil {
 		return control.Result{Message: "缺少后台程序，请重新运行启动脚本"}
 	}
 	s.setLaunching(account, true)
 	defer s.setLaunching(account, false)
-	if result := s.activationNetworkPreflight(ctx, dir); !result.OK {
+	if result := s.activationRuntimeCheck(); !result.OK {
 		s.setMessage(account, result.Message)
 		return result
 	}
@@ -1014,7 +1011,7 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 		command.Args = append(command.Args, "-resume-session")
 	}
 	configureProcess(command)
-	for _, entry := range os.Environ() {
+	for _, entry := range activationenv.Direct(os.Environ()) {
 		key, _, _ := strings.Cut(entry, "=")
 		if !strings.EqualFold(key, "APPLESERVICES_APPLEID") && !strings.EqualFold(key, "APPLESERVICES_PASSWORD") {
 			command.Env = append(command.Env, entry)
