@@ -17,6 +17,16 @@ const { test } = require("node:test");
 const dir = __dirname;
 const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
 
+test("evidence capture masks inputs with a neutral color, including exception captures",async()=>{
+  const source=read('create-account.cjs');
+  const start=source.indexOf('async function captureEvidence('),end=source.indexOf('\n}',start)+2;
+  const capture=new Function(source.slice(start,end)+';return captureEvidence;')();
+  let options;
+  await capture({frames:()=>[{locator:selector=>({selector})}],screenshot:async value=>{options=value;}},'fixture.png');
+  assert.equal(options.maskColor,'#e5e7eb');
+  assert.equal(options.mask.length,1);assert.match(options.mask[0].selector,/input/);
+});
+
 test("native field helpers use blur without tabbing to an adjacent control", async()=>{
   const source=read("create-account.cjs");
   const definition=source.match(/const blurField = [^\n]+/)[0];

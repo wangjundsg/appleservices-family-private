@@ -231,7 +231,7 @@ let livePage = null;
 async function captureEvidence(page, file, options = {}) {
   // Every evidence path, including exceptions, masks credentials and OTP inputs.
   const mask = page.frames().map(frame => frame.locator("input"));
-  await page.screenshot({ ...options, path: file, mask });
+  await page.screenshot({ ...options, path: file, mask, maskColor: "#e5e7eb" });
 }
 async function failShot(reason) {
   const tag = `fail-${String(reason || "unknown").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 60)}-${new Date()
@@ -326,7 +326,8 @@ let emailRequestedAt = Date.now();
 async function poolEmailCode(timeoutMs) {
   const hit = await mailReader.readCode({reader:otpGmailOrderFile?'otpgmail':'outlook', file:otpGmailOrderFile||codePoolConfig, mailbox:email,
     recipient:email, source:'registration', since:emailRequestedAt,
-    timeoutMs:Math.max(0,Math.min(timeoutMs,leaseDeadline-Date.now())), excluded:usedEmailMessages});
+    timeoutMs:Math.max(0,Math.min(timeoutMs,leaseDeadline-Date.now())), excluded:usedEmailMessages,
+    onTick:({error,retryInMs})=>note("mail-poll",{error,retryInMs})});
   if (hit) usedEmailMessages.push(hit.messageId);
   return hit;
 }

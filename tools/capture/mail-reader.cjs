@@ -18,7 +18,7 @@ async function readCode({reader, file, mailbox, recipient, source, platform='app
   if (!Array.isArray(excluded) || excluded.length > 100 || excluded.some(id=>typeof id !== 'string' || !id || id.length > 2048)) throw Error('mail_excluded_invalid');
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 300000) throw Error('mail_timeout_invalid');
   const options = {file,mailbox,recipient,source,platform,since,until,excluded,timeoutMs,fetchImpl};
-  if (reader === 'otpgmail') return require('./otpgmail.cjs').pollCode(options);
+  if (reader === 'otpgmail') return require('./otpgmail.cjs').pollCode({...options,onTick});
   if (reader === 'outlook') {
     // The current 8802 contract uses a global platform and cannot prove alias delivery.
     if (source !== 'registration' || platform !== 'apple') throw Error('code_pool_contract_unsupported');

@@ -48,13 +48,46 @@ test('poll reads only the bound order and never buys, resends, cancels or extend
   assert.equal(await readCode({...options,reader:'otpgmail',timeoutMs:0}),null);
   assert.equal(calls.length,1);
 });
-test('authentication and transport errors do not expose upstream secrets',async t=>{
+test('authentication and HTTP errors remain terminal and do not expose upstream secrets',async t=>{
   const base={...scope,file:fixture(t),recipient:mailbox,source:'registration',platform:'apple',timeoutMs:1000,keyLoader:()=> 'fixture-secret'};
   for(const [status,expected] of [[401,'otpgmail_unauthorized'],[429,'otpgmail_rate_limited'],[500,'otpgmail_read_failed']]) {
     await assert.rejects(pollCode({...base,fetchImpl:async()=>({ok:false,status,json:async()=>({error:{message:'fixture-secret'}})})}),
       error=>error.message===expected&&!String(error).includes('fixture-secret'));
   }
-  await assert.rejects(pollCode({...base,fetchImpl:async()=>{throw Error('fixture-secret');}}),/otpgmail_request_failed/);
+});
+
+test('a transient order request failure retries within the original polling window',async t=>{
+  let clock=Date.now(),calls=0;const ticks=[],waits=[];
+  const result=await pollCode({...scope,file:fixture(t),recipient:mailbox,source:'registration',platform:'apple',timeoutMs:10000,keyLoader:()=> 'fixture',
+    now:()=>clock,sleepImpl:async ms=>{waits.push(ms);clock+=ms;},onTick:event=>ticks.push(event),
+    fetchImpl:async()=>{if(++calls===1)throw Error('private-response');return {ok:true,json:async()=>({success:true,data:order})};}});
+  assert.equal(result.code,'001234');assert.equal(calls,2);assert.deepEqual(waits,[4000]);
+  assert.equal(ticks[0].error,'otpgmail_request_failed');
+  assert.equal(JSON.stringify(ticks).includes('private-response'),false);
+});
+
+test('an interrupted response body retries but malformed order data still fails',async t=>{
+  let clock=Date.now(),calls=0;
+  const options={...scope,file:fixture(t),recipient:mailbox,source:'registration',platform:'apple',timeoutMs:10000,keyLoader:()=> 'fixture',
+    now:()=>clock,sleepImpl:async ms=>{clock+=ms;}};
+  const result=await pollCode({...options,fetchImpl:async()=>({ok:true,json:async()=>{
+    if(++calls===1)throw Object.assign(Error('private-response'),{name:'AbortError'});
+    return {success:true,data:order};}})});
+  assert.equal(result.code,'001234');assert.equal(calls,2);
+  await assert.rejects(pollCode({...options,fetchImpl:async()=>({ok:true,json:async()=>({success:true,data:null})})}),/otpgmail_order_mismatch/);
+  await assert.rejects(pollCode({...options,fetchImpl:async()=>({ok:true,json:async()=>{throw SyntaxError('private-response');}})}),/otpgmail_response_invalid/);
+});
+
+test('ten-second polling request expiry retains both three-minute email windows',async t=>{
+  const {emailCodeWindow}=require('./flow-mechanics.cjs');
+  let clock=Date.now(),requests=0;const started=clock,resends=[];
+  const options={...scope,file:fixture(t),recipient:mailbox,source:'registration',platform:'apple',keyLoader:()=> 'fixture',
+    now:()=>clock,sleepImpl:async ms=>{clock+=ms;},fetchImpl:async()=>{requests++;clock+=10000;throw Error('request timed out');}};
+  const result=await emailCodeWindow({now:()=>clock,firstMs:180000,secondMs:180000,resendEnabled:true,
+    resend:async()=>{resends.push(clock-started);return {asked:true,ok:true};},
+    waitCode:async ms=>{const end=clock+ms;while(clock<end)await pollCode({...options,timeoutMs:Math.min(10000,end-clock)});return null;}});
+  assert.deepEqual(resends,[180000]);assert.equal(clock-started,360000);assert.equal(requests,36);
+  assert.equal(result.replace,true);
 });
 test('Windows DPAPI survives an inherited incompatible PowerShell module path',{skip:process.platform!=='win32'},async t=>{
   const file=fixture(t),credentialFile=path.join(path.dirname(file),'fixture.dpapi');

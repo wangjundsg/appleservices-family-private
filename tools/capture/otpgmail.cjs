@@ -27,14 +27,16 @@ function loadKey(file) {
 async function get(route, key, {fetchImpl=fetch, timeoutMs=15000}={}) {
   if (!/^(balance|services|orders\/[a-zA-Z0-9_-]{1,128})$/.test(route)) throw fail('otpgmail_route_invalid');
   let response;
+  const signal=AbortSignal.timeout(Math.max(1, Math.ceil(timeoutMs)));
   try {
     response = await fetchImpl('https://otpgmail.net/v1/'+route, {
-      method:'GET', redirect:'error', signal:AbortSignal.timeout(Math.max(1, Math.ceil(timeoutMs))),
+      method:'GET', redirect:'error', signal,
       headers:{Authorization:'Bearer '+key, Accept:'application/json'},
     });
   } catch { throw fail('otpgmail_request_failed'); }
   let value;
-  try { value = await response.json(); } catch { throw fail('otpgmail_response_invalid'); }
+  try { value = await response.json(); }
+  catch(error) { throw fail(signal.aborted || ['AbortError','TimeoutError','TypeError'].includes(error?.name) ? 'otpgmail_request_failed' : 'otpgmail_response_invalid'); }
   if (!response.ok || value?.success !== true) {
     const code = response.status === 401 ? 'otpgmail_unauthorized' : response.status === 429
       ? 'otpgmail_rate_limited' : 'otpgmail_read_failed';
@@ -72,21 +74,31 @@ function pickCode(order, cfg, {mailbox, since, until, excluded=[]}) {
   return {code:newest.code, messageId:newest.messageId, created_at:new Date(newest.at).toISOString()};
 }
 async function pollCode({file, mailbox, recipient, source, platform, since, until, excluded=[], timeoutMs,
-  fetchImpl=fetch, keyLoader=loadKey}) {
+  fetchImpl=fetch, keyLoader=loadKey, now=Date.now, sleepImpl=sleep, onTick=()=>{}}) {
   if (source!=='registration' || platform!=='apple' || recipient!==mailbox) throw fail('otpgmail_scope_invalid');
   const cfg=readConfig(file);
   if (cfg?.provider!=='otpgmail' || !/^[a-zA-Z0-9_-]{1,128}$/.test(cfg.orderId||'') ||
       typeof cfg.email!=='string' || cfg.email.toLowerCase()!==mailbox || !mailbox.endsWith('@gmail.com') ||
       ![1,2,4].includes(cfg.warehouse)) throw fail('otpgmail_config_invalid');
   if (!timeoutMs) return null;
-  const deadline=Date.now()+timeoutMs, key=keyLoader(cfg.credentialFile);
-  while (Date.now()<deadline) {
-    const order=await get('orders/'+cfg.orderId,key,{fetchImpl,timeoutMs:Math.min(15000,deadline-Date.now())});
-    const hit=pickCode(order,cfg,{mailbox,since,until:until??Date.now(),excluded});
-    if (hit) return hit;
-    const remaining=deadline-Date.now();
+  const deadline=now()+timeoutMs, key=keyLoader(cfg.credentialFile);
+  while (now()<deadline) {
+    let order,requestFailed=false;
+    try {
+      order=await get('orders/'+cfg.orderId,key,{fetchImpl,timeoutMs:Math.min(15000,deadline-now())});
+    } catch(error) {
+      // A short observation slice expiring must not terminate the delivery window.
+      if(error.code!=='otpgmail_request_failed')throw error;
+      requestFailed=true;
+      onTick({error:error.code,retryInMs:Math.max(0,Math.min(4000,deadline-now()))});
+    }
+    if(!requestFailed) {
+      const hit=pickCode(order,cfg,{mailbox,since,until:until??now(),excluded});
+      if (hit) return hit;
+    }
+    const remaining=deadline-now();
     if (remaining<=0) break;
-    await sleep(Math.min(4000,remaining));
+    await sleepImpl(Math.min(4000,remaining));
   }
   return null;
 }
