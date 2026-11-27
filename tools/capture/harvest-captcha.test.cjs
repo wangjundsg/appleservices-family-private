@@ -1,7 +1,7 @@
 "use strict";
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');
-const {collect,guard}=require('./harvest-captcha-ui.cjs');
+const {browserWorker,collect,guard,openPage,recoverableWindowError}=require('./harvest-captcha-ui.cjs');
 const {chromium}=require(path.resolve(__dirname,'../../.tools/js/node_modules/playwright-core'));
 
 test('webpage collection saves five source images, refreshes four times and never fills or submits',async()=>{
@@ -28,4 +28,32 @@ test('legacy harvesting flag stops the creation driver before any browser or ord
     const result=spawnSync(process.execPath,[path.join(__dirname,'create-account.cjs'),'--native-browser',...args],{encoding:'utf8'});
     assert.equal(result.status,2);assert.match(result.stderr,/harvest-captcha-ui/);assert.equal(result.stdout,'');
   }
+});
+
+test('captcha 503 is local to one window so it can be replaced',async()=>{
+  const handlers={},stopped=[];
+  const page={route:async()=>{},on:(event,handler)=>{handlers[event]=handler;},isClosed:()=>false};
+  const controller={turn:async()=>{},check(){},stop:error=>stopped.push(error)};
+  const network=await guard(page,controller);
+  handlers.response({url:()=> 'https://appleid.apple.com/captcha',status:()=>503});
+  assert.throws(network.check,/captcha_http_503/);assert.deepEqual(stopped,[]);
+  assert.equal(recoverableWindowError(Error('captcha_http_503')),true);
+  assert.equal(recoverableWindowError(Error('page_http_503')),true);
+  assert.equal(recoverableWindowError(Error('captcha_image_timeout')),true);
+  assert.equal(recoverableWindowError(Error('registration_request_blocked')),false);
+});
+
+test('an account page 503 is detected immediately instead of waiting for an image',async()=>{
+  let turns=0;
+  await assert.rejects(openPage({goto:async()=>({status:()=>503})},{turn:async()=>{turns++;}}),/page_http_503/);
+  assert.equal(turns,1);
+});
+
+test('a window keeps reopening while replacement pages still return 503',async()=>{
+  let contexts=0;
+  const browser={newContext:async()=>{const id=++contexts;return {close:async()=>{},newPage:async()=>({route:async()=>{},on:()=>{},isClosed:()=>false,
+    goto:async()=>({status:()=>id<3?503:200})})};}};
+  const worker=browserWorker(browser,{turn:async()=>{},check(){},stop(){}});
+  await assert.rejects(worker.start(),/page_http_503/);
+  assert.equal(await worker.recover(Error('page_http_503')),true);assert.equal(contexts,3);
 });
