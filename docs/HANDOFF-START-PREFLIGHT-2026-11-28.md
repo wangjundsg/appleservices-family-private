@@ -61,3 +61,28 @@ The failed activation keeps its intent receipt to prevent replay. Subsequent
 failures retain the allowlisted activation stage in the pipeline result, and
 the saved-session activation process honors the account's stop request. A new
 regression verifies that failure details survive without permitting replay.
+
+## Owner-requested fresh login
+
+The owner subsequently requested fresh password/SMS login for the same account.
+The rejected session and prior action receipts were archived privately, retaining
+the same task, device identity and phone order. One code reservation consumed by
+the proven pre-login TLS failure was released with an audit record. Used-code
+history was retained. No new registration or number purchase occurred.
+
+The fresh login completed without an additional SMS challenge. The original
+worker completed NAC and activation, saved the accepted iCloud checkpoint, and
+became authenticated and online. Readback completed the original task with
+`ready` and `handoff_complete=true`. The three previously activated workers
+retained their original process IDs and start times.
+
+The initial task observer briefly read the previous worker's failed runtime
+status before the new worker published its own status. The new worker continued
+successfully; completion was reconciled through the existing readback flow.
+This startup observation race remains a separate follow-up.
+
+The reconnect form also cleared the password before knowing whether the server
+accepted the request. It now retains the input on rejection or transport error,
+and clears it after success, account creation/selection, or dialog closure.
+The UI regression covers both rejected and failed requests plus successful
+submission; passwords remain only in the open form and are not persisted.

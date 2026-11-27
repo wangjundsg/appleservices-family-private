@@ -33,5 +33,28 @@ assert.ok(start >= 0 && end > start);
     assert.deepEqual(calls, ['accounts/add'], 'unexpected login or SMS retry');
     assert.equal(Boolean(notices[0].error), !ok);
   }
+  for (const outcome of ['rejected', 'network-error', 'success']) {
+    let submit, closed = 0;
+    const elements = {
+      loginForm: {addEventListener: (_, handler) => {submit = handler;}},
+      appleID: {value: 'owner@example.test'}, password: {value: 'pasted-fixture-password', focus() {}},
+      twofactor: {value: 'sms'}, loginDialog: {close: () => closed++},
+    };
+    const context = vm.createContext({
+      $: id => elements[id], busy: false, loginMode: 'reconnect', loginAccount: 'current', selectedAccount: 'current',
+      api: async (path, creds) => {
+        assert.equal(path, 'start');
+        assert.equal(creds.password, 'pasted-fixture-password');
+        if (outcome === 'network-error') throw new Error('connection unavailable');
+        return {ok: outcome === 'success', message: 'fixture result'};
+      },
+      notice() {}, poll: async () => {},
+    });
+    vm.runInContext(source.slice(start, end), context);
+    await submit({preventDefault() {}});
+    assert.equal(elements.password.value, outcome === 'success' ? '' : 'pasted-fixture-password');
+    assert.equal(closed, outcome === 'success' ? 1 : 0);
+    assert.equal(context.busy, false);
+  }
   console.log('PASS: saved account selected on success/failure; password cleared; no automatic login/SMS retry.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
