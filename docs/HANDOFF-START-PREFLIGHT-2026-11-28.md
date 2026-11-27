@@ -24,7 +24,28 @@ tests cover durable preflight failures, safe retries and resuming without
 registering again. The deployed panel uses manual worker startup; the three
 previously running account workers retained their process IDs and start times.
 
-The pre-existing ambiguous receipt was not migrated: automatic approval blocked
-the proposed receipt reconciliation and activation recovery command before it
-executed. This account therefore remains registered, awaiting activation handoff;
-successful live activation has not been verified.
+After explicit execution approval, the original task resumed successfully:
+`start` and SMS verification succeeded, with an account-bound GSA session saved.
+
+## Activation ownership
+
+The next failure exposed competing activation flows. The worker starts its
+existing automatic activation after GSA verification, but the pipeline treated
+the GSA checkpoint as a reason to stop it and run the dashboard's separate
+terms-first flow. The observed stop was followed by a worker NAC failure; the
+separate terms query returned HTTP 401.
+
+The pipeline now waits for the worker's accepted iCloud checkpoint instead of
+stopping it at GSA. Explicit recovery of a stopped, verified account invokes
+the same worker activation function with `-activate-saved`; it does not enter
+password login, request a code, or register again. The account-bound GSA/PET
+checkpoint is required. Existing accepted accounts are not activated again.
+The new handoff action retains intent receipts to prevent replay of unknown
+activation outcomes. Cancellation is distinguished from NAC failure, with
+failed NAC component output retained only in the private runtime directory.
+
+Validation: trusted-device and dashboard Go tests passed; 186 pipeline tests
+passed outside the restricted sandbox. Coverage includes waiting through GSA
+without stop/plan calls, saved activation with expired SMS, and rejection of
+missing or mismatched GSA credentials. Live activation completion remains to
+be confirmed during this recovery.

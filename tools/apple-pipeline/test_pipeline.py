@@ -249,7 +249,7 @@ class PipelineTests(unittest.TestCase):
     def test_dashboard_handoff_uses_existing_panel_and_no_legacy_executors(self):
         self.job.cfg["handoff"]="dashboard"
         seen=[]
-        observations=iter([{}, {"waiting_sms":True},{"gsa_verified":True},{"activated":True,"online":True}])
+        observations=iter([{}, {"waiting_sms":True},{"gsa_verified":True,"running":True},{"activated":True,"online":True},{"activated":True,"online":True}])
         def panel(action, **body):
             seen.append(action)
             if action=="observe": return {"ok":True,**next(observations)}
@@ -259,10 +259,30 @@ class PipelineTests(unittest.TestCase):
              patch.object(p.time,"sleep"), patch.object(self.job,"process") as process:
             self.job.authenticate()
         process.assert_not_called()
-        self.assertEqual(seen,["attach","observe","start","observe","sms","observe","stop","plan","activate","resume","observe"])
+        self.assertEqual(seen,["attach","observe","start","observe","sms","observe","observe","resume","observe"])
         self.assertEqual(self.job.status["status"],"ready")
         self.assertTrue(self.job.status["handoff_complete"])
         self.assertNotIn("002026",(self.root/"result.json").read_text())
+
+    def test_saved_activation_resume_never_logs_in_or_uses_expired_sms(self):
+        self.job.cfg["handoff"]="dashboard"
+        self.job.cfg["sms"]["expires_at"]=p.iso(p.time.time()-1)
+        self.job.update(stage="terms",status="needs_review",account_created=True,
+                        operations={"start":{"state":"succeeded"}})
+        seen=[]
+        observations=iter([{"gsa_verified":True,"running":False},{"activated":True,"online":False},
+                           {"activated":True,"online":True}])
+        def panel(action,**body):
+            seen.append(action)
+            if action=="observe": return {"ok":True,**next(observations)}
+            return {"ok":True}
+        with patch.object(self.job,"panel_call",side_effect=panel),patch.object(p,"reserve_code") as reserve,patch.object(self.job,"create") as create:
+            self.job.run(resume=True)
+        self.assertEqual(self.job.status["status"],"ready")
+        self.assertIn("activate-saved",seen)
+        self.assertNotIn("start",seen)
+        self.assertNotIn("sms",seen)
+        reserve.assert_not_called();create.assert_not_called()
 
     def test_handoff_unknown_and_changed_intent_cannot_replay(self):
         with patch.object(self.job,"panel_call",side_effect=p.PipelineError("transport_result_unknown")) as call:

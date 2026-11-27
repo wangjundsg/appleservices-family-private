@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/accountguard"
 	"github.com/Laky-64/appleservices/internal/control"
 )
 
@@ -109,6 +110,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 			value["activated"] = acceptedCheckpointReady(account.Dir, account.AppleID)
 			value["waiting_sms"] = status.Running && status.State == "awaiting_sms"
 			value["online"] = status.Running && status.Authenticated
+			value["running"] = status.Running
 			value["failed"] = !status.Running && status.State == "failed"
 			// Existing worker diagnostics stay private; only recognize the fixed rate-limit marker.
 			if workerRateLimited(account.Dir) {
@@ -123,7 +125,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer s.handoffMu.Unlock()
-	mutating := body.Action == "attach" || body.Action == "start" || body.Action == "sms" || body.Action == "activate" || body.Action == "resume"
+	mutating := body.Action == "attach" || body.Action == "start" || body.Action == "sms" || body.Action == "activate" || body.Action == "activate-saved" || body.Action == "resume"
 	mutating = mutating || body.Action == "subscription-cancel" || body.Action == "subscription-auth" || body.Action == "subscription-buy" || body.Action == "family-create" || body.Action == "family-share" || body.Action == "family-join" || body.Action == "family-join-storage"
 	receiptFile := filepath.Join(folder, "handoff-actions.json")
 	receipts := map[string]handoffReceipt{}
@@ -197,6 +199,8 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 			result = s.activationAction(ctx, account, false, "")
 		case "activate":
 			result = s.activationAction(ctx, account, true, body.Terms)
+		case "activate-saved":
+			result = s.activateSavedRegistration(ctx, account)
 		case "resume":
 			if account != nil {
 				if s.accountStatus(account).Running && s.accountStatus(account).Authenticated {
@@ -224,6 +228,9 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		}
 		if !result.OK {
 			value["state"] = "unknown"
+			if body.Action == "activate-saved" {
+				value["stage"] = result.Stage
+			}
 			// Only pre-login failures prove that retrying start cannot repeat a login.
 			if body.Action == "start" && startPreflightStage(result.Stage) {
 				value["state"] = "not_started"
@@ -243,6 +250,34 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		}
 	}
 	json.NewEncoder(w).Encode(value)
+}
+
+func (s *Server) activateSavedRegistration(ctx context.Context, account *Account) control.Result {
+	if account == nil || !verifiedGSACheckpointReady(account.Dir, account.AppleID) {
+		return control.Result{Stage: "activation-session"}
+	}
+	if accountguard.Check(account.Dir) != nil {
+		return protectedResult()
+	}
+	if acceptedCheckpointReady(account.Dir, account.AppleID) {
+		return control.Result{OK: true}
+	}
+	if !s.launchMu.TryLock() {
+		return control.Result{Stage: "activation-busy"}
+	}
+	defer s.launchMu.Unlock()
+	if s.accountStatus(account).Running {
+		return control.Result{Stage: "activation-busy"}
+	}
+	output, err := runActivationCommand(ctx, s.config.RepoRoot, account.AppleID, s.config.Worker,
+		"-native-adi", "-activate-saved", "-dir", account.Dir, "-python", s.config.Python)
+	stage := "activation-saved"
+	for _, phase := range []string{"nac_failed", "runtime_unavailable", "delegate_refused", "terms_unavailable", "terms_unconfirmed", "checkpoint_missing", "checkpoint_binding_failed"} {
+		if strings.Contains(string(output), "automatic_activation_"+phase) {
+			stage = "activation-" + phase
+		}
+	}
+	return control.Result{OK: err == nil && acceptedCheckpointReady(account.Dir, account.AppleID), Stage: stage}
 }
 
 func startPreflightStage(stage string) bool {

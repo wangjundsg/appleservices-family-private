@@ -124,6 +124,7 @@ var registerMessages = map[string]string{
 	"panel_online_unconfirmed":               "激活已完成，但后台在线状态尚未确认。",
 	"panel_handoff_requires_readback":        "面板操作结果未知，已停止重复调用，请核实该账号。",
 	"panel_start_preflight_failed":           "激活连接预检失败，尚未启动账号登录；修复对应路由后可继续原账号。",
+	"panel_activation_unconfirmed":           "登录验证已完成，但后台激活未完成；已保留当前账号会话，请检查激活阶段。",
 	"panel_activation_plan_unconfirmed":      "未能读取当前条款版本，未提交激活。",
 	"panel_login_unconfirmed":                "面板登录未取得成功确认，请核实账号后台。",
 	"panel_keepalive_unconfirmed":            "面板激活后尚未确认后台在线，请核实。",

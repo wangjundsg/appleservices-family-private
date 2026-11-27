@@ -14,6 +14,21 @@ import (
 
 type activationCommand func(context.Context, string, ...string) ([]byte, error)
 
+func activateSavedSession(ctx context.Context, dir, account, python string, activate func(context.Context, string, string, string) error) error {
+	store := fileStore{dir: dir}
+	saved, err := store.LoadSession()
+	if err != nil || saved == nil || !strings.EqualFold(saved.AppleID, account) || saved.DSID == "" || saved.Tokens["com.apple.gs.idms.pet"] == "" {
+		return errors.New("activation_saved_session_unavailable")
+	}
+	if _, err := os.Stat(store.acceptedPath()); err == nil {
+		_, err = store.LoadAcceptedICloud()
+		return err
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return activate(ctx, dir, account, python)
+}
+
 func activationTermsTuple(output []byte) string {
 	for _, line := range strings.Split(string(output), "\n") {
 		var p struct {
@@ -144,6 +159,12 @@ func autoActivate(ctx context.Context, dir, account, python string) error {
 	}
 	output, err := run(ctx, python, filepath.Join(root, "tools", "mac-nac-check.py"), "--profile", filepath.Join(dir, "native-adi", "hw_info.plist"), "--runtime", runtime, "--encrypt-dll", filepath.Join(root, ".cache", "activation-source-review", "mac-io-encrypt.dll"), "--validation-out", filepath.Join(work, "nac-validation.bin"), "--synthetic-missing-board-fields", "--transport", filepath.Join(root, "bin", "nacexchange.exe"))
 	if err != nil || !strings.Contains(string(output), `"stage": "NACSign"`) {
+		if ctx.Err() != nil {
+			return errors.New("automatic_activation_cancelled")
+		}
+		if len(output) <= 256<<10 {
+			_ = os.WriteFile(filepath.Join(work, "nac-command.log"), output, 0600)
+		}
 		return errors.New("automatic_activation_nac_failed")
 	}
 	if err = activateWithNAC(ctx, run, filepath.Join(root, "bin", "accountsetupcheck.exe"), dir, work); err != nil {

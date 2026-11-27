@@ -798,6 +798,11 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("account_created")
+                    and self.status.get("stage") in {"login", "gsa", "terms"}
+                    and all(op.get("state") == "succeeded" for op in self.status.get("operations", {}).values())):
+                self.dashboard_handoff(saved_only=True)
+                return
             if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("stage") == "login"
                     and self.status.get("account_created") and self.status.get("reason") == "panel_start_preflight_failed"
                     and self.status.get("operations", {}).get("start", {}).get("state") == "not_started"):
@@ -976,23 +981,36 @@ class Job:
             raise PipelineError("followup_sms_requires_readback", "needs_review")
         self.update(followup_sms="ready")
 
-    def dashboard_handoff(self):
+    def dashboard_handoff(self, saved_only=False):
         # The existing dashboard owns Mac identity/login/NAC; do not run the parallel CLI chain.
         try:
             self.panel_once("attach")
             observed = self.panel_call("observe")
+            if saved_only and not (observed.get("gsa_verified") or observed.get("activated")):
+                raise PipelineError("panel_handoff_requires_readback", "needs_review")
             if observed.get("activated") and observed.get("online"):
                 self.complete_family()
                 self.update(status="ready", account_created=True, handoff_complete=True, reason="panel_handoff_complete", next_run_at=None)
                 return
             sms = self.cfg["sms"]
-            if timestamp(sms["expires_at"]) <= time.time(): raise PipelineError("activation_expired", "needs_review")
-            self.prepare_followup_sms()
-            reserve_code(sms)
-            self.panel_once("start")
-            self.update(stage="gsa", reason="panel_login_started")
-            deadline=timestamp(sms["expires_at"])
+            if observed.get("activated"):
+                deadline=time.time()+250
+            elif observed.get("gsa_verified"):
+                self.update(stage="terms", status="running", reason="panel_activation_started")
+                if not observed.get("running"):
+                    if not saved_only:
+                        raise PipelineError("panel_activation_unconfirmed", "needs_review")
+                    self.panel_once("activate-saved")
+                deadline=time.time()+250
+            else:
+                if timestamp(sms["expires_at"]) <= time.time(): raise PipelineError("activation_expired", "needs_review")
+                self.prepare_followup_sms()
+                reserve_code(sms)
+                self.panel_once("start")
+                self.update(stage="gsa", reason="panel_login_started")
+                deadline=timestamp(sms["expires_at"])
             delivered=False
+            activation_seen=bool(observed.get("gsa_verified"))
             while time.time()<deadline:
                 self.check_cancel()
                 observed=self.panel_call("observe")
@@ -1000,12 +1018,12 @@ class Job:
                     self.update(account_created=True, stage="keepalive")
                     break
                 if observed.get("gsa_verified"):
+                    if not activation_seen:
+                        deadline=time.time()+250
+                        activation_seen=True
                     self.update(account_created=True, stage="terms", reason="panel_activation_started")
-                    self.panel_once("stop")
-                    plan=self.panel_call("plan")
-                    if not plan.get("ok") or not plan.get("terms"): raise PipelineError("panel_activation_plan_unconfirmed", "needs_review")
-                    self.panel_once("activate", terms=plan["terms"])
-                    break
+                    if not observed.get("running"):
+                        raise PipelineError("panel_activation_unconfirmed", "needs_review")
                 if observed.get("waiting_sms") and not delivered:
                     self.update(status="waiting_input", reason="awaiting_sms")
                     code=self.next_code()

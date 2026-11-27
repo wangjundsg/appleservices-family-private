@@ -148,7 +148,7 @@ class LocalBrowserTests(unittest.TestCase):
             self.job.replace_number()
             (self.root / "create-sms.txt").write_text("123456")
             return 0, {}
-        observations = iter([{}, {"waiting_sms": True}, {"waiting_sms": True}, {"gsa_verified": True}, {"activated": True, "online": True}])
+        observations = iter([{}, {"waiting_sms": True}, {"waiting_sms": True}, {"gsa_verified": True, "running": True}, {"activated": True, "online": True}, {"activated": True, "online": True}])
         actions = []
         def panel(action, **body):
             actions.append((action, body))
@@ -163,7 +163,7 @@ class LocalBrowserTests(unittest.TestCase):
             self.job.dashboard_handoff()
         self.assertEqual([body["code"] for action, body in actions if action == "sms"], ["654321"])
         self.assertTrue(all(call.kwargs["id"] == "replacement-order" for call in sms.call_args_list))
-        self.assertEqual([action for action, body in actions if action != "observe"], ["attach", "start", "sms", "stop", "plan", "activate", "resume"])
+        self.assertEqual([action for action, body in actions if action != "observe"], ["attach", "start", "sms", "resume"])
         self.assertTrue(self.job.status["handoff_complete"])
         self.assertEqual(self.job.status["status"], "ready")
 

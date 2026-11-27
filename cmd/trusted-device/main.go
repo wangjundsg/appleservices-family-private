@@ -66,6 +66,7 @@ func run() (runErr error) {
 	guiAuth := flag.Bool("gui-auth", false, "complete initial SMS verification through the dashboard")
 	resumeSession := flag.Bool("resume-session", false, "restore the account-bound GSA and accepted iCloud sessions without a password")
 	autoActivation := flag.Bool("auto-activate", false, "owner-authorized web terms repair and device activation; may require SMS through the dashboard")
+	activationOnly := flag.Bool("activate-saved", false, "continue activation from this account's verified GSA checkpoint; never log in or request a code")
 	registerOnly := flag.Bool("register-only", false, "register this device, emit a receipt, and exit without approving requests")
 	flag.Parse()
 	if *resumeSession && *registerOnly {
@@ -176,12 +177,12 @@ func run() (runErr error) {
 		return nil
 	}
 	appleID, password := os.Getenv("APPLESERVICES_APPLEID"), os.Getenv("APPLESERVICES_PASSWORD")
-	if appleID == "" || (!*resumeSession && password == "") {
+	if appleID == "" || (!*resumeSession && !*activationOnly && password == "") {
 		return errors.New("APPLESERVICES_APPLEID and APPLESERVICES_PASSWORD are required")
 	}
 	os.Unsetenv("APPLESERVICES_APPLEID")
 	os.Unsetenv("APPLESERVICES_PASSWORD")
-	if *resumeSession {
+	if *resumeSession || *activationOnly {
 		password = ""
 	}
 	var accepted appleservices.RestoredICloudSession
@@ -215,6 +216,13 @@ func run() (runErr error) {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}()
+	if *activationOnly {
+		status.State = "activating_icloud"
+		if err := status.save(*dir); err != nil {
+			return err
+		}
+		return activateSavedSession(context.Background(), *dir, appleID, *python, autoActivate)
+	}
 	if *resumeSession {
 		status.RenewalMode = "saved_session_check"
 		accepted, err = store.LoadAcceptedICloud()

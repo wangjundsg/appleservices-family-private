@@ -9,8 +9,33 @@ import (
 	"strings"
 	"testing"
 
+	appleservices "github.com/Laky-64/appleservices"
 	"github.com/Laky-64/appleservices/internal/appleweb"
 )
+
+func TestActivateSavedSessionRequiresBoundVerifiedCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	store := fileStore{dir: dir}
+	called := 0
+	activate := func(context.Context, string, string, string) error { called++; return nil }
+	for _, session := range []*appleservices.Session{
+		{AppleID: "other@example.test", DSID: "1", Tokens: map[string]string{"com.apple.gs.idms.pet": "fixture"}},
+		{AppleID: "owner@example.test", DSID: "1"},
+		{AppleID: "owner@example.test", DSID: "1", Tokens: map[string]string{"com.apple.gs.idms.pet": "fixture"}},
+	} {
+		if err := store.SaveSession(session); err != nil {
+			t.Fatal(err)
+		}
+		err := activateSavedSession(context.Background(), dir, "owner@example.test", "python", activate)
+		valid := session.AppleID == "owner@example.test" && session.Tokens["com.apple.gs.idms.pet"] != ""
+		if (err == nil) != valid {
+			t.Fatalf("unexpected checkpoint admission: %v", err)
+		}
+	}
+	if called != 1 {
+		t.Fatal("unverified or mismatched session reached activation")
+	}
+}
 
 type repairFixture struct {
 	terms, codes        int
