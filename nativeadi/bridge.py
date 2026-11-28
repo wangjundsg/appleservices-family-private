@@ -9,6 +9,7 @@ import json
 import os
 import traceback
 import uuid
+import time
 
 last_function = 0
 
@@ -49,6 +50,9 @@ def local_failure(error):
 def native_failure(result):
     # Classify in memory; never expose the native payload or its URLs/metadata.
     raw = result.lower()
+    # Windows localizes the message, but this transport phase and errno are stable.
+    if b'tcp connect error' in raw and (b'os error 10060' in raw or b'timed out' in raw):
+        return NativeFailure('native_connect_timeout')
     if b'handshake' in raw and (b'eof' in raw or b'tls' in raw):
         return NativeFailure('native_tls_handshake_failed')
     if b'timed out' in raw or b'timeout' in raw:
@@ -56,6 +60,18 @@ def native_failure(result):
     if b'connection refused' in raw or b'dns error' in raw:
         return NativeFailure('native_connection_failed')
     return NativeFailure('native_operation_failed')
+
+def provision_with_retry(generate, profile, sleep=time.sleep):
+    # Only initial code/provisioning connection failures, before account login.
+    # A response/read timeout may follow a sent request and must not be replayed.
+    for attempt in range(3):
+        try:
+            return generate()
+        except NativeFailure as failure:
+            if failure.code != 'native_connect_timeout' or failure.function != 103 or attempt == 2:
+                raise
+            record_failure(profile, failure)
+            sleep(2 * (attempt + 1))
 
 class SyncResult(C.Structure):
     _fields_ = [('ptr', C.c_void_p), ('length', C.c_int32)]

@@ -28,7 +28,7 @@ kernel.SetStdHandle(C.c_uint32(-11),msvcrt.get_osfhandle(null_fd))
 kernel.SetStdHandle(C.c_uint32(-12),msvcrt.get_osfhandle(null_fd))
 
 import bridge
-from bridge import Bridge, NativeFailure, encode_string, local_failure, record_failure
+from bridge import Bridge, NativeFailure, encode_string, local_failure, record_failure, provision_with_retry
 
 failure_profile = None
 
@@ -115,7 +115,7 @@ class Provider:
         if not state_path.exists(): state_path.write_bytes(plistlib.dumps({'keychain_identifier':identifier}))
         state=plistlib.loads(state_path.read_bytes())
         if state.get('keychain_identifier')!=identifier: raise RuntimeError('native provisioning identity mismatch')
-        self.code()  # Real generation preflight; the result is not printed.
+        provision_with_retry(self.code, self.profile)  # Same identity/route; no account login yet.
 
     def code(self):
         result=self.bridge.call(103,self.anisette.pack())

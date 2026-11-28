@@ -263,7 +263,7 @@ func (c *Client) receive(ctx context.Context, id uint64) (reply, error) {
 func (c *Client) validateReply(message reply, id uint64) (reply, error) {
 	if message.Error != "" {
 		switch message.Error {
-		case "native_tls_handshake_failed", "native_network_timeout", "native_connection_failed", "native_operation_failed",
+		case "native_connect_timeout", "native_tls_handshake_failed", "native_network_timeout", "native_connection_failed", "native_operation_failed",
 			"native_bridge_timeout", "native_local_io_error", "native_local_value_error", "native_local_operation_failed":
 			phase := map[int]string{51: "configuration", 150: "identity", 198: "profile-create", 166: "profile-load",
 				18: "configuration-load", 17: "identity-load", 19: "push-load", 201: "transport-isolation",

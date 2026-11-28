@@ -54,6 +54,7 @@ func TestNativeFailureReportsOnlyKnownOperation(t *testing.T) {
 		want    string
 	}{
 		{reply{Error: "native_operation_failed", Function: 103}, "native_operation_failed (code/provisioning)"},
+		{reply{Error: "native_connect_timeout", Function: 103}, "native_connect_timeout (code/provisioning)"},
 		{reply{Error: "native_network_timeout", Function: 106}, "native_network_timeout (headers)"},
 		{reply{Error: "native_local_value_error", Function: 130}, "native_local_value_error (provider)"},
 		{reply{Error: "private-token", Function: 999}, "native generation or provisioning failed"},
