@@ -61,8 +61,12 @@ def local_ocr(path: str) -> str:
 
 
 def solve_yes(key: str, image_b64: str, timeout: int) -> str:
+    # Both official nodes share the API; a task must stay on its creation node.
+    endpoint = os.environ.get("YESCAPTCHA_API_BASE", "https://api.yescaptcha.com").rstrip("/")
+    if endpoint not in {"https://api.yescaptcha.com", "https://cn.yescaptcha.com"}:
+        raise ValueError("unsupported_yescaptcha_endpoint")
     created = post_json(
-        PROVIDERS["yes"]["create"],
+        endpoint + "/createTask",
         {"clientKey": key, "task": {"type": "ImageToTextTask", "body": image_b64}},
     )
     task_id = created.get("taskId")
@@ -72,7 +76,7 @@ def solve_yes(key: str, image_b64: str, timeout: int) -> str:
     while time.time() < deadline:
         time.sleep(2)
         got = post_json(
-            PROVIDERS["yes"]["result"], {"clientKey": key, "taskId": task_id}
+            endpoint + "/getTaskResult", {"clientKey": key, "taskId": task_id}
         )
         if got.get("status") == "ready":
             return (got.get("solution") or {}).get("text", "").strip()
