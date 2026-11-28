@@ -13,6 +13,18 @@ import (
 	"github.com/Laky-64/appleservices/internal/appleweb"
 )
 
+func TestUnauthorizedActivationIsClassifiedWithoutReplayingDelegate(t *testing.T) {
+	calls := 0
+	run := func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return []byte("ErrorID=UNAUTHORIZED"), errors.New("refused")
+	}
+	err := activateWithNAC(context.Background(), run, "helper", t.TempDir(), t.TempDir())
+	if err == nil || err.Error() != "automatic_activation_unauthorized" || calls != 1 {
+		t.Fatalf("wrong classification or replay: %v calls=%d", err, calls)
+	}
+}
+
 func TestActivateSavedSessionRequiresBoundVerifiedCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	store := fileStore{dir: dir}

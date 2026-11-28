@@ -16,6 +16,7 @@ import (
 
 	"github.com/Laky-64/appleservices/aps"
 	"github.com/Laky-64/appleservices/gsa"
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"github.com/Laky-64/appleservices/internal/control"
 	"github.com/Laky-64/appleservices/nativeadi"
 	"golang.org/x/net/http/httpproxy"
@@ -117,6 +118,7 @@ func nativeRouteTransport() (*http.Transport, error) {
 	// Retain that trust policy, but remove the GSA-only SOCKS dial override.
 	transport := gsa.AppleRootTransport().(*http.Transport)
 	transport.DialContext = http.DefaultTransport.(*http.Transport).DialContext
+	activationenv.ConfigureTransport(transport)
 	transport.Proxy = func(r *http.Request) (*url.URL, error) { return selectProxy(r.URL) }
 	return transport, nil
 }

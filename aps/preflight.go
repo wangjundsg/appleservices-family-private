@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/gsa"
+	"github.com/Laky-64/appleservices/internal/activationenv"
 )
 
 // Preflight uses the worker's courier dialer without sending any APS auth frame.
@@ -20,7 +21,7 @@ func Preflight(ctx context.Context, direct bool) (string, error) {
 	dial := dialCourier
 	if direct {
 		dial = func(ctx context.Context, address string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+			return (&net.Dialer{}).DialContext(ctx, activationenv.Network(), address)
 		}
 	}
 	return preflight(ctx, dial, &tls.Config{RootCAs: pool, ServerName: "courier.push.apple.com", NextProtos: []string{"apns-security-v3"}, MinVersion: tls.VersionTLS12})

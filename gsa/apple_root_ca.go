@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"golang.org/x/net/proxy"
 )
 
@@ -29,6 +30,7 @@ func AppleRootTransport() http.RoundTripper {
 	}
 	transport.TLSClientConfig.RootCAs = pool
 	applySOCKS5Proxy(transport)
+	activationenv.ConfigureTransport(transport)
 	return transport
 }
 

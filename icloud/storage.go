@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"howett.net/plist"
 )
 
@@ -88,7 +89,7 @@ func FetchAccountSettings(ctx context.Context, dsid, adsid, token string, header
 	request.Header.Set("X-MMe-Language", "en")
 	request.Header.Set("Accept", "application/x-plist")
 	request.Header.Set("User-Agent", "com.apple.iCloudHelper/282 CFNetwork/1408.0.4 Darwin/22.5.0")
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: activationenv.HTTPTransport(), Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, &StorageError{Stage: "settings-transport"}
@@ -257,7 +258,7 @@ func FetchStorageInfo(ctx context.Context, sd map[string]any, appleID, dsid, ads
 	if udid := request.Header.Get("X-Mme-Device-Id"); udid != "" {
 		request.Header.Set("X-Client-UDID", strings.ToLower(udid))
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: activationenv.HTTPTransport(), Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, &StorageError{Stage: "transport"}

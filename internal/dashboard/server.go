@@ -1020,6 +1020,7 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 	command.Env = append(command.Env, "APPLESERVICES_APPLEID="+strings.TrimSpace(creds.AppleID))
 	if creds.Password != "" {
 		command.Env = append(command.Env, "APPLESERVICES_PASSWORD="+creds.Password)
+		command.Env = append(command.Env, "APPLESERVICES_FRESH_GSA=1")
 	}
 	command.Stdout, command.Stderr = output, diagnostic
 	if command.Start() != nil {
@@ -1035,9 +1036,9 @@ func (s *Server) startInMode(ctx context.Context, dir string, creds credentials,
 		}
 	}()
 	if resume {
-		return control.Result{OK: true, Message: "正在恢复已保存的 Apple 登录会话"}
+		return control.Result{OK: true, WorkerPID: command.Process.Pid, Message: "正在恢复已保存的 Apple 登录会话"}
 	}
-	return control.Result{OK: true, Message: "正在连接 Apple，请稍等"}
+	return control.Result{OK: true, WorkerPID: command.Process.Pid, Message: "正在连接 Apple，请稍等"}
 }
 
 func lastProcessError(path string) string {

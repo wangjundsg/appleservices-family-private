@@ -979,7 +979,7 @@ class Job:
             # The hold code explains this refusal; the job keeps the reason that
             # made it unresolved.
             extra = {}
-            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason and prior not in {"form_running", "stage_started", "mailbox_purchase_pending"}
+            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason and prior not in {"form_running", "stage_started", "mailbox_purchase_pending", "panel_activation_started", "panel_login_started", "panel_fresh_login_started", "awaiting_sms"}
                     and error.reason not in {"gsa_account_repair_required", "apple_sms_verify_precondition_failed"}):
                 extra["hold_reason"] = error.reason
                 self.update(status=error.state, reason=prior, cooldown_until=cooldown, **extra)
@@ -1083,20 +1083,28 @@ class Job:
                 self.update(status="ready", account_created=True, handoff_complete=True, reason="panel_handoff_complete", next_run_at=None)
                 return
             sms = self.cfg["sms"]
+            expected_pid = None
+            starting_until = 0
+            sms_action = "sms"
             if observed.get("activated"):
                 deadline=time.time()+250
             elif observed.get("gsa_verified"):
                 self.update(stage="terms", status="running", reason="panel_activation_started")
                 if not observed.get("running"):
-                    if not saved_only:
-                        raise PipelineError("panel_activation_unconfirmed", "needs_review")
-                    self.panel_once("activate-saved")
+                    if not saved_only or not observed.get("failed"):
+                        raise PipelineError("panel_fresh_login_required", "needs_review")
+                    started = self.restart_activation()
+                    expected_pid = started.get("worker_pid")
+                    starting_until = time.time()+15
+                    sms_action = "sms-restart"
                 deadline=time.time()+250
             else:
                 if timestamp(sms["expires_at"]) <= time.time(): raise PipelineError("activation_expired", "needs_review")
                 self.prepare_followup_sms()
                 reserve_code(sms)
-                self.panel_once("start")
+                started = self.panel_once("start")
+                expected_pid = started.get("worker_pid")
+                starting_until = time.time()+15
                 self.update(stage="gsa", reason="panel_login_started")
                 deadline=timestamp(sms["expires_at"])
             delivered=False
@@ -1104,6 +1112,31 @@ class Job:
             while time.time()<deadline:
                 self.check_cancel()
                 observed=self.panel_call("observe")
+                if expected_pid and observed.get("worker_pid") != expected_pid:
+                    if time.time() >= starting_until:
+                        raise PipelineError("panel_worker_start_unconfirmed", "needs_review")
+                    time.sleep(1)
+                    continue
+                if observed.get("failed"):
+                    failure = observed.get("failure_reason", "")
+                    restartable = failure in {"automatic_activation_unauthorized", "automatic_activation_nac_failed",
+                                              "automatic_activation_delegate_refused", "automatic_activation_terms_unavailable"}
+                    if restartable and not self.status.get("activation_recovery_started"):
+                        started = self.restart_activation()
+                        expected_pid = started.get("worker_pid")
+                        starting_until = time.time()+15
+                        sms_action = "sms-restart"
+                        delivered = False
+                        activation_seen = False
+                        deadline = min(timestamp(sms["expires_at"]), time.time()+250)
+                        continue
+                    reason = {"automatic_activation_unauthorized":"panel_activation_unauthorized",
+                              "automatic_activation_nac_failed":"panel_activation_nac_failed",
+                              "automatic_activation_delegate_refused":"panel_activation_delegate_refused",
+                              "automatic_activation_terms_unavailable":"panel_activation_terms_failed",
+                              "automatic_activation_terms_unconfirmed":"panel_activation_terms_failed",
+                              "automatic_activation_runtime_unavailable":"panel_activation_runtime_failed"}.get(failure,"panel_login_unconfirmed")
+                    raise PipelineError(reason, "needs_review")
                 if observed.get("activated"):
                     self.update(account_created=True, stage="keepalive")
                     break
@@ -1118,11 +1151,9 @@ class Job:
                     self.update(status="waiting_input", reason="awaiting_sms")
                     code=self.next_code()
                     if code:
-                        self.panel_once("sms", code=code)
+                        self.panel_once(sms_action, code=code)
                         delivered=True
                         self.update(status="running")
-                elif observed.get("failed"):
-                    raise PipelineError("panel_login_unconfirmed", "needs_review")
                 time.sleep(4)
             else: raise PipelineError("activation_expired", "needs_review")
             self.check_cancel()
@@ -1149,6 +1180,20 @@ class Job:
             try: self.panel_call("stop")
             except Exception: pass
             raise
+
+    def restart_activation(self):
+        # One fresh authentication attempt, never a replay of the failed PET or
+        # an ambiguous start. Existing purchase and OTP budgets still apply.
+        if self.status.get("activation_recovery_started"):
+            raise PipelineError("panel_activation_recovery_exhausted", "needs_review")
+        if timestamp(self.cfg["sms"]["expires_at"]) <= time.time()+60:
+            raise PipelineError("activation_expired", "needs_review")
+        reserve_code(self.cfg["sms"])
+        self.update(activation_recovery_started=True, reason="panel_fresh_login_started", status="running", stage="gsa")
+        reply=sms_call(self.cfg["sms"], action="setStatus", status="3", id=self.cfg["sms"]["activation"])
+        if reply != "ACCESS_RETRY_GET":
+            raise PipelineError("followup_sms_requires_readback", "needs_review")
+        return self.panel_once("restart-activation")
 
     def complete_family(self):
         family=self.cfg.get("family", {})

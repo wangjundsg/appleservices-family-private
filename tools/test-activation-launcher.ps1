@@ -10,6 +10,7 @@ try {
     $taskConfig | ConvertTo-Json | Set-Content -LiteralPath $taskConfigPath
     $taskReceipt = (& (Join-Path $PSScriptRoot 'start-activation-dashboard.ps1') @taskArgs) | ConvertFrom-Json
     if ($taskReceipt.activation_route -ne 'direct' -or !$taskReceipt.manual_start -or $taskReceipt.config_source -ne $taskConfigPath -or $taskReceipt.config_sha256 -ne (Get-FileHash -LiteralPath $taskConfigPath).Hash.ToLowerInvariant()) { throw 'Configuration provenance was not preserved.' }
+    if ($taskReceipt.activation_ip_family -ne 'ipv4') { throw 'Activation must select IPv4 explicitly.' }
     $taskRejected = $false
     try { & (Join-Path $PSScriptRoot 'start-activation-dashboard.ps1') @taskArgs -AllowPurchase | Out-Null } catch { $taskRejected = $true }
     if (!$taskRejected) { throw 'Purchasing accepted without registration configuration.' }

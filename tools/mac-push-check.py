@@ -17,6 +17,8 @@ import plistlib
 import struct
 import sys
 import uuid
+import subprocess
+import tempfile
 
 
 def main():
@@ -43,6 +45,16 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nativeadi"))
         from bridge import Bridge, encode_string
         b = Bridge(str(args.library.resolve(strict=True)))
+        if os.environ.get('APPLESERVICES_ACTIVATION_IPV4') == '1':
+            profile.mkdir(mode=0o700, parents=True, exist_ok=True)
+            network_dir=Path(tempfile.mkdtemp(prefix='ipv4-',dir=profile))
+            resolver_path=network_dir/'resolver.dll'
+            subprocess.run(['gcc','-shared','-O2',str(Path(__file__).resolve().parents[1]/'nativeadi/assets/transport_fence.c'),'-o',str(resolver_path),'-lws2_32'],
+                           check=True,timeout=30,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
+            resolver=C.CDLL(str(resolver_path))
+            resolver.InstallIPv4Resolver.argtypes=[C.c_void_p]
+            resolver.InstallIPv4Resolver.restype=C.c_int
+            if resolver.InstallIPv4Resolver(b.library._handle)!=1: raise RuntimeError('private IPv4 resolver unavailable')
         initial_hardware = plistlib.loads((profile / "hw_info.plist").read_bytes()) if (profile / "hw_info.plist").exists() else None
         if initial_hardware is not None and args.device:
             binding = json.loads(args.device.read_text(encoding="utf-8-sig"))

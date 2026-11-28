@@ -106,7 +106,13 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		value := map[string]any{"ok": true, "attached": account != nil}
 		if account != nil {
 			status := s.accountStatus(account)
-			value["gsa_verified"] = verifiedGSACheckpointReady(account.Dir, account.AppleID)
+			value["worker_pid"] = status.PID
+			for _, reason := range []string{"automatic_activation_unauthorized", "automatic_activation_nac_failed", "automatic_activation_delegate_refused", "automatic_activation_terms_unavailable", "automatic_activation_terms_unconfirmed", "automatic_activation_runtime_unavailable"} {
+				if status.FailureReason == reason {
+					value["failure_reason"] = reason
+				}
+			}
+			value["gsa_verified"] = verifiedGSACheckpointReady(account.Dir, account.AppleID) && (!status.Running || (status.State != "initializing" && status.State != "signing_in" && status.State != "awaiting_sms"))
 			value["activated"] = acceptedCheckpointReady(account.Dir, account.AppleID)
 			value["waiting_sms"] = status.Running && status.State == "awaiting_sms"
 			value["online"] = status.Running && status.Authenticated
@@ -126,6 +132,7 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 	}
 	defer s.handoffMu.Unlock()
 	mutating := body.Action == "attach" || body.Action == "start" || body.Action == "sms" || body.Action == "activate" || body.Action == "activate-saved" || body.Action == "resume"
+	mutating = mutating || body.Action == "restart-activation" || body.Action == "sms-restart"
 	mutating = mutating || body.Action == "subscription-cancel" || body.Action == "subscription-auth" || body.Action == "subscription-buy" || body.Action == "family-create" || body.Action == "family-share" || body.Action == "family-join" || body.Action == "family-join-storage"
 	receiptFile := filepath.Join(folder, "handoff-actions.json")
 	receipts := map[string]handoffReceipt{}
@@ -185,11 +192,21 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 			var err error
 			account, err = s.attachRegistration(id, input)
 			result.OK = err == nil
-		case "start":
+		case "start", "restart-activation":
 			if account != nil {
+				if body.Action == "restart-activation" {
+					status := s.accountStatus(account)
+					var receipt pipelineReceipt
+					if readRegisterJSON(filepath.Join(folder, "result.json"), &receipt) != nil || !receipt.AccountCreated || status.Running || status.State != "failed" || acceptedCheckpointReady(account.Dir, account.AppleID) {
+						break
+					}
+					if err := archiveActivationAttempt(account.Dir); err != nil {
+						break
+					}
+				}
 				result = s.startAccount(ctx, account, credentials{AppleID: input.Email, Password: input.Password, TwoFactor: "sms"})
 			}
-		case "sms":
+		case "sms", "sms-restart":
 			if account != nil && registrationOTPPattern.MatchString(body.Code) {
 				if s.callFor(ctx, account.Dir, "/action", control.Action{Action: "submit-sms", Code: body.Code}, &result) != nil {
 					result.OK = false
@@ -200,7 +217,8 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		case "activate":
 			result = s.activationAction(ctx, account, true, body.Terms)
 		case "activate-saved":
-			result = s.activateSavedRegistration(ctx, account)
+			// Failed first activations must start with fresh authentication.
+			result = control.Result{Stage: "activation-fresh-login-required"}
 		case "resume":
 			if account != nil {
 				if s.accountStatus(account).Running && s.accountStatus(account).Authenticated {
@@ -220,6 +238,9 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 			return
 		}
 		value = map[string]any{"ok": result.OK}
+		if result.WorkerPID != 0 {
+			value["worker_pid"] = result.WorkerPID
+		}
 		if account != nil {
 			value["account_id"] = account.ID
 		}
@@ -251,6 +272,26 @@ func (s *Server) serveRegistrationHandoff(w http.ResponseWriter, r *http.Request
 		}
 	}
 	json.NewEncoder(w).Encode(value)
+}
+
+func archiveActivationAttempt(dir string) error {
+	backup, err := os.MkdirTemp(dir, "activation-before-restart-")
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"session.json", "runtime.json", "daemon.err.log", "daemon.out.log"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(backup, name), data, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) activateSavedRegistration(ctx context.Context, account *Account) control.Result {

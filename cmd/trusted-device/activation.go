@@ -69,6 +69,9 @@ func activateWithNAC(ctx context.Context, run activationCommand, helper, dir, wo
 		return nil
 	}
 	if !strings.Contains(string(output), "ErrorID=MOBILEME_TERMS_OF_SERVICE_UPDATE") {
+		if strings.Contains(string(output), "ErrorID=UNAUTHORIZED") {
+			return errors.New("automatic_activation_unauthorized")
+		}
 		return errors.New("automatic_activation_delegate_refused")
 	}
 	output, err = run(ctx, helper, append(append([]string{}, base...), "-dump", filepath.Join(work, "setup.html"))...)
@@ -89,6 +92,9 @@ func activateWithNAC(ctx context.Context, run activationCommand, helper, dir, wo
 	}
 	output, err = exchange(true)
 	if !activationAccepted(output, err) {
+		if strings.Contains(string(output), "ErrorID=UNAUTHORIZED") {
+			return errors.New("automatic_activation_unauthorized")
+		}
 		return errors.New("automatic_activation_delegate_refused")
 	}
 	return nil

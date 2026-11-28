@@ -199,6 +199,13 @@ func run() (runErr error) {
 		if errors.Is(runErr, gsa.ErrAccountRepairRequired) {
 			status.FailureReason = gsa.ErrAccountRepairRequired.Error()
 		}
+		if runErr != nil {
+			for _, reason := range []string{"automatic_activation_unauthorized", "automatic_activation_nac_failed", "automatic_activation_delegate_refused", "automatic_activation_terms_unavailable", "automatic_activation_terms_unconfirmed", "automatic_activation_runtime_unavailable"} {
+				if runErr.Error() == reason {
+					status.FailureReason = reason
+				}
+			}
+		}
 		if status.State != "verification_required" {
 			if runErr != nil {
 				status.FailureStage, status.State = status.State, "failed"

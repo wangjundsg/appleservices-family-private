@@ -31,3 +31,34 @@ func TestHandoffMissingRuntimeIsDurableAndCanRetry(t *testing.T) {
 		t.Fatal("worker was launched")
 	}
 }
+
+func TestFailedActivationArchivesPrivateEvidence(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte("private-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveActivationAttempt(dir); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "activation-before-restart-*", "session.json"))
+	if len(paths) != 1 {
+		t.Fatal("missing recovery evidence")
+	}
+	data, err := os.ReadFile(paths[0])
+	if err != nil || string(data) != "private-fixture" {
+		t.Fatal("evidence changed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "session.json")); err != nil {
+		t.Fatal("original was removed")
+	}
+}
+
+func TestSavedActivationEndpointDoesNotReuseFailedSession(t *testing.T) {
+	s := registerTestServer(t)
+	folder := registerFixture(t, s, pipelineReceipt{Stage: "terms", Status: "needs_review", AccountCreated: true})
+	_ = writeRegisterJSON(filepath.Join(folder, "input.json"), handoffInput{Email: "owner@example.test", Handoff: "dashboard"})
+	w := registerTestCall(s, "POST", "/api/register/"+testRegisterID+"/handoff", `{"action":"activate-saved"}`)
+	if !strings.Contains(w.Body.String(), "activation-fresh-login-required") {
+		t.Fatal(w.Body.String())
+	}
+}

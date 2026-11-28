@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Laky-64/appleservices/internal/activationenv"
 	"golang.org/x/net/proxy"
 )
 
@@ -29,7 +30,7 @@ func dialCourier(ctx context.Context, address string) (net.Conn, error) {
 		return nil, err
 	}
 	if proxyURL == nil {
-		return dialer.DialContext(ctx, "tcp", address)
+		return dialer.DialContext(ctx, activationenv.Network(), address)
 	}
 	if proxyURL.Scheme == "socks5" || proxyURL.Scheme == "socks5h" {
 		d, err := proxy.FromURL(proxyURL, dialer)
@@ -53,7 +54,7 @@ func dialCourier(ctx context.Context, address string) (net.Conn, error) {
 			host = net.JoinHostPort(proxyURL.Hostname(), "80")
 		}
 	}
-	connection, err := dialer.DialContext(ctx, "tcp", host)
+	connection, err := dialer.DialContext(ctx, activationenv.Network(), host)
 	if err != nil {
 		return nil, err
 	}

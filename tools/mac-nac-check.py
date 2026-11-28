@@ -21,14 +21,14 @@ import requests
 
 
 def fetch_certificate(transport, output):
-    command = [str(transport), "-op", "cert", "-out", str(output)]
+    command = [str(transport), "-op", "cert", "-out", str(output), "-ipv4"]
     try:
         subprocess.run(command, check=True, timeout=40)
-        return []
+        return ["-ipv4"]
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         # Only this public GET is replayed. Carry the selected route into the
         # subsequent session POST, which must never be retried automatically.
-        subprocess.run(command + ["-ipv4"], check=True, timeout=40)
+        subprocess.run(command, check=True, timeout=40)
         return ["-ipv4"]
 
 

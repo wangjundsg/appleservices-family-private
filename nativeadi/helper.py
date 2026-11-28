@@ -80,6 +80,10 @@ class Provider:
         self.fence.InstallTransportFence.argtypes=[C.c_void_p]
         self.fence.InstallTransportFence.restype=C.c_int
         if self.fence.InstallTransportFence(b.library._handle)!=2: raise RuntimeError('private transport isolation failed')
+        if os.environ.get('APPLESERVICES_ACTIVATION_IPV4') == '1':
+            self.fence.InstallIPv4Resolver.argtypes=[C.c_void_p]
+            self.fence.InstallIPv4Resolver.restype=C.c_int
+            if self.fence.InstallIPv4Resolver(b.library._handle)!=1: raise RuntimeError('private IPv4 resolver unavailable')
         hardware_path=self.profile/'hw_info.plist'
         if not hardware_path.exists():
             mac_address=base64.b64decode(request['mac_address'],validate=True)

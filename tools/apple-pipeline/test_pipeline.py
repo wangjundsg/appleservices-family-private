@@ -13,7 +13,7 @@ spec.loader.exec_module(p)
 
 
 def config():
-    return {"job_id": "test-job", "email": "owner@example.test", "password": "Test-Only123!", "accept_terms": True,
+    return {"job_id": "test-job", "email": "owner@example.test", "password": "Test-Only123!", "accept_terms": True, "captcha_solver": "manual",
             "first": "Audrey", "last": "Bennett", "birthday": "1994-03-09",
             "email_code_file": str(Path(tempfile.gettempdir()) / "unused-test-code.txt"), "sms": {"activation": "test-activation", "key": "test-key", "phonecc": "GB",
             "phone": "7700900123", "expires_at": p.iso(p.time.time() + 600)},
@@ -264,13 +264,13 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(self.job.status["handoff_complete"])
         self.assertNotIn("002026",(self.root/"result.json").read_text())
 
-    def test_saved_activation_resume_never_logs_in_or_uses_expired_sms(self):
+    def test_saved_activation_resume_never_reuses_failed_session_or_expired_sms(self):
         self.job.cfg["handoff"]="dashboard"
         self.job.cfg["sms"]["expires_at"]=p.iso(p.time.time()-1)
         self.job.update(stage="terms",status="needs_review",account_created=True,
                         operations={"start":{"state":"succeeded"}})
         seen=[]
-        observations=iter([{"gsa_verified":True,"running":False},{"activated":True,"online":False},
+        observations=iter([{"gsa_verified":True,"running":False,"failed":True},{"activated":True,"online":False},
                            {"activated":True,"online":True}])
         def panel(action,**body):
             seen.append(action)
@@ -278,8 +278,9 @@ class PipelineTests(unittest.TestCase):
             return {"ok":True}
         with patch.object(self.job,"panel_call",side_effect=panel),patch.object(p,"reserve_code") as reserve,patch.object(self.job,"create") as create:
             self.job.run(resume=True)
-        self.assertEqual(self.job.status["status"],"ready")
-        self.assertIn("activate-saved",seen)
+        self.assertEqual(self.job.status["status"],"needs_review")
+        self.assertEqual(self.job.status["reason"],"activation_expired")
+        self.assertNotIn("activate-saved",seen)
         self.assertNotIn("start",seen)
         self.assertNotIn("sms",seen)
         reserve.assert_not_called();create.assert_not_called()

@@ -35,6 +35,7 @@ $taskEnvironment = @{
     HTTP_PROXY = ''; HTTPS_PROXY = ''
     ALL_PROXY = ''; NO_PROXY = '*'
     APPLESERVICES_SOCKS_PROXY = ''
+    APPLESERVICES_ACTIVATION_IPV4 = '1'
     APPLESERVICES_REMOTE_ANISETTE = ''
     APPLESERVICES_NETWORK_CONFIG_SOURCE = $taskConfigPath
     APPLESERVICES_NETWORK_CONFIG_SHA256 = (Get-FileHash -LiteralPath $taskConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -53,7 +54,7 @@ $taskReceipt = [ordered]@{
     worker_sha256 = (Get-FileHash -LiteralPath $taskWorker -Algorithm SHA256).Hash.ToLowerInvariant()
     library_sha256 = (Get-FileHash -LiteralPath $taskLibrary -Algorithm SHA256).Hash.ToLowerInvariant()
     config_source = $taskConfigPath; config_sha256 = $taskEnvironment.APPLESERVICES_NETWORK_CONFIG_SHA256
-    manual_start = $true; port = $Port; activation_route = 'direct'
+    manual_start = $true; port = $Port; activation_route = 'direct'; activation_ip_family = 'ipv4'
     registration_configured = [bool]$RegisterConfig; purchase_enabled = [bool]$AllowPurchase
 }
 if ($ValidateOnly) { $taskReceipt | ConvertTo-Json; return }
