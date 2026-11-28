@@ -92,6 +92,15 @@ class SupplyTests(unittest.TestCase):
         with self.assertRaises(OSError):self.buy()
         self.call.assert_not_called()
 
+    def test_local_policy_allows_four_purchases_but_never_a_fifth(self):
+        policy={**POLICY,"max_numbers":4,"max_total":"4.40"}
+        for i in range(4):
+            self.call.return_value=receipt(activationId=10000+i)
+            self.buy(policy={**policy,"acquisition_id":str(i)})
+        with self.assertRaisesRegex(SupplyError,"account_number_limit"):
+            self.buy(policy={**policy,"acquisition_id":"fifth"})
+        self.assertEqual(self.call.call_count,4)
+
     def test_two_numbers_and_gross_budget_apply_across_jobs(self):
         self.buy("first");self.buy("second")
         with self.assertRaisesRegex(SupplyError,"account_number_limit"):self.buy("third")

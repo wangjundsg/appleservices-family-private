@@ -82,6 +82,11 @@ test("inline mailbox rejection replaces on the current form before CAPTCHA and w
   text="This email address is not available. Choose a different address.";
   ctx.replaceEmail=async()=>false;
   await assert.rejects(ctx.check(fr),/email_unavailable/);
+  let purchases=0;
+  ctx.replaceEmail=async()=>{purchases++;return true;};
+  ctx.mech={...mech,waitForScreen:async opts=>opts.observe()};
+  await assert.rejects(ctx.check(fr),/email_unavailable/);
+  assert.equal(purchases,3,"three continuously rejected replacements must stop without a fourth purchase");
   text="Email service is not available.";
   ctx.replaceEmail=async()=>{throw Error("must not purchase for a generic error");};
   await ctx.check(fr);
@@ -95,7 +100,7 @@ test("inline replacement reuses the mailbox handoff without Back, submission, or
   const helper=source.slice(start,source.indexOf("  async function waitForVerification",start));
   const outdir=path.resolve("fixture-existing-job"),order=path.join(outdir,"replacement-otpgmail-order.json");
   const events=[];
-  const ctx=vm.createContext({nativeMode:true,emailReplaced:false,email:"old@gmail.com",otpGmailOrderFile:"old-order.json",
+  const ctx=vm.createContext({nativeMode:true,emailReplacements:0,email:"old@gmail.com",otpGmailOrderFile:"old-order.json",
     usedEmailMessages:["old-message"],outdir,path,page:{},arg:()=>"handoff.json",
     widgetFrame:async()=>({locator:()=>({waitFor:async()=>{},count:async()=>1})}),
     mech:{findAction:async()=>{throw Error("must not go Back from editable form");}},
@@ -107,10 +112,47 @@ test("inline replacement reuses the mailbox handoff without Back, submission, or
   vm.runInContext(helper+"globalThis.replace=replaceEmail",ctx);
   assert.equal(await ctx.replace({onForm:true}),true);
   assert.equal(ctx.email,"new@gmail.com");assert.equal(ctx.otpGmailOrderFile,order);
-  assert.equal(ctx.usedEmailMessages.length,0);assert.equal(ctx.emailReplaced,true);
+  assert.equal(ctx.usedEmailMessages.length,0);assert.equal(ctx.emailReplacements,1);
   assert.deepEqual(events,["replacement_email_required"]);
-  assert.equal(await ctx.replace({onForm:true}),false,"existing one-replacement limit must remain");
+  for(let round=2;round<=3;round++) {
+    const previous=ctx.email;
+    const nextOrder=path.join(outdir,`replacement-email-${round}`,"replacement-otpgmail-order.json");
+    let reads=0;
+    ctx.fs.readFileSync=()=>JSON.stringify(++reads===1 ? {replacement:round-1} :
+      {replacement:round,previous_email:previous,email:`round${round}@gmail.com`,order_file:nextOrder});
+    ctx.waitFor=async check=>{assert.equal(await check(),"");return check();};
+    assert.equal(await ctx.replace({onForm:true}),true);
+    assert.equal(ctx.emailReplacements,round);
+    assert.equal(ctx.otpGmailOrderFile,nextOrder);
+  }
+  assert.equal(await ctx.replace({onForm:true}),false,"stop after three replacements");
   const fill=source.slice(source.indexOf("  const fillForm ="),source.indexOf("  async function submitCreateForm"));
   assert.ok(fill.indexOf('await ensureEmailAvailable(fr)')>fill.indexOf('password, "password"'));
   assert.ok(fill.indexOf('await ensureEmailAvailable(fr)')<fill.indexOf('password, "confirm_password"'));
+});
+
+
+test("phone replacement consumes three distinct rounds and ignores stale handoffs",async()=>{
+  const fs=require("node:fs"),vm=require("node:vm");
+  const source=fs.readFileSync(require.resolve("./create-account.cjs"),"utf8");
+  const helper=source.slice(source.indexOf("async function replacePhone(page)"),source.indexOf("async function waitFor(producer"));
+  const events=[];
+  const ctx=vm.createContext({phoneReplacements:0,nativeMode:true,activation:"1000",phone:"912345670",phoneCC:"PT",
+    leaseDeadline:Date.now()+3600000,heroKey:"fixture",excludedSMS:new Set(),SMS_API_BASE:"fixture-api",
+    arg:()=>"handoff.json",phoneAction:async()=>{},widgetFrame:async()=>({locator:()=>({waitFor:async()=>{}})}),
+    mech:{PHONE_REPLACE_LABELS:[]},note:(_kind,e)=>{if(e.state)events.push(e.replacement);},
+    captureSMSBaseline:async()=>{},selectIfNeeded:async()=>{},fillIfNeeded:async()=>{},
+    oncePhoneAction:async(_key,fn)=>fn(),clickContinue:async()=>{},fs:{existsSync:()=>true},
+  });
+  vm.runInContext(helper+"globalThis.replace=replacePhone",ctx);
+  for(let round=1;round<=3;round++) {
+    const previous=ctx.activation;let reads=0;
+    ctx.fs.readFileSync=()=>JSON.stringify(++reads===1?{replacement:0}:
+      {replacement:round,previous_activation:previous,activation:String(1000+round),phone:String(912345670+round),phonecc:"PT",expires_at:new Date(Date.now()+3600000).toISOString()});
+    ctx.waitFor=async check=>{if(round===1){reads=1;return check();}assert.equal(await check(),null);return check();};
+    assert.equal(await ctx.replace({}),true);
+    assert.equal(ctx.phoneReplacements,round);
+  }
+  assert.equal(await ctx.replace({}),false);
+  assert.deepEqual(events,[1,2,3]);
 });

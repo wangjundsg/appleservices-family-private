@@ -15,6 +15,48 @@ class LocalBrowserTests(unittest.TestCase):
         self.assertEqual(env["YESCAPTCHA_API_BASE"], "https://cn.yescaptcha.com")
         self.assertEqual(env["HTTP_PROXY"], "socks5://127.0.0.1:17911")
 
+    def test_three_email_replacements_are_distinct_and_replays_do_not_buy(self):
+        self.job.cfg.update(browser_mode="local", otpgmail_order_file=str(self.root/"initial.json"))
+        self.job.allow_purchase=True
+        original_sms=dict(self.job.cfg["sms"])
+        def acquire(args, *unused):
+            intent=p.read(args[2]); dest=p.Path(args[3]); order=dest.parent/"replacement-otpgmail-order.json"
+            email=f"round{len(list(self.root.glob('replacement-email-*/replacement-email.json')))+1}@gmail.com"
+            p.atomic(order,{"email":email})
+            p.atomic(dest,{"previous_email":intent["previous_email"],"email":email,"order_file":str(order)})
+            return 0,{}
+        with patch.object(p,"STATE",self.root/"isolated"),patch.object(self.job,"process",side_effect=acquire) as buy:
+            for index in range(1,4):
+                self.job.replace_email(index)
+                first=self.job.cfg["email"]
+                self.job.replace_email(index)
+                self.assertEqual(self.job.cfg["email"],first)
+                self.assertEqual(self.job.status["email_replacements"],index)
+            with self.assertRaisesRegex(p.PipelineError,"replacement_limit"):
+                self.job.replace_email(4)
+            with self.assertRaisesRegex(p.PipelineError,"replacement_sequence"):
+                self.job.replace_email(1)
+        self.assertEqual(buy.call_count,3)
+        self.assertEqual(self.job.cfg["sms"],original_sms)
+        self.assertEqual(p.read(self.root/"replacement-email-ready.json")["replacement"],3)
+
+    def test_three_number_replacements_keep_per_round_receipts_and_limit(self):
+        self.job.cfg.update(browser_mode="local")
+        self.job.cfg["sms"].update(auto_purchase=True)
+        supply=unittest.mock.Mock()
+        supply.purchase.side_effect=[{**self.job.cfg["sms"],"activation":str(800+i),"phone":str(912345670+i)} for i in range(1,4)]
+        with patch.object(self.job,"supply",return_value=supply),patch.object(self.job,"claim_number"):
+            for index in range(1,4):
+                self.job.replace_number(index)
+                self.job.replace_number(index)
+                self.assertEqual(self.job.status["number_replacements"],index)
+            with self.assertRaisesRegex(p.PipelineError,"replacement_limit"):
+                self.job.replace_number(4)
+        self.assertEqual(supply.purchase.call_count,3)
+        self.assertEqual(len({c.args[2]["acquisition_id"] for c in supply.purchase.call_args_list}),3)
+        self.assertTrue(all(c.args[2]["max_numbers"]==4 for c in supply.purchase.call_args_list))
+        self.assertEqual(p.read(self.root/"replacement-number.json")["replacement"],3)
+
     def test_creator_failure_never_restarts_local_browser_or_buys_again(self):
         self.job.cfg.update(browser_mode="local", egress_mode="direct")
         self.job.cfg["sms"]["auto_purchase"] = True
@@ -96,9 +138,10 @@ class LocalBrowserTests(unittest.TestCase):
         self.job.cfg.update(browser_mode="local",otpgmail_order_file=str(self.root/"old-mail.json"))
         self.job.allow_purchase=True
         def acquire(*args):
-            p.atomic(self.root/"replacement-otpgmail-order.json",{"email":"newfixture@gmail.com"})
-            p.atomic(self.root/"replacement-email.json",{"previous_email":old,"email":"newfixture@gmail.com",
-                "order_file":str(self.root/"replacement-otpgmail-order.json")})
+            folder=p.Path(args[0][3]).parent
+            p.atomic(folder/"replacement-otpgmail-order.json",{"email":"newfixture@gmail.com"})
+            p.atomic(folder/"replacement-email.json",{"previous_email":old,"email":"newfixture@gmail.com",
+                "order_file":str(folder/"replacement-otpgmail-order.json")})
             return 0,{}
         with patch.object(p,"STATE",self.root/"isolated-state"),patch.object(self.job,"process",side_effect=acquire) as buy:
             self.job.replace_email()
