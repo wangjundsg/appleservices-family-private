@@ -20,6 +20,18 @@ import uuid
 import requests
 
 
+def fetch_certificate(transport, output):
+    command = [str(transport), "-op", "cert", "-out", str(output)]
+    try:
+        subprocess.run(command, check=True, timeout=40)
+        return []
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Only this public GET is replayed. Carry the selected route into the
+        # subsequent session POST, which must never be retried automatically.
+        subprocess.run(command + ["-ipv4"], check=True, timeout=40)
+        return ["-ipv4"]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", type=Path, required=True)
@@ -109,7 +121,7 @@ def main():
     j.uc.emu_start = bounded_start
     if transport:
         cert_path = runtime / "certificate.plist"
-        subprocess.run([str(transport), "-op", "cert", "-out", str(cert_path)], check=True, timeout=40)
+        transport_args = fetch_certificate(transport, cert_path)
         cert = plistlib.loads(cert_path.read_bytes())["cert"]
     else:
         cert_response = apple.get("https://static.ess.apple.com/identity/validation/cert-1.0.plist", verify=str(ca_path), timeout=30)
@@ -121,7 +133,7 @@ def main():
     if transport:
         request_path, response_path = runtime / "initialize-request.plist", runtime / "initialize-response.plist"
         request_path.write_bytes(payload)
-        subprocess.run([str(transport), "-op", "initialize", "-in", str(request_path), "-out", str(response_path)], check=True, timeout=40)
+        subprocess.run([str(transport), "-op", "initialize", "-in", str(request_path), "-out", str(response_path), *transport_args], check=True, timeout=40)
         fields = plistlib.loads(response_path.read_bytes())
     else:
         response = apple.post("https://identity.ess.apple.com/WebObjects/TDIdentityService.woa/wa/initializeValidation", data=payload, verify=str(ca_path), timeout=30)

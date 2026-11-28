@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -16,8 +18,22 @@ import (
 	"howett.net/plist"
 )
 
+func useIPv4(transport *http.Transport) {
+	dial := transport.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 30 * time.Second}).DialContext
+	}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network == "tcp" {
+			network = "tcp4"
+		}
+		return dial(ctx, network, address)
+	}
+}
+
 func run() error {
 	op := flag.String("op", "", "cert or initialize")
+	ipv4 := flag.Bool("ipv4", false, "use IPv4 for this NAC exchange without changing proxy or TLS verification")
 	input := flag.String("in", "", "private NAC request plist for initialize")
 	output := flag.String("out", "", "private response plist")
 	flag.Parse()
@@ -47,6 +63,9 @@ func run() error {
 		return errors.New("unsupported NAC operation")
 	}
 	transport := gsa.AppleRootTransport().(*http.Transport)
+	if *ipv4 {
+		useIPv4(transport)
+	}
 	defer transport.CloseIdleConnections()
 	client := http.Client{Transport: transport, Timeout: 30 * time.Second}
 	req, err := http.NewRequest(method, endpoint, bytes.NewReader(body))
