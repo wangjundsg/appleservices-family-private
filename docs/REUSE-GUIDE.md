@@ -119,3 +119,11 @@ node --test tools/capture/otpgmail-acquire.test.cjs internal/dashboard/registrat
 python -m unittest discover -s tools/apple-pipeline -p test_mailbox_acquisition.py
 go test ./internal/dashboard
 ```
+
+## 九、首次激活失败后的恢复约定
+
+用户要求：已注册账号重新激活时，从重新口令鉴权开始完整执行，不从上次失败的保存会话直接续激活。使用 `APPLESERVICES_FRESH_GSA=1` 跳过旧 GSA cookies 和令牌；随后完成 Apple 要求的验证、NAC、iCloud 激活、设备登记和当时在线确认。Apple 是否再次要求短信由新鉴权结果决定，不强行重发验证码。浏览器方式、Clash 配置、账号和设备身份保持原任务约定，不重新注册或重复购邮购号。
+
+2026-11-28 的核对发现：首次 NAC 公共证书请求因 IPv6 连接被断开而失败；IPv4 回退成功后，直接沿用失败的 GSA 会话续激活又收到 `UNAUTHORIZED`。随后以 `APPLESERVICES_FRESH_GSA=1` 重新口令鉴权并完整执行，确认激活、设备可见、交接完成且当时在线。这记录的是该次观察和用户选择的恢复策略，不代表所有已保存会话永远不可用。恢复开始前保留私有回执；不以反复重放旧会话尝试激活。`-activate-saved` 和会进入该分支的 `pipeline.py resume` 不作为此类故障的恢复入口。
+
+一次新的完整鉴权过程中，将本次新取得的会话传给后续激活步骤属于同一次执行；已经确认激活成功后的正常在线恢复也属于另一场景。两者都不等于重新拿上次失败的会话发起激活。只有 Apple 激活确认、交接完成且后台当时在线，才可报成功。
