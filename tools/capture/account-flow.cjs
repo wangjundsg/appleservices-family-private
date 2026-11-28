@@ -250,6 +250,12 @@ function classifyScreen({ text = "", url = "", email = "", phone = "" } = {}) {
   return "unknown";
 }
 
+function emailUnavailable(text) {
+  const message=String(text || "").replace(/\s+/g," ");
+  return /\bthis email address is not available\b/i.test(message) ||
+    /(?:此|该|這個|这个|該)(?:电子邮件|電子郵件|邮箱|郵箱)地址(?:不可用|无法使用|無法使用)/.test(message);
+}
+
 function captchaAdvanced({state, captchaPresent, creationFormPresent, codeInputs}) {
   if(captchaPresent || creationFormPresent)return false;
   return state === "success" || (["email_step","phone_step"].includes(state) && codeInputs >= 4);
@@ -277,6 +283,7 @@ module.exports = {
   PASSWORD_ENV,
   SCREEN_STATES,
   classifyScreen,
+  emailUnavailable,
   captchaAdvanced,
   creationRejected,
   clickTimeoutOutcome,

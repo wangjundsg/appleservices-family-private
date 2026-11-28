@@ -1356,7 +1356,9 @@ async function clickContinue(page, frame, tag = "") {
   const creationRequests = new WeakMap();
   let nativePostVersion = 0, nativeCompletedPostVersion = 0;
   const nativePosts = new Map();
+  const pendingEmailValidations = new Set();
   const finishNativePost = req => {
+    pendingEmailValidations.delete(req);
     if(nativePosts.has(req)) {
       nativeCompletedPostVersion=Math.max(nativeCompletedPostVersion,nativePosts.get(req));
       nativePosts.delete(req);
@@ -1373,6 +1375,7 @@ async function clickContinue(page, frame, tag = "") {
     throw err;
   }
   page.on("request",req=>{
+    if(nativeMode && /\/account\/validation\/appleid(?:\?|$)/.test(req.url()))pendingEmailValidations.add(req);
     if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);
     if(req.method()==="POST" && ["/account","/account/validate"].includes(new URL(req.url()).pathname))
       creationRequests.set(req,++requestVersion);
@@ -1536,6 +1539,27 @@ async function clickContinue(page, frame, tag = "") {
       }
     }).catch(() => {});
   };
+  let emailReplaced = false;
+  async function ensureEmailAvailable(fr) {
+    if(!nativeMode)return;
+    for(let pass=0;pass<2;pass+=1) {
+      const observed=await mech.waitForScreen({deadline:leaseDeadline,timeoutMs:15000,sleep,
+        observe:async()=>{
+          const field=fr.locator('input[name="appleId"]');
+          if(!await field.isVisible())return {form:false};
+          return {form:true,pending:pendingEmailValidations.size>0,value:await field.inputValue(),
+            unavailable:flow.emailUnavailable(await fr.locator('body').innerText())};
+        },
+        ready:screen=>!screen.form ? 'advanced' : !screen.pending && screen.value===email ? String(screen.unavailable) : '',
+      });
+      if(!observed.form || !observed.unavailable)return;
+      note("step",{at:"email-unavailable"});
+      if(pass>0 || !await replaceEmail({onForm:true}))
+        throw Object.assign(new Error("email_unavailable"),{state:"waiting_input",evidence:"email_unavailable"});
+      await fillIfNeeded(fr.locator('input[name="appleId"]'),email,"apple_id");
+      await blurField(fr.locator('input[name="appleId"]'));
+    }
+  }
   const fillForm = async (fr, recheck = false) => {
     await noAutofill(fr);
     // Country changes may rebuild other fields; settle it before typing names.
@@ -1562,6 +1586,8 @@ async function clickContinue(page, frame, tag = "") {
     });
     await fillIfNeeded(fr.locator('input[name="appleId"]'), email, "apple_id");
     await fillIfNeeded(fr.locator('input[name="password"]'), password, "password");
+    // Blurring the email triggers availability validation before CAPTCHA or codes.
+    await ensureEmailAvailable(fr);
     await fillIfNeeded(fr.locator('input[name="confirmPassword"]'), password, "confirm_password");
     const dialChange=await selectIfNeeded(fr.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
     // The widget hydrates ~4-6s later and silently resets the dial code to US;
@@ -1616,6 +1642,7 @@ async function clickContinue(page, frame, tag = "") {
     const fr = await widgetFrame(page);
     if (!fr) break;
     await fillForm(fr, nativeMode && attempt>1);
+    await ensureEmailAvailable(fr);
     let answer = "";
     if (nativeMode) {
       const result = await nativeCaptchaAnswer(page,fr,`create-${attempt}`);
@@ -1797,7 +1824,6 @@ async function clickContinue(page, frame, tag = "") {
   }
   }
   await submitCreateForm();
-  let emailReplaced = false;
   async function resendEmailCode() {
     const marker = path.join(outdir,`email-${lib.sha256Hex(email).slice(0,16)}-resend.json`);
     await mech.onceAction(marker, async () => {
@@ -1809,15 +1835,17 @@ async function clickContinue(page, frame, tag = "") {
     note("step",{at:"email-resend",count:1});
     return {asked:true,ok:true,how:"resend-email"};
   }
-  async function replaceEmail() {
+  async function replaceEmail({onForm=false}={}) {
     const handoff = String(arg("replacement-email-file",""));
     if (!nativeMode || emailReplaced || !otpGmailOrderFile || !handoff) return false;
     const current = await widgetFrame(page);
-    const back = await mech.findAction(current,["后退","返回","後退","返回上一步","Back","Go back"]);
-    if (!back.ok) return false;
-    await mech.onceAction(path.join(outdir,"email-replace.json"),async()=>{
-      await mech.clickElement(back.locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined});
-    });
+    if(!onForm) {
+      const back = await mech.findAction(current,["后退","返回","後退","返回上一步","Back","Go back"]);
+      if (!back.ok) return false;
+      await mech.onceAction(path.join(outdir,"email-replace.json"),async()=>{
+        await mech.clickElement(back.locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined});
+      });
+    }
     const form = await widgetFrame(page);
     await form.locator('input[name="appleId"]').waitFor({state:"visible",timeout:15000});
     // Confirm the full editable form before requesting another paid mailbox.
@@ -1836,8 +1864,10 @@ async function clickContinue(page, frame, tag = "") {
     otpGmailOrderFile=next.order_file;
     usedEmailMessages.length=0;
     emailReplaced=true;
-    await submitCreateForm();
-    note("step",{at:"replacement-email-submitted"});
+    if(!onForm) {
+      await submitCreateForm();
+      note("step",{at:"replacement-email-submitted"});
+    }
     return true;
   }
   async function waitForVerification(expected,picker,windowMs) {

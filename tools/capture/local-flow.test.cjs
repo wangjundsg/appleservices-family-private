@@ -42,3 +42,75 @@ test("manual CAPTCHA progression requires actual next-step inputs, never a trans
   assert.equal(flow.captchaAdvanced({state:"email_step",codeInputs:6}),true);
   assert.equal(flow.captchaAdvanced({state:"phone_step",codeInputs:6}),true);
 });
+
+
+test("unavailable mailbox messages are distinct from format, network, and code errors",()=>{
+  for(const text of [
+    "This email address is not available. Choose a different address.",
+    "此电子邮件地址不可用。请选择其他地址。",
+    "此电子邮件地址无法使用。请选择其他电子邮件地址。",
+    "此電子郵件地址無法使用。請選擇其他地址。",
+  ]) assert.equal(flow.emailUnavailable(text),true,text);
+  for(const text of ["Enter a valid email address.","验证码不正确", "当前无法获取 Captcha。",
+    "Your account cannot be created at this time.", "Email service is not available.", "Verify your email address"]) {
+    assert.equal(flow.emailUnavailable(text),false,text);
+  }
+});
+
+test("inline mailbox rejection replaces on the current form before CAPTCHA and waits for validation",async()=>{
+  const fs=require("node:fs"),vm=require("node:vm");
+  const source=fs.readFileSync(require.resolve("./create-account.cjs"),"utf8");
+  const start=source.indexOf("  async function ensureEmailAvailable(fr) {");
+  assert.notEqual(start,-1,"driver needs an inline mailbox validation gate");
+  const helper=source.slice(start,source.indexOf("  const fillForm =",start));
+  let value="old@example.test",text="This email address is not available. Choose a different address.",pending=true;
+  const events=[];
+  const fr={locator:selector=>selector==='body'?{innerText:async()=>text}:{
+    isVisible:async()=>true,inputValue:async()=>value,press:async()=>{events.push("blur");pending=true;}
+  }};
+  const ctx=vm.createContext({email:value,nativeMode:true,leaseDeadline:Infinity,flow,
+    pendingEmailValidations:{get size(){return pending?1:0;}},
+    mech:{...mech,waitForScreen:opts=>mech.waitForScreen({...opts,sleep:async()=>{if(pending && value==="new@example.test")text="";pending=false;}})},
+    sleep:async()=>{},note:()=>{},blurField:async field=>field.press("Tab"),
+    replaceEmail:async opts=>{assert.equal(opts.onForm,true);events.push("replace");ctx.email="new@example.test";return true;},
+    fillIfNeeded:async(_field,next)=>{events.push("fill");value=next;}
+  });
+  vm.runInContext(helper+"globalThis.check=ensureEmailAvailable",ctx);
+  await ctx.check(fr);events.push("captcha");
+  assert.deepEqual(events,["replace","fill","blur","captcha"]);
+  assert.equal(value,"new@example.test");
+  text="This email address is not available. Choose a different address.";
+  ctx.replaceEmail=async()=>false;
+  await assert.rejects(ctx.check(fr),/email_unavailable/);
+  text="Email service is not available.";
+  ctx.replaceEmail=async()=>{throw Error("must not purchase for a generic error");};
+  await ctx.check(fr);
+});
+
+
+test("inline replacement reuses the mailbox handoff without Back, submission, or a new task",async()=>{
+  const fs=require("node:fs"),vm=require("node:vm"),path=require("node:path");
+  const source=fs.readFileSync(require.resolve("./create-account.cjs"),"utf8");
+  const start=source.indexOf("  async function replaceEmail(");
+  const helper=source.slice(start,source.indexOf("  async function waitForVerification",start));
+  const outdir=path.resolve("fixture-existing-job"),order=path.join(outdir,"replacement-otpgmail-order.json");
+  const events=[];
+  const ctx=vm.createContext({nativeMode:true,emailReplaced:false,email:"old@gmail.com",otpGmailOrderFile:"old-order.json",
+    usedEmailMessages:["old-message"],outdir,path,page:{},arg:()=>"handoff.json",
+    widgetFrame:async()=>({locator:()=>({waitFor:async()=>{},count:async()=>1})}),
+    mech:{findAction:async()=>{throw Error("must not go Back from editable form");}},
+    note:(_kind,event)=>events.push(event.state),
+    waitFor:async check=>check(),
+    fs:{existsSync:()=>true,readFileSync:()=>JSON.stringify({previous_email:"old@gmail.com",email:"new@gmail.com",order_file:order})},
+    submitCreateForm:async()=>{throw Error("must not recursively submit");},
+  });
+  vm.runInContext(helper+"globalThis.replace=replaceEmail",ctx);
+  assert.equal(await ctx.replace({onForm:true}),true);
+  assert.equal(ctx.email,"new@gmail.com");assert.equal(ctx.otpGmailOrderFile,order);
+  assert.equal(ctx.usedEmailMessages.length,0);assert.equal(ctx.emailReplaced,true);
+  assert.deepEqual(events,["replacement_email_required"]);
+  assert.equal(await ctx.replace({onForm:true}),false,"existing one-replacement limit must remain");
+  const fill=source.slice(source.indexOf("  const fillForm ="),source.indexOf("  async function submitCreateForm"));
+  assert.ok(fill.indexOf('await ensureEmailAvailable(fr)')>fill.indexOf('password, "password"'));
+  assert.ok(fill.indexOf('await ensureEmailAvailable(fr)')<fill.indexOf('password, "confirm_password"'));
+});
