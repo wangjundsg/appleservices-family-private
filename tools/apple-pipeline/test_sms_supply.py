@@ -56,6 +56,16 @@ class SupplyTests(unittest.TestCase):
             result=self.supply.purchase("pt-hour","PT",{**POLICY,"providers":["hero"]},allow=True)
         self.assertEqual(p.timestamp(result["expires_at"])-1800000000,3600)
 
+    def test_angola_uses_hero_country_76_and_hour_lease(self):
+        self.call.return_value=receipt(phoneNumber="244923456789",countryCode="76",activationEnd="2026-11-15 02:00:00")
+        with patch("sms_supply.time.time", return_value=1800000000):
+            result=self.supply.purchase("ao-job","AO",{**POLICY,"providers":["hero"]},allow=True)
+        self.assertEqual(self.call.call_args.kwargs["country"],"76")
+        self.assertEqual(result["phone"],"923456789")
+        self.assertEqual(result["phonecc"],"AO")
+        self.assertEqual(p.COUNTRIES["AO"],"AGO")
+        self.assertEqual(p.timestamp(result["expires_at"])-1800000000,3600)
+
     def test_timeout_persists_unknown_and_blocks_new_job(self):
         self.call.side_effect=TimeoutError()
         for job in ("job","other-job"):

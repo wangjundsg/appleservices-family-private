@@ -262,3 +262,11 @@ func TestRegisterRunsExistingPipelineWithoutSecretArguments(t *testing.T) {
 	}
 	t.Fatal("retry child did not exit")
 }
+
+func TestAutomaticAngolaLocalEnglishRegistrationAllowed(t *testing.T) {
+	body := registerRequest{Automatic: true, PhoneCC: "AO", AcceptTerms: true, CaptchaProvider: "yes", BrowserMode: "local", PageLocale: "en-US"}
+	body.Egress.Mode = "local"
+	if err := validateRegistration(body); err != nil {
+		t.Fatal(err)
+	}
+}

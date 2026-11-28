@@ -13,7 +13,7 @@ PROVIDERS = {
     "hero": ("https://hero-sms.com/stubs/handler_api.php", "SMS_API_KEY_HERO"),
 }
 COUNTRIES = {"GB": ("16", "44"), "CA": ("36", "1"), "ID": ("6", "62"), "US": ("12", "1"), "VN": ("10", "84")}
-HERO_COUNTRIES = {**COUNTRIES, "PL": ("15", "48"), "CO": ("33", "57"), "US": ("187", "1"), "PT": ("117", "351")}
+HERO_COUNTRIES = {**COUNTRIES, "PL": ("15", "48"), "CO": ("33", "57"), "US": ("187", "1"), "PT": ("117", "351"), "AO": ("76", "244")}
 
 class SupplyError(Exception):
     pass
@@ -133,10 +133,10 @@ class Supply:
                     start=dt.datetime.fromisoformat(result["activationTime"])
                     end=dt.datetime.fromisoformat(result.get("activationEndTime") or result["activationEnd"])
                     duration=(end-start).total_seconds()
-                    expected = duration_hours*3600 if duration_hours else 3600 if provider=="hero" and country in {"PL","CO","US","PT"} else 1800
-                    slack=60 if duration_hours or (provider=="hero" and country in {"PL","CO","US","PT"}) else 0
+                    expected = duration_hours*3600 if duration_hours else 3600 if provider=="hero" and country in {"PL","CO","US","PT","AO"} else 1800
+                    slack=60 if duration_hours or (provider=="hero" and country in {"PL","CO","US","PT","AO"}) else 0
                     if not 0 < duration <= expected+slack: raise ValueError()
-                    if (duration_hours or (provider=="hero" and country in {"PL","CO","US"})) and duration < expected-60: raise ValueError()
+                    if (duration_hours or (provider=="hero" and country in {"PL","CO","US","AO"})) and duration < expected-60: raise ValueError()
                     followup=result.get("canGetAnotherSms",False)
                     if followup not in (True,False,0,1,"0","1"): raise ValueError()
                     expires=now+duration  # Same provider clock for both times; conservative request start.
