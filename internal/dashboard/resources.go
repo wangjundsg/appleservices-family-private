@@ -289,7 +289,7 @@ func (s *Server) saveResources(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"message": "本机浏览器代理须为带端口的本机 HTTP、HTTPS 或 SOCKS5 地址，不可包含凭据"})
 		return
 	}
-	if v.MailProvider != "otpgmail" || v.SMSProvider != "hero" || len(v.PhoneCountry) != 2 || !strings.Contains("|PL|CO|US|PT|AO|", "|"+v.PhoneCountry+"|") ||
+	if v.MailProvider != "otpgmail" || v.SMSProvider != "hero" || len(v.PhoneCountry) != 2 || !strings.Contains("|PL|CO|US|PT|AO|CM|", "|"+v.PhoneCountry+"|") ||
 		(v.DurationHours != 0 && v.DurationHours != 24) || (v.ProxyProfile != "current" && v.ProxyProfile != "711" && v.ProxyProfile != "dataimpulse") ||
 		v.ProxyPort < 0 || v.ProxyPort > 65535 || !filepath.IsAbs(v.CredentialFile) || (v.OrderFile != "" && !filepath.IsAbs(v.OrderFile)) ||
 		!(body.Purchase.valid() || (body.Purchase.MaxPrice == "" && body.Purchase.MaxTotal == "" && body.Purchase.Currency == "USD")) {
@@ -338,7 +338,7 @@ func checkHero(ctx context.Context, key, country string, duration int, client *h
 	if key == "" {
 		return nil, errors.New("Hero 密钥未加载到当前面板进程")
 	}
-	countries := map[string]string{"PL": "15", "CO": "33", "US": "187", "PT": "117", "AO": "76"}
+	countries := map[string]string{"PL": "15", "CO": "33", "US": "187", "PT": "117", "AO": "76", "CM": "41"}
 	if countries[country] == "" || (duration != 0 && duration != 24) {
 		return nil, errors.New("Hero 国家或租期配置无效")
 	}

@@ -66,6 +66,16 @@ class SupplyTests(unittest.TestCase):
         self.assertEqual(p.COUNTRIES["AO"],"AGO")
         self.assertEqual(p.timestamp(result["expires_at"])-1800000000,3600)
 
+    def test_cameroon_uses_hero_country_41_and_hour_lease(self):
+        self.call.return_value=receipt(phoneNumber="237650000001",countryCode="41",activationEnd="2026-11-15 02:00:00")
+        with patch("sms_supply.time.time", return_value=1800000000):
+            result=self.supply.purchase("cm-job","CM",{**POLICY,"providers":["hero"]},allow=True)
+        self.assertEqual(self.call.call_args.kwargs["country"],"41")
+        self.assertEqual(result["phone"],"650000001")
+        self.assertEqual(result["phonecc"],"CM")
+        self.assertEqual(p.COUNTRIES["CM"],"CMR")
+        self.assertEqual(p.timestamp(result["expires_at"])-1800000000,3600)
+
     def test_timeout_persists_unknown_and_blocks_new_job(self):
         self.call.side_effect=TimeoutError()
         for job in ("job","other-job"):

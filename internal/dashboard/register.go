@@ -153,6 +153,7 @@ var registerMessages = map[string]string{
 }
 var registrationCountries = map[string][2]string{
 	"PT": {"pt-PT", "Europe/Lisbon"},
+	"CM": {"fr-CM", "Africa/Douala"},
 	"PL": {"pl-PL", "Europe/Warsaw"}, "CO": {"es-CO", "America/Bogota"},
 	"GB": {"en-GB", "Europe/London"}, "US": {"en-US", "America/New_York"},
 	"CA": {"en-CA", "America/Toronto"}, "AU": {"en-AU", "Australia/Sydney"},
@@ -191,7 +192,7 @@ func validateRegistration(body registerRequest) error {
 		if body.RetryOf != "" {
 			return errors.New("自动任务请在原任务中核实，不能换任务重购")
 		}
-		if len(body.PhoneCC) != 2 || !strings.Contains("|GB|CA|ID|US|VN|PL|CO|PT|AO|", "|"+body.PhoneCC+"|") {
+		if len(body.PhoneCC) != 2 || !strings.Contains("|GB|CA|ID|US|VN|PL|CO|PT|AO|CM|", "|"+body.PhoneCC+"|") {
 			return errors.New("不支持的自动购号国家")
 		}
 		if !body.AcceptTerms || (body.CaptchaProvider != "yes" && body.CaptchaProvider != "manual" && body.CaptchaProvider != "local-first") {

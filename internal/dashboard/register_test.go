@@ -270,3 +270,11 @@ func TestAutomaticAngolaLocalEnglishRegistrationAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAutomaticCameroonLocalEnglishRegistrationAllowed(t *testing.T) {
+	body := registerRequest{Automatic: true, PhoneCC: "CM", AcceptTerms: true, CaptchaProvider: "yes", BrowserMode: "local", PageLocale: "en-US"}
+	body.Egress.Mode = "direct"
+	if err := validateRegistration(body); err != nil {
+		t.Fatal(err)
+	}
+}

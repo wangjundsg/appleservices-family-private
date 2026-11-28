@@ -28,7 +28,7 @@ PROBE_STATES = {"account_exists", "requires_2fa", "authenticated"}
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
 STAGES = ("create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
-             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM", "PL":"POL", "CO":"COL", "PT":"PRT", "AO":"AGO"}
+             "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM", "PL":"POL", "CO":"COL", "PT":"PRT", "AO":"AGO", "CM":"CMR"}
 
 
 import job_policy
