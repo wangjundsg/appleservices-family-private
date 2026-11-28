@@ -46,3 +46,21 @@ func TestNativeFailureSurvivesHelperExit(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeFailureReportsOnlyKnownOperation(t *testing.T) {
+	c := &Client{}
+	for _, tc := range []struct {
+		message reply
+		want    string
+	}{
+		{reply{Error: "native_operation_failed", Function: 103}, "native_operation_failed (code/provisioning)"},
+		{reply{Error: "native_network_timeout", Function: 106}, "native_network_timeout (headers)"},
+		{reply{Error: "native_local_value_error", Function: 130}, "native_local_value_error (provider)"},
+		{reply{Error: "private-token", Function: 999}, "native generation or provisioning failed"},
+	} {
+		_, err := c.validateReply(tc.message, 0)
+		if err == nil || err.Error() != "nativeadi: "+tc.want {
+			t.Fatalf("diagnostic = %v, want %s", err, tc.want)
+		}
+	}
+}
