@@ -51,7 +51,9 @@ def post_json(url: str, payload: dict, timeout: int = 30) -> dict:
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # Solver traffic is independent of browser egress and Windows system proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -62,7 +64,7 @@ def local_ocr(path: str) -> str:
 
 def solve_yes(key: str, image_b64: str, timeout: int) -> str:
     # Both official nodes share the API; a task must stay on its creation node.
-    endpoint = os.environ.get("YESCAPTCHA_API_BASE", "https://api.yescaptcha.com").rstrip("/")
+    endpoint = os.environ.get("YESCAPTCHA_API_BASE", "https://cn.yescaptcha.com").rstrip("/")
     if endpoint not in {"https://api.yescaptcha.com", "https://cn.yescaptcha.com"}:
         raise ValueError("unsupported_yescaptcha_endpoint")
     created = post_json(
