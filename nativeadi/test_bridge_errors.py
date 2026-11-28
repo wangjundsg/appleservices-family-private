@@ -1,9 +1,30 @@
 import unittest
-from bridge import Bridge, NativeFailure, local_failure
+from bridge import Bridge, NativeFailure, local_failure, record_failure
 import queue
+import tempfile
+import pathlib
+import json
+import base64
 
 
 class BridgeErrors(unittest.TestCase):
+    def test_private_failure_evidence_survives_a_second_attempt(self):
+        bridge = Bridge.__new__(Bridge)
+        bridge.function = 103
+        with tempfile.TemporaryDirectory() as folder:
+            for raw in [b'\x01private-first-error', b'\x01private-second-error']:
+                try:
+                    bridge.unwrap(raw)
+                except NativeFailure as failure:
+                    self.assertTrue(record_failure(folder, failure))
+                    self.assertNotIn('private-', str(failure))
+            records = [json.loads(p.read_text()) for p in pathlib.Path(folder).glob('failure-*.json')]
+            self.assertEqual(len(records), 2)
+            self.assertEqual({base64.b64decode(r['native_error_base64']) for r in records},
+                             {b'\x01private-first-error', b'\x01private-second-error'})
+            self.assertTrue(all(r['function'] == 103 for r in records))
+            self.assertFalse(record_failure(None, ValueError('private-value')))
+
     def test_local_failure_is_redacted_and_distinct(self):
         self.assertEqual(local_failure(ValueError('private-token')), 'native_local_value_error')
         self.assertEqual(local_failure(OSError('private-path')), 'native_local_io_error')

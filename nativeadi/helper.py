@@ -28,7 +28,9 @@ kernel.SetStdHandle(C.c_uint32(-11),msvcrt.get_osfhandle(null_fd))
 kernel.SetStdHandle(C.c_uint32(-12),msvcrt.get_osfhandle(null_fd))
 
 import bridge
-from bridge import Bridge, NativeFailure, encode_string, local_failure
+from bridge import Bridge, NativeFailure, encode_string, local_failure, record_failure
+
+failure_profile = None
 
 
 def send(response):
@@ -135,9 +137,11 @@ class Provider:
 
 
 def main():
+    global failure_profile
     if C.sizeof(C.c_void_p)!=8 or sys.version_info<(3,10):
         raise RuntimeError('64-bit Python 3.10 or newer is required')
     request=json.loads(sys.stdin.readline(65537))
+    failure_profile=pathlib.Path(request['profile']).resolve(strict=True)
     provider=Provider(request)
     send({'id':0,'device_id':provider.device_id,'ready':True})
     for line in sys.stdin:
@@ -153,8 +157,10 @@ def main():
 if __name__=='__main__':
     try: main()
     except NativeFailure as failure:
+        record_failure(failure_profile, failure)
         send({'error':failure.code, 'function':failure.function})
         raise SystemExit(1)
     except Exception as failure:
+        record_failure(failure_profile, failure)
         send({'error':local_failure(failure), 'function':bridge.last_function})
         raise SystemExit(1)

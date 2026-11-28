@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Laky-64/appleservices/internal/backgroundexec"
+	"github.com/Laky-64/appleservices/internal/privatefs"
 	"github.com/google/uuid"
 )
 
@@ -150,7 +151,7 @@ func (c *Client) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(c.config.ProfileDir, 0700); err != nil {
+	if err := privatefs.EnsureDir(c.config.ProfileDir); err != nil {
 		return errors.New("nativeadi: bridge directory unavailable")
 	}
 	directory, err := os.MkdirTemp(c.config.ProfileDir, "bridge-")

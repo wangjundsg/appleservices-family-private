@@ -3,6 +3,12 @@ import pathlib
 import struct
 import queue
 import hashlib
+import base64
+import datetime
+import json
+import os
+import traceback
+import uuid
 
 last_function = 0
 
@@ -11,6 +17,24 @@ class NativeFailure(RuntimeError):
         self.code = code
         self.function = function
         super().__init__(code)
+
+def record_failure(profile, error):
+    # The Go parent protects this account-private directory with privatefs.
+    # Never put native payloads in RPC/stdout or a shared diagnostic directory.
+    if profile is None:
+        return False
+    try:
+        record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  'function': getattr(error, 'function', last_function),
+                  'category': error.code if isinstance(error, NativeFailure) else local_failure(error),
+                  'native_error_base64': base64.b64encode(getattr(error, 'payload', b'')[:65536]).decode(),
+                  'traceback': ''.join(traceback.format_exception(type(error), error, error.__traceback__))[-65536:]}
+        path = pathlib.Path(profile) / ('failure-' + uuid.uuid4().hex + '.json')
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w', encoding='utf-8') as output:
+            json.dump(record, output)
+        return True
+    except (OSError, ValueError):
+        return False  # A diagnostic write failure must not hide the original error.
 
 def local_failure(error):
     # Fixed labels only: exception messages can include paths or device material.
@@ -90,6 +114,7 @@ class Bridge:
         if not result or result[0]!=0:
             failure = native_failure(result or b'')
             failure.function = getattr(self, 'function', 0)
+            failure.payload = (result or b'')[:65536]
             raise failure
         return result[1:]
     def sync(self,func,data=b''):
