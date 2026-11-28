@@ -4,8 +4,8 @@
   const token = document.querySelector('meta[name="app-token"]').content;
   const form = $('registerForm');
   const field = name => form.elements.namedItem(name);
-  const stages = ['creating','login','twofa','terms','device','keepalive','subscription','family'];
-  const stageNames = {queued:'排队',creating:'注册',create:'注册',login:'交接面板',terms:'iCloud 激活',twofa:'账户验证',gsa:'账户验证',device:'设备登记',keepalive:'后台在线',subscription:'iCloud+ 订阅',family:'家庭共享',done:'完成'};
+  const stages = ['mailbox','creating','login','twofa','terms','device','keepalive','subscription','family'];
+  const stageNames = {mailbox:'购买邮箱',queued:'排队',creating:'注册',create:'注册',login:'交接面板',terms:'iCloud 激活',twofa:'账户验证',gsa:'账户验证',device:'设备登记',keepalive:'后台在线',subscription:'iCloud+ 订阅',family:'家庭共享',done:'完成'};
   const stateNames = {queued:'等待开始',running:'正在进行',waiting_input:'等待验证码',ready:'流程已完成',failed:'失败',usage:'参数需要修正',unknown:'结果待核实',needs_review:'需要核实',rate_limited:'Apple 要求冷却',needs_login:'会话需要重新验证',cancelled:'已取消'};
   let selected = '', retryOf = '', submitting = false, polling = false;
   let jobs = [];
@@ -18,6 +18,8 @@
   function renderResources(view) {
     const settings=view.settings;
     for(const name of ['credentialFile','orderFile','phoneCountry','durationHours','proxyPort','localBrowserProxy']) resourceField(name).value=settings[name]|| (name==='durationHours'?'0':'');
+    resourceField('mailWarehouse').value=settings.mailWarehouse||2;
+    resourceField('mailMaxPriceVnd').value=settings.mailMaxPriceVnd||700;
     resourceField('acceptRentalPriceChange').checked=!!settings.acceptRentalPriceChange;
     resourceField('maxPrice').value=view.purchase.maxPrice||'';resourceField('maxTotal').value=view.purchase.maxTotal||'';
     resourceField('proxyProfile').replaceChildren(...view.proxyProfiles.map(p=>new Option(p.name,p.id)));
@@ -27,7 +29,7 @@
     $('resourceSMSState').textContent=view.smsCredentialLoaded ? 'Hero 密钥已加载；号码有效期与库存以供应商回执为准。' : '当前面板未加载 Hero 密钥，请使用配置好凭据的启动环境。';
     $('resourceProxyName').textContent=view.proxyProvider||'现有配置';
     $('resourceProxyState').textContent=view.proxyConfigured ? '配置已读取；按账号地区固定出口，手机国家独立。' : view.proxyMessage;
-    $('resourcePurchaseState').textContent=view.purchaseEnabled ? '购号开关已开启；开始注册才会购号。' : '当前服务购号开关关闭；保存与查询不会开启。';
+    $('resourcePurchaseState').textContent=view.purchaseEnabled ? '资源购买开关已开启；开始任务后先取得邮箱，再购号。' : '当前服务购买开关关闭；保存与查询不会开启。';
     if(view.configError) resourceNotice(view.configError);
     rentalConsent();
   }
@@ -39,6 +41,8 @@
     try {
       const settings={mailProvider:'otpgmail',smsProvider:'hero',credentialFile:resourceField('credentialFile').value.trim(),orderFile:resourceField('orderFile').value.trim(),phoneCountry:resourceField('phoneCountry').value,durationHours:Number(resourceField('durationHours').value),acceptRentalPriceChange:resourceField('acceptRentalPriceChange').checked,proxyProfile:resourceField('proxyProfile').value,proxyPort:Number(resourceField('proxyPort').value)};
       settings.localBrowserProxy=resourceField('localBrowserProxy').value.trim();
+      settings.mailWarehouse=Number(resourceField('mailWarehouse').value);
+      settings.mailMaxPriceVnd=Number(resourceField('mailMaxPriceVnd').value);
       const purchase={maxPrice:resourceField('maxPrice').value.trim(),maxTotal:resourceField('maxTotal').value.trim(),currency:'USD'};
       renderResources(await api('/resources',{settings,purchase}));
       for(const id of ['resourceMailResult','resourceSMSResult','resourceProxyResult']) {$(id).textContent='设置已更改，请重新查询';delete $(id).dataset.ok;}
@@ -78,7 +82,7 @@
     $('registerPasswordHint').hidden=automatic; $('registerExpiryHint').hidden=automatic;
     $('registerAutomaticHint').hidden=!automatic;
     const ready=setup && setup.purchaseEnabled && setup.budgetConfigured && setup.mailboxConfigured && setup.smsConfigured && (setup.resources.durationHours!==24 || setup.resources.acceptRentalPriceChange);
-    $('registerAutomaticHint').textContent=ready ? '本机配置齐备；开始前将核实绑定邮箱订单，再按保存的 Hero 预算购号。创建与激活分别核验。' : '尚不能自动建号：请在注册资源中绑定邮箱订单、配置 Hero 与预算，并核对服务端购号开关。';
+    $('registerAutomaticHint').textContent=ready ? '本机配置齐备；任务先购买邮箱（已绑定订单则复用），保存回执后按 Hero 预算购号，再注册并自动激活。' : '尚不能自动建号：请配置邮箱凭据、仓库和预算，以及 Hero 与购号预算，并核对服务端购买开关。';
     const role=field('familyRole').value, mother=role==='organizer', member=role==='member';
     $('registerFamilyRegionLabel').hidden=!mother;field('familyRegion').disabled=!mother;
     $('registerOrganizerLabel').hidden=!member; field('organizer').disabled=!member; field('organizer').required=member;
@@ -174,10 +178,12 @@
     $('registerDetail').textContent=detail;
     $('registerCodeForm').hidden=!(job.active && job.stage==='creating' && !job.automatic);
     $('registerRetry').hidden=!job.canRetry;
+    $('registerContinueMailbox').hidden=job.active||job.stage!=='mailbox'||job.state==='cancelled';
     $('registerContinuePayment').hidden=job.active||job.stage!=='subscription'||job.state!=='waiting_input';
     $('registerCancel').hidden=['ready','cancelled'].includes(job.state);
   }
   $('registerContinuePayment').addEventListener('click',async()=>{try{await api('/'+selected+'/continue-payment',{});notice('正在核验付款结果并继续');await refresh();}catch(error){notice(error.message);}});
+  $('registerContinueMailbox').addEventListener('click',async()=>{const button=$('registerContinueMailbox');button.disabled=true;try{await api('/'+selected+'/continue-mailbox',{});notice('正在核对原邮箱购买记录并继续');await refresh();}catch(error){notice(error.message);}finally{button.disabled=false;}});
   async function refresh() {
     if(polling) return; polling=true;
     try {

@@ -83,7 +83,7 @@ const text = await readImageText(imagePath);   // 返回字符串，失败为空
 
 首次加载从打开注册页开始，共享 90 秒截止时间，包含主页面、注册 iframe、frame 和邮箱输入框可见；浏览器启动及最多 3 秒的关闭清理不计入此预算。后续状态切换仍使用原有 45 秒等待。加载超时或连接失败记录 `page_load_timeout` / `page_load_failed`，面板显示“页面加载失败”，保留原资源，修复后继续原任务。每个任务继续使用已保存的本机 / Forge 模式、出口和语言配置。
 
-退出码 1 本身不能证明 Apple 拒绝。明确拒绝文案才标记 `registration_rejected`；未提交的脚本故障显示执行失败；已经提交或缺少提交证据的异常保留为待核实，不能直接重开注册。首次购邮调度和长期会话维护另行处理。
+退出码 1 本身不能证明 Apple 拒绝。明确拒绝文案才标记 `registration_rejected`；未提交的脚本故障显示执行失败；已经提交或缺少提交证据的异常保留为待核实，不能直接重开注册。长期会话维护另行处理。
 
 ```powershell
 node --test tools/capture/flow-mechanics.test.cjs tools/capture/flow-mechanics.browser.test.cjs tools/capture/executor-version.test.cjs
@@ -101,3 +101,21 @@ node tools/capture/create-account.cjs --version
 - Python 收到 `replacement_number_required` 后沿用原购号预算和供应商的持久化采购记录，最多两个号码；没有付费权限或预算不足则停止并显示需要处理。换号不会取消或退款旧号码。新号码租期同步到浏览器与父进程截止时间。
 - 出口国家、页面语言和账号地区使用任务原有配置，号码区号独立；美国出口可以搭配葡萄牙号码。预检不能拿号码国家当作出口国家。
 - `--version` 的 `automaticResend` 分别报告邮件与短信策略。新任务首条 `executor-version` 的源码哈希必须对应部署版本；本地表单测试不代表 Apple 真实接受换号。
+
+## 八、首次购邮与任务恢复
+
+自动任务支持“创建任务 → 购买邮箱并保存回执 → 购号 → 所选浏览器注册 → 面板自动激活”。在注册资源中填写 OTPGmail 凭据、仓库和 VND 预算，已有订单路径留空即按任务购邮；填写订单路径仍沿用原绑定方式。默认仓库 2、单邮箱上限 700 VND，可调低预算或选择仓库 1/4。保存设置和查询不扣费，任务启动和继续购买仍受服务端 `--allow-purchase` 控制。本机 / Forge 和出口配置均随任务冻结。
+
+`mail-purchase.json` 在付费请求前持久化原购买标识；`otpgmail-order.json` 保存已购订单与价格，`input.json` 绑定邮箱并取得账号占用锁后才允许购号。重复执行 `run --input` 只读取原任务。购邮中断、排队或缺货时，面板的“继续原购邮任务”（`POST /api/register/{id}/continue-mailbox`）或 `pipeline.py resume --job ID --allow-purchase` 继续原任务，不另建订单。
+
+已知订单号只通过 GET 查询；响应丢失时复用原购买标识和请求体。供应商声明幂等键保留 24 小时，代码在 23 小时后禁止重发未知购买，要求核实原订单，避免键失效后重复扣费。排队、取消、已有验证码、回执不匹配或超预算都不能进入购号阶段；不自动切仓库、换国家或轮询抢库存。[供应商恢复约定](https://otpgmail.net/en/guides/otp-api-retries-timeouts-idempotency)
+
+预算在购买前核对报价，并在返回后核对实付回执；接口未提供已验证的原子锁价参数，因此报价与下单之间涨价仍可能扣费，遇到超预算回执会保留原订单并停止后续购号，不重新购买。真实付费和 Apple 注册/激活验收不由这些离线测试替代。
+
+验证命令：
+
+```powershell
+node --test tools/capture/otpgmail-acquire.test.cjs internal/dashboard/registration_mailbox.browser.test.cjs
+python -m unittest discover -s tools/apple-pipeline -p test_mailbox_acquisition.py
+go test ./internal/dashboard
+```

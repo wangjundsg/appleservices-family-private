@@ -36,7 +36,7 @@
     <div class="card-title-row"><div><h3 id="registerHeading">新建 Apple ID</h3><p class="card-description">注册、登录与设备登记，完成后加入账号列表。</p></div><button type="button" class="button button-primary" id="registerToggle" aria-expanded="false" aria-controls="registerForm">新建账号</button></div>
     <details class="resource-workbench" id="resourceWorkbench">
       <summary>注册资源<span>邮箱、手机与固定出口</span></summary>
-      <p class="resource-intro">先绑定邮箱订单，再核对手机和代理。查询不会购买资源或发送验证码。</p>
+      <p class="resource-intro">任务先取得邮箱订单，再购买号码。已有邮箱订单可选绑定；查询不会购买资源或发送验证码。</p>
       <div class="resource-list">
         <article class="resource-row"><div><h4>邮箱 <span>OTPGmail</span></h4><p id="resourceMailState">正在读取本机配置…</p></div><button type="button" class="text-button" data-resource-check="mail">查询余额与订单</button><p class="resource-result" id="resourceMailResult" role="status">尚未查询供应商</p></article>
         <article class="resource-row"><div><h4>手机 <span>Hero SMS</span></h4><p id="resourceSMSState">正在读取本机配置…</p></div><button type="button" class="text-button" data-resource-check="sms">查询余额与库存</button><p class="resource-result" id="resourceSMSResult" role="status">尚未查询供应商</p></article>
@@ -45,7 +45,9 @@
       <form id="resourceForm">
         <div class="register-fields">
           <label>邮箱凭据文件<input name="credentialFile" required autocomplete="off" placeholder="本机 DPAPI 文件的绝对路径"></label>
-          <label>已购买的邮箱订单文件<input name="orderFile" autocomplete="off" placeholder="本机私有订单 JSON 的绝对路径"></label>
+          <label>已有邮箱订单（可选）<input name="orderFile" autocomplete="off" placeholder="留空则在任务内购买邮箱"></label>
+          <label>邮箱仓库<select name="mailWarehouse"><option value="1">仓库 1</option><option value="2">仓库 2</option><option value="4">仓库 4</option></select></label>
+          <label>单邮箱最高预算（VND）<input name="mailMaxPriceVnd" type="number" min="1" max="700" required value="700"></label>
           <label>Hero 号码国家<select name="phoneCountry"><option value="PL">波兰 +48</option><option value="CO">哥伦比亚 +57</option><option value="US">美国 +1</option><option value="PT">葡萄牙 +351</option><option value="AO">安哥拉 +244</option><option value="CM">喀麦隆 +237</option></select></label>
           <label>Hero 号码有效期<select name="durationHours"><option value="0">普通激活 · 以回执为准</option><option value="24">一天租期 · 24 小时</option></select></label>
           <label>单号码最高预算（USD）<input name="maxPrice" inputmode="decimal" placeholder="未配置"></label>
@@ -61,7 +63,7 @@
       </form>
     </details>
     <form id="registerForm" hidden>
-      <label class="register-consent"><input name="automatic" type="checkbox" checked>使用已绑定的 OTPGmail 邮箱订单，按预算购买 Hero 号码</label>
+      <label class="register-consent"><input name="automatic" type="checkbox" checked>按预算取得 OTPGmail 邮箱，再购买 Hero 号码</label>
       <p id="registerAutomaticHint" class="cache-note">正在检查自动建号配置…</p>
       <div class="register-fields">
         <label>账号用途<select name="familyRole"><option value="organizer">母号 · 开通 iCloud+ 并新建家庭</option><option value="member">成员 · 加入母号家庭</option><option value="none">仅建号和激活</option></select></label>
@@ -93,7 +95,7 @@
       <ol class="register-stages" id="registerStages"><li data-stage="creating">注册</li><li data-stage="login">交接面板</li><li data-stage="twofa">登录验证</li><li data-stage="terms">iCloud 激活</li><li data-stage="device">设备登记</li><li data-stage="keepalive">后台在线</li><li data-stage="subscription">iCloud+ 订阅</li><li data-stage="family">家庭共享</li></ol>
       <p id="registerDetail" class="card-description"></p>
       <form id="registerCodeForm" class="register-code" hidden><label for="registerEmailCode">邮箱验证码</label><input id="registerEmailCode" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="one-time-code" required placeholder="4–8 位验证码"><button type="submit" class="button button-light">提交邮箱验证码</button></form>
-      <div class="register-actions"><button type="button" class="text-button" id="registerEvidence">查看证据</button><button type="button" class="text-button" id="registerRetry" hidden>用新号码重试</button><button type="button" id="registerContinuePayment" class="button button-primary" hidden>已付款，继续关闭续费与共享</button><button type="button" class="text-button" id="registerCancel">取消任务</button></div>
+      <div class="register-actions"><button type="button" class="text-button" id="registerEvidence">查看证据</button><button type="button" class="text-button" id="registerRetry" hidden>用新号码重试</button><button type="button" id="registerContinueMailbox" class="button button-primary" hidden>继续原购邮任务</button><button type="button" id="registerContinuePayment" class="button button-primary" hidden>已付款，继续关闭续费与共享</button><button type="button" class="text-button" id="registerCancel">取消任务</button></div>
       <details class="register-log"><summary>运行记录</summary><pre id="registerLog" aria-label="脱敏运行记录">暂无记录</pre></details>
       <div id="registerEvidenceList" class="register-evidence" hidden></div>
     </div>

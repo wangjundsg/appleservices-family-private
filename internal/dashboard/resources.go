@@ -27,6 +27,8 @@ type resourceSettings struct {
 	MailProvider            string `json:"mailProvider"`
 	CredentialFile          string `json:"credentialFile"`
 	OrderFile               string `json:"orderFile"`
+	MailWarehouse           int    `json:"mailWarehouse"`
+	MailMaxPriceVND         int    `json:"mailMaxPriceVnd"`
 	SMSProvider             string `json:"smsProvider"`
 	PhoneCountry            string `json:"phoneCountry"`
 	DurationHours           int    `json:"durationHours"`
@@ -58,6 +60,12 @@ func (s *Server) resourceDefaults(settings *registerSettings) {
 	if r.CredentialFile == "" {
 		r.CredentialFile = filepath.Join(s.config.RepoRoot, ".cache", "otpgmail", "api-key.dpapi")
 	}
+	if r.MailWarehouse == 0 {
+		r.MailWarehouse = 2
+	}
+	if r.MailMaxPriceVND == 0 {
+		r.MailMaxPriceVND = 700
+	}
 	if r.SMSProvider == "" {
 		r.SMSProvider = "hero"
 	}
@@ -85,7 +93,7 @@ func smsKey(provider string) string {
 func loadOTPGmailOrder(r resourceSettings) (otpGmailOrder, error) {
 	var order otpGmailOrder
 	if !filepath.IsAbs(r.OrderFile) || readRegisterJSON(r.OrderFile, &order) != nil {
-		return order, errors.New("请绑定 OTPGmail 私有订单文件；面板不会自动购买邮箱")
+		return order, errors.New("未绑定已有邮箱订单；留空时由任务按保存的仓库和预算购买")
 	}
 	if order.Provider != "otpgmail" || !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(order.OrderID) || !registerEmailPattern.MatchString(order.Email) ||
 		!strings.HasSuffix(strings.ToLower(order.Email), "@gmail.com") || (order.Warehouse != 1 && order.Warehouse != 2 && order.Warehouse != 4) ||
@@ -284,6 +292,9 @@ func (s *Server) saveResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := body.Settings
+	defaults := registerSettings{Resources: v}
+	s.resourceDefaults(&defaults)
+	v.MailWarehouse, v.MailMaxPriceVND = defaults.Resources.MailWarehouse, defaults.Resources.MailMaxPriceVND
 	if v.LocalBrowserProxy != "" && !validLocalBrowserProxy(v.LocalBrowserProxy) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"message": "本机浏览器代理须为带端口的本机 HTTP、HTTPS 或 SOCKS5 地址，不可包含凭据"})
@@ -292,6 +303,7 @@ func (s *Server) saveResources(w http.ResponseWriter, r *http.Request) {
 	if v.MailProvider != "otpgmail" || v.SMSProvider != "hero" || len(v.PhoneCountry) != 2 || !strings.Contains("|PL|CO|US|PT|AO|CM|", "|"+v.PhoneCountry+"|") ||
 		(v.DurationHours != 0 && v.DurationHours != 24) || (v.ProxyProfile != "current" && v.ProxyProfile != "711" && v.ProxyProfile != "dataimpulse") ||
 		v.ProxyPort < 0 || v.ProxyPort > 65535 || !filepath.IsAbs(v.CredentialFile) || (v.OrderFile != "" && !filepath.IsAbs(v.OrderFile)) ||
+		(v.MailWarehouse != 1 && v.MailWarehouse != 2 && v.MailWarehouse != 4) || v.MailMaxPriceVND <= 0 || v.MailMaxPriceVND > 700 ||
 		!(body.Purchase.valid() || (body.Purchase.MaxPrice == "" && body.Purchase.MaxTotal == "" && body.Purchase.Currency == "USD")) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"message": "请核对资源路径、国家、租期与 USD 预算"})

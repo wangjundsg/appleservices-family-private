@@ -114,4 +114,4 @@ if (require.main===module) {
     }
   })();
 }
-module.exports={inspect,pollCode,pickCode,loadKey};
+module.exports={inspect,pollCode,pickCode,loadKey,get};

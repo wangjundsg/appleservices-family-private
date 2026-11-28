@@ -89,6 +89,14 @@ var activationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 var registrationOTPPattern = regexp.MustCompile(`^[0-9]{6}$`)
 var registrationRatePattern = regexp.MustCompile(`tooManyCodesSent["'\s:=]+true|ec=-22981|(?:HTTP|status)["'\s:=]+423`)
 var registerMessages = map[string]string{
+	"mailbox_purchase_pending":               "正在购买邮箱；取得并保存订单后才会购买号码。",
+	"mailbox_stock_unavailable":              "邮箱库存不足，尚未购买号码；稍后继续原任务，不自动切换仓库。",
+	"mailbox_price_exceeded":                 "邮箱报价超过任务预算，未购买邮箱或号码。",
+	"mailbox_balance_insufficient":           "邮箱余额不足，尚未购买号码。",
+	"mailbox_order_pending":                  "邮箱订单仍在分配中；继续原任务时查询原订单，不重新购买。",
+	"mailbox_order_not_ready":                "原邮箱订单不可用于注册，已保留回执；请核实，未购买号码。",
+	"mailbox_purchase_requires_readback":     "邮箱购买结果待核实；请继续原任务查询，不能另开任务重复购买。",
+	"mailbox_purchase_policy_invalid":        "首次购邮配置无效，未启动注册。",
 	"registration_input_invalid":             "本地创建参数未通过检查，尚未提交注册；保留原号码，修正后继续原任务。",
 	"invalid_browser_mode":                   "浏览器方式无效，请核对当前任务。",
 	"local_browser_proxy_invalid":            "本机 Chrome 代理配置无效，请核对已保存的地址和端口。",
@@ -434,7 +442,7 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 		if readRegisterJSON(file, &prior) != nil {
 			return "", errors.New("历史任务不可读，请先检查本地状态")
 		}
-		if strings.EqualFold(prior.Email, body.Email) && filepath.Base(filepath.Dir(file)) != body.RetryOf {
+		if body.Email != "" && strings.EqualFold(prior.Email, body.Email) && filepath.Base(filepath.Dir(file)) != body.RetryOf {
 			var previous pipelineReceipt
 			if body.RetryOf == "" || readRegisterJSON(filepath.Join(filepath.Dir(file), "result.json"), &previous) != nil || !retryableReceipt(previous) {
 				return "", errors.New("该邮箱已有任务，请查看原任务")
@@ -502,7 +510,14 @@ func (s *Server) startRegistration(body registerRequest) (string, error) {
 	}
 	if body.Automatic {
 		delete(manifest, "email_code_file")
-		if settings.Resources.MailProvider == "otpgmail" {
+		if settings.Resources.MailProvider == "otpgmail" && settings.Resources.OrderFile == "" {
+			if err := privatefs.EnsureDir(folder); err != nil {
+				return "", errors.New("无法创建私有任务目录")
+			}
+			manifest["mail_purchase"] = map[string]any{"credentialFile": settings.Resources.CredentialFile,
+				"warehouse": settings.Resources.MailWarehouse, "max_price_vnd": settings.Resources.MailMaxPriceVND}
+			manifest["otpgmail_order_file"] = filepath.Join(folder, "otpgmail-order.json")
+		} else if settings.Resources.MailProvider == "otpgmail" {
 			order := body.mailOrder
 			if order == nil || !strings.EqualFold(order.Email, body.Email) {
 				return "", errors.New("邮箱订单发生变化，请核实后继续")
@@ -648,6 +663,9 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 		settings, err := s.registerSettings()
 		s.registerMu.Unlock()
 		_, orderErr := loadOTPGmailOrder(settings.Resources)
+		if settings.Resources.OrderFile == "" {
+			orderErr = validateMailPurchase(settings.Resources)
+		}
 		json.NewEncoder(w).Encode(map[string]any{"purchaseEnabled": s.config.AllowPurchase, "subscriptionEnabled": s.config.AllowSubscription, "familyOrganizers": s.familyOrganizers(), "budgetConfigured": err == nil && settings.Purchase.valid(), "mailboxConfigured": err == nil && ((settings.Resources.MailProvider == "otpgmail" && orderErr == nil) || (settings.Resources.MailProvider == "outlook" && settings.CodePoolConfig != "")), "smsConfigured": smsKey(settings.Resources.SMSProvider) != "", "resources": settings.Resources})
 		return
 	}
@@ -707,6 +725,8 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case parts[1] == "continue-mailbox" && r.Method == "POST":
+		s.resumeMailbox(w, r, id)
 	case parts[1] == "continue-payment" && r.Method == "POST":
 		s.resumeCNPayment(w, r, id)
 	case parts[1] == "cancel" && r.Method == "POST":
@@ -769,7 +789,7 @@ func (s *Server) serveRegistration(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				// Only known enums cross the UI boundary, never reason/output strings.
-				if !strings.Contains("|create|login|terms|gsa|device|keepalive|subscription|family|", "|"+row.Stage+"|") || !strings.Contains("|queued|running|waiting_input|ready|failed|usage|unknown|needs_review|rate_limited|needs_login|cancelled|", "|"+row.Status+"|") {
+				if !strings.Contains("|mailbox|create|login|terms|gsa|device|keepalive|subscription|family|", "|"+row.Stage+"|") || !strings.Contains("|queued|running|waiting_input|ready|failed|usage|unknown|needs_review|rate_limited|needs_login|cancelled|", "|"+row.Status+"|") {
 					continue
 				}
 				rows = append(rows, map[string]string{"stage": row.Stage, "state": row.Status, "at": row.UpdatedAt.Format(time.RFC3339)})

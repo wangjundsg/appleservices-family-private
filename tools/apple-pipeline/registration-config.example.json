@@ -1,6 +1,17 @@
 {
   "codePoolConfig": "D:\\outlook-workbench\\.cache\\workbench\\api-client.json",
   "purchase": {"maxPrice": "", "maxTotal": "", "currency": "USD"},
+  "resources": {
+    "mailProvider": "otpgmail",
+    "credentialFile": "D:\\appleservices-family-private\\.cache\\otpgmail\\api-key.dpapi",
+    "orderFile": "",
+    "mailWarehouse": 2,
+    "mailMaxPriceVnd": 700,
+    "smsProvider": "hero",
+    "phoneCountry": "PL",
+    "durationHours": 0,
+    "proxyProfile": "current"
+  },
   "roxy": {
     "api": "http://127.0.0.1:50100",
     "token": "REPLACE_LOCALLY",

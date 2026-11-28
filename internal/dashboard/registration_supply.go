@@ -162,6 +162,17 @@ func (s *Server) prepareAutomaticRegistration(body *registerRequest, settings re
 }
 
 func (s *Server) prepareOTPGmailRegistration(body *registerRequest, r resourceSettings) error {
+	if r.OrderFile == "" {
+		if err := validateMailPurchase(r); err != nil {
+			return err
+		}
+		password, err := generateRegistrationPassword(rand.Reader)
+		if err != nil {
+			return err
+		}
+		body.Email, body.Password = "", password
+		return nil
+	}
 	order, err := loadOTPGmailOrder(r)
 	if err != nil {
 		return err
@@ -213,6 +224,19 @@ func (s *Server) prepareOTPGmailRegistration(body *registerRequest, r resourceSe
 	}
 	body.Email, body.Password = email, password
 	body.mailOrder = &order
+	return nil
+}
+
+func validateMailPurchase(r resourceSettings) error {
+	if (r.MailWarehouse != 1 && r.MailWarehouse != 2 && r.MailWarehouse != 4) || r.MailMaxPriceVND <= 0 || r.MailMaxPriceVND > 700 {
+		return errors.New("请配置邮箱仓库和单邮箱预算（不超过 700 VND）")
+	}
+	if !filepath.IsAbs(r.CredentialFile) {
+		return errors.New("邮箱凭据必须是本机绝对路径")
+	}
+	if info, err := os.Stat(r.CredentialFile); err != nil || !info.Mode().IsRegular() {
+		return errors.New("OTPGmail 凭据文件不可读")
+	}
 	return nil
 }
 

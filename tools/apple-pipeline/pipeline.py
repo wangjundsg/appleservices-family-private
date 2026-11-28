@@ -26,7 +26,7 @@ from sms_supply import Supply, SupplyError
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_STATES = {"account_exists", "requires_2fa", "authenticated"}
 STATE = Path(os.environ.get("APPLESERVICES_PIPELINE_STATE", ROOT / "state" / "pipeline")).resolve()
-STAGES = ("create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
+STAGES = ("mailbox", "create", "login", "terms", "gsa", "device", "keepalive", "subscription", "family")
 COUNTRIES = {"GB": "GBR", "US": "USA", "CA": "CAN", "AU": "AUS", "CN": "CHN", "DE": "DEU",
              "FR": "FRA", "SG": "SGP", "HK": "HKG", "JP": "JPN", "ID": "IDN", "VN": "VNM", "PL":"POL", "CO":"COL", "PT":"PRT", "AO":"AGO", "CM":"CMR"}
 
@@ -172,13 +172,21 @@ def local_browser_proxy(cfg):
 def validate(cfg):
     job_path(cfg.get("job_id"))
     account_country(cfg)
-    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", cfg.get("email", "")):
+    mail = cfg.get("mail_purchase")
+    if mail is not None:
+        if (not isinstance(mail, dict) or type(mail.get("warehouse")) is not int or mail.get("warehouse") not in (1, 2, 4)
+                or type(mail.get("max_price_vnd")) is not int or not 0 < mail["max_price_vnd"] <= 700
+                or not Path(mail.get("credentialFile", "")).is_absolute()
+                or not cfg.get("otpgmail_order_file") or not cfg.get("sms", {}).get("auto_purchase")):
+            raise PipelineError("mailbox_purchase_policy_invalid", "usage")
+    pending_mail = mail is not None and not cfg.get("email")
+    if not pending_mail and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", cfg.get("email", "")):
         raise PipelineError("email_required", "usage")
     blocked = cfg.get("blocked_mailbox_domains")
     if blocked is None:
         blocked = ["icloud.com"]
     blocked = {str(d).lower() for d in blocked}
-    if cfg["email"].rsplit("@", 1)[1].lower() in blocked:
+    if ("gmail.com" if pending_mail else cfg["email"].rsplit("@", 1)[1].lower()) in blocked:
         raise PipelineError("unsupported_registration_mailbox", "usage")
     pw = cfg.get("password", "")
     if len(pw) < 8 or not all(re.search(p, pw) for p in [r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]"]):
@@ -299,12 +307,12 @@ class Job:
         status = self.upgrade_status(status) if status else status
         self.method = cfg.get("registration_method") or cfg.get("registrationMethod") or "browser"
         self.allow_purchase = allow_purchase
-        self.status = status or {"job_id": cfg["job_id"], "stage": "create", "status": "queued",
+        self.status = status or {"job_id": cfg["job_id"], "stage": "mailbox" if cfg.get("mail_purchase") else "create", "status": "queued",
                                  "attempts": {}, "account_created": False, "trust_verified": False}
 
     def update(self, **values):
         self.status.update(values, updated_at=iso(), schema_version=2,
-                           account_id=hashlib.sha256(self.cfg["email"].strip().lower().encode()).hexdigest(),
+                           account_id=hashlib.sha256(self.cfg["email"].strip().lower().encode()).hexdigest() if self.cfg.get("email") else "",
                            revision=self.status.get("revision", 0)+1)
         atomic(self.folder / "result.json", self.status)
         with open(self.folder / "events.jsonl", "a", encoding="utf-8") as f:
@@ -392,6 +400,41 @@ class Job:
             return
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
+
+    def acquire_mailbox(self):
+        self.check_cancel()
+        if not self.allow_purchase:
+            raise PipelineError("purchase_disabled", "needs_review")
+        output = self.folder / "otpgmail-order.json"
+        if Path(self.cfg.get("otpgmail_order_file", "")).resolve() != output.resolve():
+            raise PipelineError("mailbox_purchase_policy_invalid", "usage")
+        self.update(status="running", reason="mailbox_purchase_pending")
+        code, outcome = self.process(["node", "tools/capture/otpgmail-acquire.cjs", str(self.folder / "input.json"), str(output)], 80)
+        if code != 0 or not output.exists():
+            reason = (outcome or {}).get("reason", "")
+            allowed = {"mailbox_stock_unavailable", "mailbox_price_exceeded", "mailbox_balance_insufficient",
+                       "mailbox_order_pending", "mailbox_order_not_ready", "mailbox_purchase_policy_invalid"}
+            raise PipelineError(reason if reason in allowed else "mailbox_purchase_requires_readback", "needs_review")
+        order = read(output)
+        email = str(order.get("email", "")).lower()
+        policy = self.cfg["mail_purchase"]
+        if (order.get("provider") != "otpgmail" or not re.fullmatch(r"[A-Za-z0-9._%+-]+@gmail\.com", email)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", order.get("orderId", ""))
+                or order.get("warehouse") != policy["warehouse"] or order.get("credentialFile") != policy["credentialFile"]
+                or order.get("status") != "waiting_code" or type(order.get("priceVnd")) is not int
+                or not 0 <= order["priceVnd"] <= policy["max_price_vnd"]
+                or self.cfg.get("email") not in (None, "", email)):
+            raise PipelineError("mailbox_order_not_ready", "needs_review")
+        # Claim ownership before enabling number purchase or browser registration.
+        reservation = STATE / "accounts" / (hashlib.sha256(email.encode()).hexdigest() + ".json")
+        with lock(reservation.with_suffix(".lock")):
+            if reservation.exists() and read(reservation) != self.cfg["job_id"]:
+                raise PipelineError("account_already_has_a_job", "needs_review")
+            atomic(reservation, self.cfg["job_id"])
+        self.cfg["email"] = email
+        validate(self.cfg)
+        atomic(self.folder / "input.json", self.cfg)
+        self.update(stage="create", status="queued", reason="mailbox_ready", mailbox_acquired=True)
 
     def replacement_folder(self, kind, index):
         limit = 3 if self.cfg.get("browser_mode") == "local" else 1
@@ -836,6 +879,8 @@ class Job:
     def run(self, resume=False):
         try:
             if self.status["status"] == "ready": return
+            if self.status["stage"] == "mailbox":
+                self.acquire_mailbox()
             if (resume and self.cfg.get("handoff") == "dashboard" and self.status.get("account_created")
                     and self.status.get("stage") in {"login", "gsa", "terms"}
                     and all(op.get("state") == "succeeded" for op in self.status.get("operations", {}).values())):
@@ -934,7 +979,7 @@ class Job:
             # The hold code explains this refusal; the job keeps the reason that
             # made it unresolved.
             extra = {}
-            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason and prior not in {"form_running", "stage_started"}
+            if (error.state in {"needs_review", "rate_limited"} and prior and prior != error.reason and prior not in {"form_running", "stage_started", "mailbox_purchase_pending"}
                     and error.reason not in {"gsa_account_repair_required", "apple_sms_verify_precondition_failed"}):
                 extra["hold_reason"] = error.reason
                 self.update(status=error.state, reason=prior, cooldown_until=cooldown, **extra)
@@ -1599,16 +1644,17 @@ def execute(action, job_id=None, input_file=None, allow_purchase=False):
                     raise PipelineError(missing.reason, "needs_review")
             for binary in ("login.exe", "appleweb.exe", "trusted-device.exe"):
                 if not (ROOT / "bin" / binary).exists(): raise PipelineError("build_binaries_first", "usage")
-            account_key = hashlib.sha256(cfg["email"].lower().encode()).hexdigest()
-            reservation = STATE / "accounts" / (account_key + ".json")
-            with lock(reservation.with_suffix(".lock")):
-                if reservation.exists() and read(reservation) != cfg["job_id"]:
-                    previous_id = read(reservation)
-                    previous = read(job_path(previous_id) / "result.json")
-                    safe_retry = previous.get("creation_rejected") or (not previous.get("registration_started") and previous.get("status") in {"failed", "usage", "cancelled"})
-                    if cfg.get("retry_of") != previous_id or previous.get("account_created") or previous.get("active") or not safe_retry:
-                        raise PipelineError("account_already_has_a_job", "usage")
-                atomic(reservation, cfg["job_id"])
+            if cfg.get("email"):
+                account_key = hashlib.sha256(cfg["email"].lower().encode()).hexdigest()
+                reservation = STATE / "accounts" / (account_key + ".json")
+                with lock(reservation.with_suffix(".lock")):
+                    if reservation.exists() and read(reservation) != cfg["job_id"]:
+                        previous_id = read(reservation)
+                        previous = read(job_path(previous_id) / "result.json")
+                        safe_retry = previous.get("creation_rejected") or (not previous.get("registration_started") and previous.get("status") in {"failed", "usage", "cancelled"})
+                        if cfg.get("retry_of") != previous_id or previous.get("account_created") or previous.get("active") or not safe_retry:
+                            raise PipelineError("account_already_has_a_job", "usage")
+                    atomic(reservation, cfg["job_id"])
             atomic(folder / "request-hash.json", hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest())
             atomic(folder / "result.json", Job(folder, cfg).status)
             atomic(folder / "input.json", cfg)
@@ -1657,7 +1703,7 @@ def main():
     parser.add_argument("action", choices=["run", "resume", "status", "keepalive", "refund", "cleanup", "maintain", "maintain-once"])
     parser.add_argument("--input", help="private JSON manifest (run only)")
     parser.add_argument("--job")
-    parser.add_argument("--allow-purchase", action="store_true", help="explicitly permit a bounded paid SMS purchase")
+    parser.add_argument("--allow-purchase", action="store_true", help="explicitly permit bounded mailbox and SMS purchases")
     args = parser.parse_args()
     try:
         if args.action == "maintain-once":
