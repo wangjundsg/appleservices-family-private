@@ -7,6 +7,14 @@ p = fixtures.p
 class LocalBrowserTests(unittest.TestCase):
     setUp = fixtures.PipelineTests.setUp
 
+    def test_local_solver_uses_domestic_endpoint_independent_of_browser_proxy(self):
+        self.job.cfg.update(browser_mode="local", egress_mode="local", captcha_solver="yes",
+                            yescaptcha_key="fixture", local_browser_proxy="socks5://127.0.0.1:17911")
+        with patch.dict(p.os.environ, {"YESCAPTCHA_API_BASE": "https://api.yescaptcha.com"}):
+            env = self.job.env()
+        self.assertEqual(env["YESCAPTCHA_API_BASE"], "https://cn.yescaptcha.com")
+        self.assertEqual(env["HTTP_PROXY"], "socks5://127.0.0.1:17911")
+
     def test_creator_failure_never_restarts_local_browser_or_buys_again(self):
         self.job.cfg.update(browser_mode="local", egress_mode="direct")
         self.job.cfg["sms"]["auto_purchase"] = True

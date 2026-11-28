@@ -319,6 +319,8 @@ class Job:
                    APPLESERVICES_CREATE_INPUT=str(self.folder / "create-input.json"))
         _solver_name, _solver_key = resolve_captcha(self.cfg)
         if _solver_key: env["YESCAPTCHA_KEY"] = _solver_key
+        if self.cfg.get("browser_mode") == "local":
+            env["YESCAPTCHA_API_BASE"] = "https://cn.yescaptcha.com"
         for key in list(env):
             if key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}: env.pop(key)
         local_proxy = local_browser_proxy(self.cfg)
