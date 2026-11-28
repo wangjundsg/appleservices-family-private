@@ -383,7 +383,7 @@ class Job:
             if not acquisition:
                 acquisition = hashlib.sha256(f"{self.cfg['job_id']}:{time.time_ns()}".encode()).hexdigest()[:32]
                 self.update(acquisition_id=acquisition, reason="number_purchase_pending")
-            policy = {**sms, "acquisition_id": acquisition}
+            policy = {**sms, "acquisition_id": acquisition, "max_numbers": 4 if self.cfg.get("browser_mode") == "local" else 2}
             try: purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], policy, self.allow_purchase)
             except SupplyError as e: raise PipelineError(str(e), "needs_review") from None
             self.cfg["sms"] = {**sms, **purchased}
@@ -393,20 +393,40 @@ class Job:
         # Legacy receipts cannot prove paid price/currency/expiry. Require the bounded adapter.
         raise PipelineError("purchase_policy_required", "usage")
 
-    def replace_number(self):
-        handoff = self.folder / "replacement-number.json"
-        if handoff.exists(): return
+    def replacement_folder(self, kind, index):
+        limit = 3 if self.cfg.get("browser_mode") == "local" else 1
+        if type(index) is not int or not 1 <= index <= limit:
+            raise PipelineError("replacement_limit", "needs_review")
+        completed = self.status.get(kind + "_replacements", 0)
+        if index < completed or index > completed + 1:
+            raise PipelineError("replacement_sequence", "needs_review")
+        # Preserve an existing first-round intent when continuing an older task.
+        if index == 1 and (self.folder / f"replacement-{kind}-intent.json").exists():
+            return self.folder
+        return self.folder / f"replacement-{kind}-{index}"
+
+    def replace_number(self, index=1):
+        folder = self.replacement_folder("number", index)
+        handoff = folder / "replacement-number.json"
+        if handoff.exists():
+            result = read(handoff)
+            if str(self.cfg["sms"]["activation"]) != str(result["activation"]):
+                raise PipelineError("replacement_number_invalid", "needs_review")
+            self.update(number_replacements=index)
+            atomic(self.folder / "replacement-number.json", {**result, "replacement": index})
+            return
         sms = self.cfg["sms"]
         if not sms.get("auto_purchase"):
             raise PipelineError("replacement_number_requires_input", "waiting_input")
-        intent = self.folder / "replacement-number-intent.json"
+        intent = folder / "replacement-number-intent.json"
         if intent.exists():
             request = read(intent)
         else:
             request = {"previous_activation": str(sms["activation"]),
                        "acquisition_id": secrets.token_hex(16)}
             atomic(intent, request)
-        policy = {**sms, "acquisition_id": request["acquisition_id"]}
+        policy = {**sms, "acquisition_id": request["acquisition_id"],
+                  "max_numbers": 4 if self.cfg.get("browser_mode") == "local" else 2}
         try:
             purchased = self.supply().purchase(self.cfg["job_id"], sms["phonecc"], policy, self.allow_purchase)
         except SupplyError as e:
@@ -416,14 +436,17 @@ class Job:
         self.cfg["sms"] = {**sms, **purchased}
         atomic(self.folder / "input.json", self.cfg)
         self.claim_number()
-        atomic(handoff, {**purchased, "previous_activation": request["previous_activation"]})
-        self.update(reason="replacement_number_ready", acquisition_id=request["acquisition_id"])
+        result = {**purchased, "previous_activation": request["previous_activation"], "replacement": index}
+        atomic(handoff, result)
+        self.update(reason="replacement_number_ready", acquisition_id=request["acquisition_id"], number_replacements=index)
+        atomic(self.folder / "replacement-number.json", result)
 
-    def replace_email(self):
+    def replace_email(self, index=1):
         if self.cfg.get("browser_mode") != "local" or not self.cfg.get("otpgmail_order_file") or not self.allow_purchase:
             raise PipelineError("replacement_email_requires_input", "waiting_input")
-        handoff = self.folder / "replacement-email.json"
-        intent = self.folder / "replacement-email-intent.json"
+        folder = self.replacement_folder("email", index)
+        handoff = folder / "replacement-email.json"
+        intent = folder / "replacement-email-intent.json"
         if not intent.exists():
             atomic(intent, {"previous_email": self.cfg["email"], "source_file": self.cfg["otpgmail_order_file"],
                             "acquisition_id": secrets.token_hex(16), "max_price_vnd": 700})
@@ -434,7 +457,7 @@ class Job:
                 raise PipelineError("replacement_email_purchase_unconfirmed", "needs_review")
         result = read(handoff)
         new_email = result.get("email", "")
-        order_file = self.folder / "replacement-otpgmail-order.json"
+        order_file = folder / "replacement-otpgmail-order.json"
         order = read(order_file)
         if (result.get("previous_email") != previous or self.cfg["email"] not in (previous,new_email)
                 or not re.fullmatch(r"[A-Za-z0-9._%+-]+@gmail\.com", new_email) or new_email.lower() == previous.lower()
@@ -448,9 +471,9 @@ class Job:
         self.cfg.setdefault("sms_account_email",previous)
         self.cfg.update(email=new_email,otpgmail_order_file=str(order_file))
         atomic(self.folder / "input.json",self.cfg)
-        self.update(reason="replacement_email_ready",email_replacements=1)
+        self.update(reason="replacement_email_ready",email_replacements=index)
         # Publish readiness only after identity/reservation updates are durable.
-        atomic(self.folder / "replacement-email-ready.json",result)
+        atomic(self.folder / "replacement-email-ready.json",{**result,"replacement":index})
 
     def protocol_step(self, waiting=None, action=None):
         """One delegation to the adapter: create the first time, resume afterwards.
@@ -606,11 +629,11 @@ class Job:
                             if state == "replacement_email_required":
                                 if code_mode or self.method != "browser":
                                     raise PipelineError("replacement_wrong_stage", "needs_review")
-                                self.replace_email()
+                                self.replace_email(event.get("replacement", 1))
                             if state == "replacement_number_required":
                                 if code_mode or self.method != "browser":
                                     raise PipelineError("replacement_wrong_stage", "needs_review")
-                                self.replace_number()
+                                self.replace_number(event.get("replacement", 1))
                                 end = time.monotonic() + max(1, timestamp(self.cfg["sms"]["expires_at"]) - time.time()) + 15
                             if state == "terms": self.update(stage="terms", status="running")
                             if state == "waiting_input":

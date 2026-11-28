@@ -88,7 +88,9 @@ class Supply:
             if any(row["result"] in {"PURCHASE_PENDING","PURCHASE_UNKNOWN","RECEIPT_INVALID"} for row in rows):
                 raise SupplyError("purchase_requires_readback")
             bought = [row for row in rows if row["result"] != "NO_PURCHASE"]
-            if len(bought) >= 2: raise SupplyError("account_number_limit")
+            limit = policy.get("max_numbers", 2)
+            if type(limit) is not int or limit not in (2, 4): raise SupplyError("purchase_budget_invalid")
+            if len(bought) >= limit: raise SupplyError("account_number_limit")
             exposure = sum((Decimal(row.get("price") or row["reserved"]) for row in bought), Decimal(0))
             if exposure + maximum > budget: raise SupplyError("purchase_budget_exhausted")
             # At most one successful acquisition per call; only NO_NUMBERS permits fallback.

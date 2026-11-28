@@ -132,7 +132,7 @@ let phone = String(arg("phone", ""));
 let activation = String(arg("activation", ""));
 let heroKey = String(arg("hero-key", process.env.APPLESERVICES_SMS_KEY || ""));
 const excludedSMS = new Set();
-let phoneReplaced = false;
+let phoneReplacements = 0;
 const awaitCaptcha = String(arg("await-captcha", ""));
 // --preflight gates the browser on the captcha resource being reachable at all;
 // --auto-refund cancels the number before any non-zero exit (run-20261113 §4.5,
@@ -429,7 +429,7 @@ async function phoneAction(page, labels, name) {
 }
 
 async function replacePhone(page) {
-  if (phoneReplaced) return false;
+  if (phoneReplacements >= (nativeMode ? 3 : 1)) return false;
   const file = String(arg("replacement-number-file", ""));
   if (!file) return false;
   // Prove the change-number form exists before requesting a paid resource.
@@ -437,10 +437,13 @@ async function replacePhone(page) {
   const frame = await widgetFrame(page);
   const input = frame.locator('input[name="phoneNumber"], input[name="phone"]');
   await input.waitFor({state: "visible", timeout: 15000});
-  note("step", {state: "replacement_number_required", previous_activation: activation});
+  note("step", {state: "replacement_number_required", previous_activation: activation, replacement: phoneReplacements+1});
   const response = await waitFor(async () => {
     if (!fs.existsSync(file)) return null;
-    try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+    try {
+      const value=JSON.parse(fs.readFileSync(file, "utf8"));
+      return (value.replacement || 1)===phoneReplacements+1 ? value : null;
+    }
     catch { throw new Error("replacement_file_unreadable"); }
   }, 60000, "replacement-number");
   if (!response) throw new Error("replacement_number_unavailable");
@@ -460,7 +463,7 @@ async function replacePhone(page) {
   await selectIfNeeded(frame.locator('select[name="phoneCode"]'), phoneCC, "dial_code");
   await fillIfNeeded(input, phone, "phone_number");
   await oncePhoneAction("submit-number", () => clickContinue(page, frame, "replacement-phone"));
-  phoneReplaced = true;
+  phoneReplacements += 1;
   note("step", {at: "replacement-number-submitted"});
   await frame.locator('input[name="phoneNumber"], input[name="phone"]').waitFor({state: "hidden", timeout: 15000});
   return true;
@@ -1539,10 +1542,10 @@ async function clickContinue(page, frame, tag = "") {
       }
     }).catch(() => {});
   };
-  let emailReplaced = false;
+  let emailReplacements = 0;
   async function ensureEmailAvailable(fr) {
     if(!nativeMode)return;
-    for(let pass=0;pass<2;pass+=1) {
+    for(let pass=0;pass<4;pass+=1) {
       const observed=await mech.waitForScreen({deadline:leaseDeadline,timeoutMs:15000,sleep,
         observe:async()=>{
           const field=fr.locator('input[name="appleId"]');
@@ -1554,7 +1557,7 @@ async function clickContinue(page, frame, tag = "") {
       });
       if(!observed.form || !observed.unavailable)return;
       note("step",{at:"email-unavailable"});
-      if(pass>0 || !await replaceEmail({onForm:true}))
+      if(pass===3 || !await replaceEmail({onForm:true}))
         throw Object.assign(new Error("email_unavailable"),{state:"waiting_input",evidence:"email_unavailable"});
       await fillIfNeeded(fr.locator('input[name="appleId"]'),email,"apple_id");
       await blurField(fr.locator('input[name="appleId"]'));
@@ -1837,12 +1840,13 @@ async function clickContinue(page, frame, tag = "") {
   }
   async function replaceEmail({onForm=false}={}) {
     const handoff = String(arg("replacement-email-file",""));
-    if (!nativeMode || emailReplaced || !otpGmailOrderFile || !handoff) return false;
+    if (!nativeMode || emailReplacements>=3 || !otpGmailOrderFile || !handoff) return false;
     const current = await widgetFrame(page);
     if(!onForm) {
       const back = await mech.findAction(current,["后退","返回","後退","返回上一步","Back","Go back"]);
       if (!back.ok) return false;
-      await mech.onceAction(path.join(outdir,"email-replace.json"),async()=>{
+      const marker=emailReplacements===0 ? "email-replace.json" : `email-replace-${emailReplacements+1}.json`;
+      await mech.onceAction(path.join(outdir,marker),async()=>{
         await mech.clickElement(back.locator,{mouse:page.mouse,sleep,scroll:nativeMode?scrollField:undefined});
       });
     }
@@ -1851,19 +1855,20 @@ async function clickContinue(page, frame, tag = "") {
     // Confirm the full editable form before requesting another paid mailbox.
     if (!await form.locator('input[name="phoneNumber"]').count() || !await form.locator('input[name="password"]').count())
       throw Object.assign(new Error("email_replacement_form_unavailable"),{state:"waiting_input"});
-    note("step",{state:"replacement_email_required"});
+    note("step",{state:"replacement_email_required",replacement:emailReplacements+1});
     const next = await waitFor(async()=>{
       if (!fs.existsSync(handoff))return "";
       const value=JSON.parse(fs.readFileSync(handoff,"utf8"));
-      return value;
+      return (value.replacement || 1)===emailReplacements+1 ? value : "";
     },60000,"replacement-email");
     if (!next || next.previous_email!==email || !/^[A-Za-z0-9._%+-]+@gmail\.com$/.test(next.email||"") ||
-      next.email.toLowerCase()===email.toLowerCase() || path.resolve(next.order_file||"")!==path.join(outdir,"replacement-otpgmail-order.json"))
+      next.email.toLowerCase()===email.toLowerCase() || ![path.join(outdir,`replacement-email-${emailReplacements+1}`,"replacement-otpgmail-order.json"),
+        ...(emailReplacements===0 ? [path.join(outdir,"replacement-otpgmail-order.json")] : [])].includes(path.resolve(next.order_file||"")))
       throw Object.assign(new Error("replacement_email_invalid"),{state:"waiting_input"});
     email=next.email;
     otpGmailOrderFile=next.order_file;
     usedEmailMessages.length=0;
-    emailReplaced=true;
+    emailReplacements+=1;
     if(!onForm) {
       await submitCreateForm();
       note("step",{at:"replacement-email-submitted"});
@@ -1904,7 +1909,7 @@ async function clickContinue(page, frame, tag = "") {
   let closeExtra = {};
   // C: what the email step waited and whether it asked for a resend.
   let emailWindow = null;
-  for (let step = 1; step <= 8; step += 1) {
+  for (let step = 1; step <= (nativeMode ? 16 : 8); step += 1) {
     const observed=nativeMode ? await waitNativeScreen() : null;
     const current = nativeMode ? observed.frame : await widgetFrame(page);
     const text = (nativeMode ? observed.text : await widgetText(page)).replace(/\s+/g, " ");
