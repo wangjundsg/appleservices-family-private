@@ -79,6 +79,7 @@ type reply struct {
 	Headers  map[string]string `json:"headers"`
 	Code     string            `json:"code"`
 	Error    string            `json:"error"`
+	Function int               `json:"function"`
 }
 
 // Client obtains headers and user verification codes from the same locally
@@ -261,8 +262,16 @@ func (c *Client) receive(ctx context.Context, id uint64) (reply, error) {
 func (c *Client) validateReply(message reply, id uint64) (reply, error) {
 	if message.Error != "" {
 		switch message.Error {
-		case "native_tls_handshake_failed", "native_network_timeout", "native_connection_failed":
-			return reply{}, errors.New("nativeadi: " + message.Error)
+		case "native_tls_handshake_failed", "native_network_timeout", "native_connection_failed", "native_operation_failed",
+			"native_bridge_timeout", "native_local_io_error", "native_local_value_error", "native_local_operation_failed":
+			phase := map[int]string{51: "configuration", 150: "identity", 198: "profile-create", 166: "profile-load",
+				18: "configuration-load", 17: "identity-load", 19: "push-load", 201: "transport-isolation",
+				130: "provider", 103: "code/provisioning", 106: "headers"}[message.Function]
+			detail := message.Error
+			if phase != "" {
+				detail += " (" + phase + ")"
+			}
+			return reply{}, errors.New("nativeadi: " + detail)
 		default:
 			return reply{}, errors.New("nativeadi: native generation or provisioning failed")
 		}

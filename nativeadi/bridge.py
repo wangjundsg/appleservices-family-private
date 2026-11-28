@@ -4,10 +4,23 @@ import struct
 import queue
 import hashlib
 
+last_function = 0
+
 class NativeFailure(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, function=0):
         self.code = code
+        self.function = function
         super().__init__(code)
+
+def local_failure(error):
+    # Fixed labels only: exception messages can include paths or device material.
+    if isinstance(error, queue.Empty):
+        return 'native_bridge_timeout'
+    if isinstance(error, OSError):
+        return 'native_local_io_error'
+    if isinstance(error, (ValueError, KeyError, struct.error)):
+        return 'native_local_value_error'
+    return 'native_local_operation_failed'
 
 def native_failure(result):
     # Classify in memory; never expose the native payload or its URLs/metadata.
@@ -75,14 +88,20 @@ class Bridge:
         return ptr
     def unwrap(self,result):
         if not result or result[0]!=0:
-            raise native_failure(result or b'')
+            failure = native_failure(result or b'')
+            failure.function = getattr(self, 'function', 0)
+            raise failure
         return result[1:]
     def sync(self,func,data=b''):
+        global last_function
+        self.function = last_function = func
         result=self.library.frb_pde_ffi_dispatcher_sync(func,self.prepare(data),len(data),len(data))
         try: raw=C.string_at(result.ptr,result.length)
         finally: self.library.free_wire_sync_rust2dart_sse(result)
         return self.unwrap(raw)
     def call(self,func,data=b''):
+        global last_function
+        self.function = last_function = func
         self.library.frb_pde_ffi_dispatcher_primary(func,1,self.prepare(data),len(data),len(data))
         port,raw=self.responses.get(timeout=60)
         return self.unwrap(raw)
