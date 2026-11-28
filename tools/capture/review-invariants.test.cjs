@@ -47,7 +47,7 @@ test("native retry verifies unchanged fields without repeating the initial hydra
   const source=read('create-account.cjs'),start=source.indexOf('  const fillForm = async (');
   const block=source.slice(start,source.indexOf('\n  };',start)+5),waits=[],checked=[];
   let changed=false;
-  const deps={noAutofill:async()=>{},nativeMode:true,selectIfNeeded:async()=>({selected:changed}),
+  const deps={noAutofill:async()=>{},ensureEmailAvailable:async()=>{},nativeMode:true,selectIfNeeded:async()=>({selected:changed}),
     fillIfNeeded:async()=>({typed:changed}),arg:(_name,fallback)=>fallback,note:()=>{},
     sleep:async ms=>waits.push(ms),ensureField:async(_frame,_selector,_value,label)=>checked.push(label),
     firstName:'Fixture',lastName:'Example',birthYear:'1992',birthMonth:'04',birthDay:'19',

@@ -97,6 +97,8 @@ var registerMessages = map[string]string{
 	"server_rejected_34607001":               "Apple 拒绝本次注册校验（-34607001），任务已停止并保留回执。",
 	"browser_preflight_failed":               "浏览器出口国家、语言或时区预检未通过，请检查 Forge 与代理配置。",
 	"registration_rejected":                  "注册表单被明确拒绝，请查看截图。",
+	"registration_page_load_failed":          "页面加载失败：首次加载超时或连接失败，尚未提交注册；保留原资源，修复后继续原任务。",
+	"registration_execution_failed":          "浏览器注册执行失败，尚未提交注册；请检查浏览器和任务配置。",
 	"code_rate_limited":                      "Apple 限制验证码请求，已停止并进入冷却。",
 	"web_login_unconfirmed":                  "网页登录未得到成功确认，请先核实状态。",
 	"gsa_login_unconfirmed":                  "账户验证未得到成功确认，请先核实状态。",

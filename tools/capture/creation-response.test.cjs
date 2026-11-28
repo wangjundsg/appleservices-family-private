@@ -7,13 +7,20 @@ function driver() {
   const source=fs.readFileSync(path.join(__dirname,"create-account.cjs"),"utf8");
   const start=source.indexOf("  // Review A2: this listener"),end=source.indexOf("  // Screenshot helper.",start);
   const page=new EventEmitter();
-  const check=new Function("page","flow","nativeMode","pendingCaptchaRequests","note",source.slice(start,end)+";return checkCreationFailure;")(page,flow,false,new Set(),()=>{});
+  const observer=new Function("page","flow","nativeMode","pendingCaptchaRequests","note","submissionMayHaveLanded",source.slice(start,end)+";return {check:checkCreationFailure,submitted:()=>submissionMayHaveLanded};")(page,flow,false,new Set(),()=>{},false);
   const request=(endpoint="/account/validate")=>{
     const req={url:()=>"https://fixture.invalid"+endpoint,method:()=>"POST"};page.emit("request",req);return req;
   };
   const respond=(req,status,body="{}")=>page.emit("response",{url:req.url,request:()=>req,status:()=>status,text:async()=>body});
-  return {check,request,respond};
+  return {...observer,request,respond};
 }
+
+test("a manual creation request records submission before any response arrives",()=>{
+  const d=driver();
+  assert.equal(d.submitted(),false);
+  d.request();
+  assert.equal(d.submitted(),true);
+});
 test("successful corrected validation replaces old failures in the actual driver",async()=>{
   const d=driver();
   for(const status of [400,400,200])d.respond(d.request(),status);

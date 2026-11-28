@@ -725,16 +725,27 @@ class Job:
             self.update(reason="form_running")
             self.update(registration_started=True)
             code, outcome = self.process(["node", "tools/capture/create-account.cjs"], max(1, timestamp(sms["expires_at"]) - time.time()) + 15)
+            outcome = outcome or {}
+            evidence = outcome.get("evidence", "")
+            rejected = code == 1 and bool(re.fullmatch(r"hard-reject(?::\d+)?", evidence))
+            self.update(create_exit_code=code, creation_rejected=rejected)
+            if code == 1 and outcome.get("submitted") is False:
+                self.update(registration_started=False)
+                if evidence in {"page_load_timeout", "page_load_failed"}:
+                    raise PipelineError("registration_page_load_failed", "failed")
             if self.cfg.get("browser_mode") == "local" and code != 0 and re.fullmatch(r"field_mismatch:[a-z_]+|email_field_mismatch", (outcome or {}).get("evidence", "")):
                 self.update(create_exit_code=code, creation_rejected=False)
                 raise PipelineError("registration_field_mismatch", "needs_review")
             if self.cfg.get("browser_mode") == "local" and code != 0 and re.fullmatch(r"captcha_[a-z_]+", (outcome or {}).get("evidence", "")):
                 self.update(create_exit_code=code, creation_rejected=False)
                 raise PipelineError("registration_captcha_unresolved", "needs_review")
-            self.update(create_exit_code=code, creation_rejected=code == 1)
             if code == 2:
                 self.update(registration_started=False)
                 raise PipelineError("registration_input_invalid", "usage")
+            if code == 1 and not rejected:
+                if outcome.get("submitted") is False:
+                    raise PipelineError("registration_execution_failed", "failed")
+                raise PipelineError("registration_requires_readback", "needs_review")
             if self.cfg.get("handoff") == "dashboard" and code not in (0, 1, 2):
                 raise PipelineError("registration_requires_readback", "needs_review")
             if code not in (1, 2):
@@ -939,7 +950,7 @@ class Job:
                 except PipelineError as e:
                     self.update(status=e.state, reason=e.reason)
                 if self.status["status"] == "queued": self.run()
-            if error.state not in {"needs_review", "waiting_input", "unknown"} and error.reason != "registration_input_invalid":
+            if error.state not in {"needs_review", "waiting_input", "unknown"} and error.reason not in {"registration_input_invalid", "registration_page_load_failed"}:
                 self.settle_number()
             else:
                 self.update(refund_deferred=bool(self.status.get("number_owned") and not self.status.get("account_created")))
@@ -951,7 +962,7 @@ class Job:
             # A waiting job keeps its number: releasing it here would invalidate the
             # code the operator is about to receive. Unknown outcomes keep it too.
             withholding = (self.status.get("status") in {"waiting_input", "unknown", "needs_review"}
-                           or self.status.get("reason") == "registration_input_invalid")
+                           or self.status.get("reason") in {"registration_input_invalid", "registration_page_load_failed"})
             if self.cfg["sms"].get("auto_purchase") and not withholding:
                 try: self.settle_number()
                 except Exception: self.update(refund_pending=True)

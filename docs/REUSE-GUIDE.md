@@ -81,8 +81,13 @@ const text = await readImageText(imagePath);   // 返回字符串，失败为空
 
 ## 六、测试
 
+首次加载从打开注册页开始，共享 90 秒截止时间，包含主页面、注册 iframe、frame 和邮箱输入框可见；浏览器启动及最多 3 秒的关闭清理不计入此预算。后续状态切换仍使用原有 45 秒等待。加载超时或连接失败记录 `page_load_timeout` / `page_load_failed`，面板显示“页面加载失败”，保留原资源，修复后继续原任务。每个任务继续使用已保存的本机 / Forge 模式、出口和语言配置。
+
+退出码 1 本身不能证明 Apple 拒绝。明确拒绝文案才标记 `registration_rejected`；未提交的脚本故障显示执行失败；已经提交或缺少提交证据的异常保留为待核实，不能直接重开注册。首次购邮调度和长期会话维护另行处理。
+
 ```powershell
 node --test tools/capture/flow-mechanics.test.cjs tools/capture/flow-mechanics.browser.test.cjs tools/capture/executor-version.test.cjs
+node --test tools/capture/initial-load.test.cjs tools/capture/initial-load.browser.test.cjs tools/capture/creation-outcome.test.cjs
 node tools/capture/create-account.cjs --version
 ```
 

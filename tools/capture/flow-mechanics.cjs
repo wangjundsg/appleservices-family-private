@@ -50,6 +50,7 @@ const CLOSE_REASONS = Object.freeze([
   "script-error",
   "sms-code-timeout",
   "unknown-screen",
+  "page-load-failed",
 ]);
 
 function normalizeCloseReason(reason) {
@@ -483,6 +484,30 @@ async function settleInView(locator,{sleep=ms=>new Promise(r=>setTimeout(r,ms)),
   throw Object.assign(new Error("scroll_not_settled"),{state:"unknown",evidence:"scroll_not_settled"});
 }
 
+async function loadSignupPage(page, {url, timeoutMs=90000, now=()=>performance.now(), sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
+  const end = now() + timeoutMs;
+  const remaining = () => {
+    const ms = end - now();
+    // Playwright treats zero as unlimited, so an exhausted budget must throw.
+    if (ms <= 0) throw Object.assign(new Error("timeout"), {name: "TimeoutError"});
+    return ms;
+  };
+  try {
+    await page.goto(url, {waitUntil: "domcontentloaded", timeout: remaining()});
+    await page.waitForSelector('iframe[src*="widget/account"]', {state: "attached", timeout: remaining()});
+    let frame;
+    while (!(frame = page.frames().find(f => f.url().includes("/widget/account/")))) {
+      await sleep(Math.min(200, remaining()));
+    }
+    await frame.locator('input[name="appleId"]').waitFor({state: "visible", timeout: remaining()});
+    remaining();
+    return frame;
+  } catch (error) {
+    throw Object.assign(new Error("page_load_failed"), {state: "failed", closeReason: "page-load-failed",
+      evidence: error.name === "TimeoutError" ? "page_load_timeout" : "page_load_failed"});
+  }
+}
+
 async function waitForScreen({observe,ready,timeoutMs=45000,deadline=Infinity,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   const end=Math.min(now()+timeoutMs,deadline);
   let previous="",stable=0;
@@ -517,6 +542,7 @@ module.exports = {
   findSubmit,
   fold,
   isNotSubmit,
+  loadSignupPage,
   normalizeCloseReason,
   phoneCodeWindow,
   phoneMenuAction,

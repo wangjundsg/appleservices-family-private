@@ -99,6 +99,24 @@ class LocalBrowserTests(unittest.TestCase):
         settle.assert_not_called()
         self.assertEqual(self.job.status["reason"],"registration_input_invalid")
 
+    def test_page_load_failure_preserves_resources_and_resume_reuses_original_number(self):
+        self.job.cfg.update(browser_mode="local", egress_mode="direct", captcha_solver="manual", handoff="dashboard")
+        self.job.cfg["sms"].update(auto_purchase=True, can_get_another_sms=True)
+        original_sms = dict(self.job.cfg["sms"])
+        outcomes = [(1, {"state": "failed", "evidence": "page_load_timeout", "submitted": False}), (0, {"state": "success"})]
+        with patch.object(self.job, "claim_number"), patch.object(self.job, "process", side_effect=outcomes) as process, \
+             patch.object(self.job, "settle_number") as settle, patch.object(self.job, "supply") as supply, \
+             patch.object(self.job, "dashboard_handoff", side_effect=lambda: self.job.update(status="ready")):
+            self.job.run()
+            self.assertEqual(self.job.status["reason"], "registration_page_load_failed")
+            self.assertFalse(self.job.status["registration_started"])
+            settle.assert_not_called()
+            self.job.run(resume=True)
+        self.assertEqual(self.job.status["status"], "ready")
+        self.assertEqual(self.job.cfg["sms"], original_sms)
+        self.assertEqual(process.call_count, 2)
+        supply.assert_not_called()
+
     def test_local_remote_ocr_and_legacy_setting_never_invoke_local_model(self):
         for setting in ["yes","local-first"]:
             with self.subTest(setting=setting):
@@ -124,6 +142,32 @@ class LocalBrowserTests(unittest.TestCase):
                 self.job.create()
         self.assertFalse(self.job.status["creation_rejected"])
         self.assertEqual(process.call_count,1)
+
+    def test_browser_failure_classification_requires_positive_rejection_evidence(self):
+        cases = [
+            (1, {"state": "failed", "evidence": "page_load_timeout", "submitted": False}, "registration_page_load_failed", "failed", False),
+            (1, {"state": "failed", "evidence": "page_load_failed", "submitted": False}, "registration_page_load_failed", "failed", False),
+            (1, {"state": "failed", "submitted": False}, "registration_execution_failed", "failed", False),
+            (1, {"state": "failed"}, "registration_requires_readback", "needs_review", False),
+            (1, {"state": "failed", "submitted": True}, "registration_requires_readback", "needs_review", False),
+            (3, {"state": "unknown", "submitted": True}, "registration_requires_readback", "needs_review", False),
+            (1, {"state": "failed", "evidence": "hard-reject:1", "submitted": True}, "registration_rejected", "failed", True),
+        ]
+        for mode in ["local", "forge"]:
+            for code, outcome, reason, state, rejected in cases:
+                with self.subTest(mode=mode, outcome=outcome):
+                    self.job.cfg.update(browser_mode=mode, egress_mode="direct", captcha_solver="manual", handoff="dashboard")
+                    self.job.cfg["roxy"].update(projectId="fixture", locale="en-US", timeZone="UTC")
+                    results = [(code, outcome)] if mode == "local" else [(0, {}), (code, outcome)]
+                    with patch.object(self.job, "number"), patch.object(self.job, "cleanup_browser"), \
+                         patch.object(self.job, "forge", side_effect=[{"dirId": "fixture"}, {"debuggingPort": 9222}]), \
+                         patch.object(self.job, "process", side_effect=results):
+                        with self.assertRaises(p.PipelineError) as error:
+                            self.job.create()
+                    self.assertEqual(error.exception.reason, reason)
+                    self.assertEqual(error.exception.state, state)
+                    self.assertEqual(self.job.status["creation_rejected"], rejected)
+                    self.assertEqual(self.job.status["registration_started"], outcome.get("submitted") is not False)
 
     def test_local_captcha_failure_is_not_registration_rejection(self):
         self.job.cfg.update(browser_mode="local",egress_mode="local",local_browser_proxy="http://127.0.0.1:7897",captcha_solver="local-first")

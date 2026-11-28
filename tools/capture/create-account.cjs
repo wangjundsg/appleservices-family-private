@@ -234,6 +234,14 @@ const birthYear = String(arg("birth-year", "1992"));
 // fail-<reason>-<timestamp>.png/.txt: a failed attempt with no evidence is a
 // wasted number.
 let livePage = null;
+let ownedBrowser = null;
+async function closeOwnedBrowser() {
+  if (!ownedBrowser) return;
+  let timer;
+  try {
+    await Promise.race([ownedBrowser.close().catch(() => {}), new Promise(resolve => {timer = setTimeout(resolve, 3000);})]);
+  } finally {clearTimeout(timer);}
+}
 async function captureEvidence(page, file, options = {}) {
   // Every evidence path, including exceptions, masks credentials and OTP inputs.
   const mask = page.frames().map(frame => frame.locator("input"));
@@ -1202,6 +1210,7 @@ async function clickContinue(page, frame, tag = "") {
   const browser = attachMode
     ? await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`, { timeout: 30000 })
     : await chromium.launch(launchOpts);
+  if (!attachMode) ownedBrowser = browser;
 
   // What actually ran goes next to what was intended. The engine label is
   // rebuilt from the UA that goes out (never hand-typed), and the exit address
@@ -1380,8 +1389,10 @@ async function clickContinue(page, frame, tag = "") {
   page.on("request",req=>{
     if(nativeMode && /\/account\/validation\/appleid(?:\?|$)/.test(req.url()))pendingEmailValidations.add(req);
     if(nativeMode && /\/captcha(?:\?|$)/.test(req.url()))pendingCaptchaRequests.add(req);
-    if(req.method()==="POST" && ["/account","/account/validate"].includes(new URL(req.url()).pathname))
+    if(req.method()==="POST" && ["/account","/account/validate"].includes(new URL(req.url()).pathname)) {
+      submissionMayHaveLanded = true;
       creationRequests.set(req,++requestVersion);
+    }
     if(nativeMode && req.method()==="POST" && /^\/account(?:\/|$)/.test(new URL(req.url()).pathname))
       nativePosts.set(req,++nativePostVersion);
   });
@@ -1474,15 +1485,9 @@ async function clickContinue(page, frame, tag = "") {
   };
 
   const signupURL = "https://account.apple.com/account" + (pageLocale ? "?localang=" + pageLocale.replace("-", "_") : "");
-  await page.goto(signupURL, { waitUntil: "domcontentloaded", timeout: 90000 });
-  // A residential exit can take 20-40s to hand over the widget iframe.
-  await page.waitForSelector('iframe[src*="widget/account"]', { timeout: 90000 }).catch(() => {});
-  let frame = null;
-  for (let i = 0; i < 30 && !frame; i += 1) {
-    frame = await widgetFrame(page);
-    if (!frame) await sleep(2000);
-  }
-  if (!frame) throw new Error("widget frame missing");
+  const initialLoadMs = Math.min(90000, leaseDeadline - Date.now());
+  note("step", {at: "page-loading", timeout_ms: initialLoadMs});
+  const frame = await mech.loadSignupPage(page, {url: signupURL, timeoutMs: initialLoadMs});
   if (pageLocale) {
     const language = await frame.locator("html").getAttribute("lang");
     note("step", {at: "page-locale", requested: pageLocale, observed: language});
@@ -2077,13 +2082,13 @@ async function clickContinue(page, frame, tag = "") {
 
   // The terminal record goes last so a reader of run.jsonl sees the same state
   // this process exits with.
-  note("final", { state: finalState, evidence: clip(finalEvidence, 160), elapsed_ms: Date.now() - startedAt });
+  note("final", { state: finalState, submitted: submissionMayHaveLanded, evidence: clip(finalEvidence, 160), elapsed_ms: Date.now() - startedAt });
   writeRunLog();
   // A close failure must not turn a recorded outcome into a second final record.
   // In attach mode the window belongs to Roxy: closing it is /browser/close's
   // job, never this driver's (REGISTRAR-CONTRACT §1.5).
-  if (!attachMode) await browser.close().catch(() => {});
-  console.log(JSON.stringify({ state: finalState, evidence: finalEvidence, outdir }));
+  await closeOwnedBrowser();
+  console.log(JSON.stringify({ state: finalState, submitted: submissionMayHaveLanded, evidence: finalEvidence, outdir }));
   process.exit(exitCode);
 })().catch(async (e) => {
   // Review B4: a thrown error is a named outcome too — `unknown` when a submit
@@ -2097,9 +2102,12 @@ async function clickContinue(page, frame, tag = "") {
   if (state === "failed" && phoneSubmitted && /detached|target page, context or browser has been closed|navigat/i.test(String(e && e.message))) {
     state = "likely_success";
   }
-  if (state === "failed" && submissionMayHaveLanded && !(e && e.state === "failed")) state = "unknown";
+  if (state === "failed" && submissionMayHaveLanded && !/^hard-reject(?::\d+)?$/.test(e?.evidence || "")) state = "unknown";
   note("error", { error: clip(e && e.message ? e.message : e, 300) });
-  await failShot(`${state}_${clip((e && e.evidence) || (e && e.message) || "error", 40)}`);
+  // A loading failure must not start another browser wait for diagnostics.
+  if (!/^page_load_(timeout|failed)$/.test(e?.evidence || "")) {
+    await failShot(`${state}_${clip((e && e.evidence) || (e && e.message) || "error", 40)}`);
+  }
   await autoRefund(state);
   // D: a thrown exit names its reason too. The throw sites that know their
   // category carry `err.closeReason`; everything else is derived from the state
@@ -2108,11 +2116,12 @@ async function clickContinue(page, frame, tag = "") {
     (e && e.closeReason) || mech.closeReasonFor({ state, evidence: (e && e.evidence) || "", message: (e && e.message) || "" }),
     { state, evidence: clip((e && e.evidence) || "", 120) },
   );
-  note("final", { state, evidence: clip((e && e.evidence) || "", 160), elapsed_ms: Date.now() - startedAt });
+  note("final", { state, evidence: clip((e && e.evidence) || "", 160), submitted: submissionMayHaveLanded, elapsed_ms: Date.now() - startedAt });
   writeRunLog();
   // A usage refusal prints its structured report (the same JSON the caller
   // branched on before); everything else prints the state and the complaint.
   if (e && e.report) console.error(JSON.stringify(e.report));
-  else console.error(JSON.stringify({ state, error: clip(e && e.message ? e.message : e, 200), evidence: clip((e && e.evidence) || "", 160) }));
+  else console.error(JSON.stringify({ state, submitted: submissionMayHaveLanded, error: clip(e && e.message ? e.message : e, 200), evidence: clip((e && e.evidence) || "", 160) }));
+  await closeOwnedBrowser();
   process.exit(flow.EXIT_CODES[state]);
 });
